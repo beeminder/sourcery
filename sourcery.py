@@ -42,7 +42,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "4.4.0"
+VERSION = "4.5.0"
 UTC = dt.timezone.utc
 
 
@@ -385,6 +385,8 @@ def claude_origin_is_machine(record: Mapping[str, Any], path: Path, line_number:
         return False
     if kind in CLAUDE_MACHINE_ORIGINS:
         return True
+    # TODO: Says this record has an unrecognized origin kind and to add it
+    # deliberately to CLAUDE_HUMAN_ORIGINS or CLAUDE_MACHINE_ORIGINS.
     raise UserError(
         f"Origo recordi ignota: {kind!r} in {path}:{line_number}\n"
         "Adde hanc originem consulto in CLAUDE_HUMAN_ORIGINS vel CLAUDE_MACHINE_ORIGINS."
@@ -426,6 +428,8 @@ def claude_denial_text(result: str, path: Path, line_number: int) -> str:
             return unquoted
     if any(tail in result for tail in CLAUDE_UNTYPED_TAILS):
         return ""
+    # TODO: Says a tool denial is in an unrecognized form and to add it
+    # deliberately to CLAUDE_TYPED_MARKERS or CLAUDE_UNTYPED_TAILS.
     raise UserError(
         f"Recusatio in forma ignota: {path}:{line_number}\n"
         "Adde hanc formam consulto in CLAUDE_TYPED_MARKERS vel CLAUDE_UNTYPED_TAILS."
@@ -467,6 +471,9 @@ def claude_recovered(record: Mapping[str, Any], path: Path, line_number: int) ->
                 ballots.append(Ballot(question=prompt_text, options=labels, picked=picked))
             return "\n\n".join(typed), tuple(ballots)
         case {"questions": _}:
+            # TODO: Says question answers are in an unrecognized form — the
+            # answers structure seems to have changed and claude_recovered
+            # needs updating.
             raise UserError(
                 f"Responsa interrogationum in forma ignota: {path}:{line_number}\n"
                 "Structura answers mutata videtur; claude_recovered renovandum est."
@@ -507,8 +514,6 @@ def claude_reply_blocks(content: Any) -> list[str]:
     ]
 
 
-# TODO: Identify a pasted image stored in an unrecognized form rather than
-# silently dropping it.
 def claude_images(content: Any, path: Path, line_number: int) -> tuple[str, ...]:
     if not isinstance(content, list):
         return ()
@@ -520,6 +525,7 @@ def claude_images(content: Any, path: Path, line_number: int) -> tuple[str, ...]
             media = source.get("media_type")
             data = source.get("data")
             if source.get("type") != "base64" or not isinstance(media, str) or not isinstance(data, str):
+                # TODO: Says a pasted image is stored in an unrecognized form.
                 raise UserError(f"Imago in forma ignota: {path}:{line_number}")
             uris.append(f"data:{media};base64,{data}")
     return tuple(uris)
@@ -558,6 +564,8 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
             if mode == "task-notification":
                 continue  # background-task wakeup queued as a command
             if mode != "prompt":
+                # TODO: Says a queued command has an unrecognized mode and to
+                # add it deliberately in claude_exchanges.
                 raise UserError(
                     f"Modus queued_command ignotus: {mode!r} in {path}:{line_number}\n"
                     "Adde hunc modum consulto in claude_exchanges."
@@ -569,10 +577,12 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
             continue
         message = record.get("message")
         if attachment is None and not isinstance(message, dict):
+            # TODO: Says this record has no message object.
             raise UserError(f"Recordum message obiectum non habet: {path}:{line_number}")
         if not under_dir(record.get("cwd"), repo):
             continue
         if "timestamp" not in record:
+            # TODO: Says this record has no timestamp.
             raise UserError(f"Tempus deest in recordo: {path}:{line_number}")
         timestamp = parse_time(record["timestamp"])
         session = str(record.get("sessionId") or path.stem)
@@ -646,6 +656,9 @@ def codex_prompt(message: str, path: Path) -> str:
         return message
     _, found, request = message.partition(CODEX_REQUEST_HEADING)
     if not found:
+        # TODO: Says an IDE context wrapper was found without its request
+        # heading — the Codex transcript format seems to have changed, so
+        # inspect the file.
         raise UserError(
             f"Involucrum IDE sine rogatione inventum est: {path}\n"
             "Forma transcripti Codex mutata videtur; fasciculum inspice."
@@ -653,8 +666,6 @@ def codex_prompt(message: str, path: Path) -> str:
     return request.removesuffix("\n")
 
 
-# TODO: Identify a session whose source marker is unrecognized so new Codex
-# session kinds are classified deliberately instead of guessed at.
 def codex_include_session(payload: Mapping[str, Any], path: Path) -> bool:
     source = payload.get("source")
     originator = payload.get("originator")
@@ -666,18 +677,20 @@ def codex_include_session(payload: Mapping[str, Any], path: Path) -> bool:
         case "vscode" | "cli" | "exec" | None:
             return True
         case _:
+            # TODO: Says this Codex session has an unrecognized source marker
+            # and to add it deliberately in codex_include_session.
             raise UserError(
                 f"Fons sessionis Codex ignotus: {source!r} in {path}\n"
                 "Adde hunc fontem consulto in codex_include_session."
             )
 
 
-# TODO: Identify a pasted image stored in an unrecognized form rather than
-# silently dropping it; Codex stores them as ready-made data: URIs.
+# Codex stores pasted images as ready-made data: URIs.
 def codex_images(payload: Mapping[str, Any], path: Path, line_number: int) -> tuple[str, ...]:
     images = payload.get("images") or []
     for image in images:
         if not (isinstance(image, str) and image.startswith("data:")):
+            # TODO: Says a pasted image is stored in an unrecognized form.
             raise UserError(f"Imago in forma ignota: {path}:{line_number}")
     return tuple(images)
 
@@ -732,8 +745,10 @@ def codex_exchanges(path: Path, repo: Path) -> list[Exchange]:
                     continue
                 text = payload.get("message")
                 if not isinstance(text, str):
+                    # TODO: Says this message record has no text.
                     raise UserError(f"Nuntius sine textu: {path}:{line_number}")
                 if "timestamp" not in record:
+                    # TODO: Says this record has no timestamp.
                     raise UserError(f"Tempus deest in recordo: {path}:{line_number}")
                 timestamp = parse_time(record["timestamp"])
                 if kind == "user_message":
@@ -773,17 +788,18 @@ VSCODE_MUTE_KINDS = frozenset({
 COPILOT_CANNED = re.compile(r'@\w+ Enable: "|@workspace /explain ')
 
 
-# TODO: Identify a pasted image stored in an unrecognized form rather than
-# silently dropping it; Copilot serializes the raw bytes as an object with
-# numeric-string keys plus a mimeType.
+# Copilot serializes pasted-image bytes as an object with numeric-string
+# keys plus a mimeType.
 def copilot_image_uri(variable: Mapping[str, Any], path: Path) -> str:
     value = variable.get("value")
     mime = variable.get("mimeType")
     if not (isinstance(value, dict) and isinstance(mime, str)):
+        # TODO: Says a pasted image is stored in an unrecognized form.
         raise UserError(f"Imago in forma ignota: {path}")
     try:
         data = bytes(value[str(i)] for i in range(len(value)))
     except (KeyError, TypeError, ValueError) as exc:
+        # TODO: Says a pasted image is stored in an unrecognized form.
         raise UserError(f"Imago in forma ignota: {path}\n{exc}") from exc
     return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
@@ -799,22 +815,24 @@ def vscode_reference_name(item: Mapping[str, Any]) -> str:
     return Path(fs_path).name if isinstance(fs_path, str) else ""
 
 
-# TODO: Identify an unrecognized response-item kind so new VS Code chat
-# machinery is classified deliberately instead of silently dropped.
 def vscode_reply(response: Any, path: Path) -> str:
     parts: list[str] = []
     for item in response if isinstance(response, list) else []:
         if not isinstance(item, dict):
+            # TODO: Says a response item is not a JSON object.
             raise UserError(f"Membrum responsi obiectum non est: {path}")
         kind = item.get("kind")
         if kind is None:
             value = item.get("value")
             if not isinstance(value, str):
+                # TODO: Says a response item has no text.
                 raise UserError(f"Membrum responsi sine textu: {path}")
             parts.append(value)
         elif kind == "inlineReference":
             parts.append(vscode_reference_name(item))
         elif kind not in VSCODE_MUTE_KINDS:
+            # TODO: Says a response item has an unrecognized kind and to add
+            # it deliberately in VSCODE_MUTE_KINDS or vscode_reply.
             raise UserError(
                 f"Genus membri responsi ignotum: {kind!r} in {path}\n"
                 "Adde hoc genus consulto in VSCODE_MUTE_KINDS vel vscode_reply."
@@ -822,9 +840,8 @@ def vscode_reply(response: Any, path: Path) -> str:
     return "".join(parts)
 
 
-# TODO: Identify a malformed VS Code mutation entry instead of repairing or
-# skipping it; sessions are stored as a kind-0 snapshot followed by
-# set (1), list-splice (2), and delete (3) mutations.
+# Sessions are stored as a kind-0 snapshot followed by set (1),
+# list-splice (2), and delete (3) mutations.
 def replay_mutations(path: Path) -> Any:
     state: Any = None
     for line_number, entry in read_jsonl(path):
@@ -834,6 +851,7 @@ def replay_mutations(path: Path) -> Any:
             continue
         keys = entry.get("k")
         if state is None or not isinstance(keys, list) or keys == []:
+            # TODO: Says a VS Code session mutation is malformed.
             raise UserError(f"Mutatio VS Code malformata: {path}:{line_number}")
         try:
             target = state
@@ -855,8 +873,10 @@ def replay_mutations(path: Path) -> Any:
                 case 3:
                     del target[last]
                 case _:
+                    # TODO: Says a mutation has an unrecognized kind.
                     raise UserError(f"Genus mutationis ignotum: {kind!r} in {path}:{line_number}")
         except (KeyError, IndexError, TypeError) as exc:
+            # TODO: Says a VS Code session mutation cannot be applied.
             raise UserError(f"Mutatio VS Code non applicari potest: {path}:{line_number}\n{exc}") from exc
     return state
 
@@ -864,43 +884,51 @@ def replay_mutations(path: Path) -> Any:
 def vscode_state(path: Path) -> dict[str, Any]:
     state = read_json(path) if path.suffix == ".json" else replay_mutations(path)
     if not isinstance(state, dict):
+        # TODO: Says this session doesn't reconstruct to a final object.
         raise UserError(f"Sessio VS Code obiectum finale non habet: {path}")
     return state
 
 
-# TODO: Identify an unsupported session schema version rather than guessing
-# at a changed storage format.
 def vscode_exchanges(path: Path, workspace: tuple[Path, ...], repo: Path) -> list[Exchange]:
     inside = tuple(root for root in workspace if under_dir(str(root), repo))
     if inside == ():
         return []
     if len(inside) != len(workspace):
+        # TODO: Says a multi-root workspace straddles the project boundary,
+        # and to open the project as a plain folder or export this dialog
+        # by hand.
         raise UserError(
             f"Workspace multiplex intra et extra inceptum est: {path}\n"
             "Aperi inceptum ut folder simplex, vel exporta hunc dialogum manu."
         )
     state = vscode_state(path)
     if state.get("version") != 3:
+        # TODO: Says this session has an unrecognized schema version — the
+        # storage format seems to have changed and the script needs updating.
         raise UserError(
             f"Versio sessionis VS Code ignota: {state.get('version')!r} in {path}\n"
             "Forma repositi mutata videtur; scriptum renovandum est."
         )
     requests = state.get("requests")
     if not isinstance(requests, list):
+        # TODO: Says this session has no requests list.
         raise UserError(f"Sessio VS Code indicem requests non habet: {path}")
     session = str(state.get("sessionId") or path.stem)
     exchanges: list[Exchange] = []
     for request in requests:
         if not isinstance(request, dict):
+            # TODO: Says a requests entry is not a JSON object.
             raise UserError(f"Elementum requests obiectum non est: {path}")
         message = request.get("message")
         prompt = message.get("text") if isinstance(message, dict) else None
         if not isinstance(prompt, str):
+            # TODO: Says a request has no text in message.text.
             raise UserError(f"Rogatio VS Code textum in message.text non habet: {path}")
         prompt = cut_canned_tail(prompt)
         if prompt == "" or request.get("confirmation") is not None or COPILOT_CANNED.match(prompt):
             continue
         if "timestamp" not in request:
+            # TODO: Says a request has no timestamp.
             raise UserError(f"Tempus deest in rogatione: {path}")
         model = request.get("modelId")
         result = request.get("result")
@@ -1022,22 +1050,24 @@ def strip_trailing_commas(text: str) -> str:
     return "".join(out)
 
 
-# TODO: Identify an unreadable or structurally invalid .code-workspace file
-# and the folder entry that prevents repository attribution.
 def read_workspace_file(path: Path) -> tuple[Path, ...]:
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError as exc:
+        # TODO: Says this .code-workspace file cannot be read.
         raise UserError(f"Fasciculus workspace legi non potest: {path}\n{exc}") from exc
     try:
         data = json.loads(strip_jsonc(raw))
     except json.JSONDecodeError as exc:
+        # TODO: Says this .code-workspace file is invalid.
         raise UserError(f"Fasciculus workspace invalidus est: {path}\n{exc}") from exc
     if not isinstance(data, dict) or not isinstance(data.get("folders"), list):
+        # TODO: Says this .code-workspace file has no folders list.
         raise UserError(f"Fasciculus workspace indicem folders non habet: {path}")
     roots: list[Path] = []
     for entry in data["folders"]:
         if not isinstance(entry, dict):
+            # TODO: Says a folders entry is not a JSON object.
             raise UserError(f"Elementum folders obiectum non est: {path}")
         raw_path = entry.get("path")
         if not isinstance(raw_path, str):
@@ -1050,14 +1080,13 @@ def read_workspace_file(path: Path) -> tuple[Path, ...]:
     return tuple(roots)
 
 
-# TODO: Identify malformed VS Code workspace metadata rather than guessing
-# which repository owns a chat session.
 def workspace_roots(storage: Path) -> tuple[Path, ...]:
     metadata = storage / "workspace.json"
     if not metadata.exists():
         return ()
     data = read_json(metadata)
     if not isinstance(data, dict):
+        # TODO: Says workspace.json is not a JSON object.
         raise UserError(f"workspace.json obiectum non est: {metadata}")
     folder = data.get("folder")
     if isinstance(folder, str):
@@ -1067,6 +1096,7 @@ def workspace_roots(storage: Path) -> tuple[Path, ...]:
     if isinstance(pointer, str):
         decoded = decode_file_uri(pointer)
         return read_workspace_file(Path(decoded).expanduser().resolve()) if decoded is not None else ()
+    # TODO: Says workspace.json has neither a folder nor a workspace entry.
     raise UserError(f"workspace.json nec folder nec workspace habet: {metadata}")
 
 
@@ -1154,12 +1184,12 @@ def weave(exchanges: Iterable[Exchange]) -> list[Exchange]:
     return sorted(unique.values(), key=lambda e: (e.timestamp, e.provider, e.session, e.prompt))
 
 
-# TODO: Identify a configured transcript root that exists but is not a
-# directory.
 def require_dir(root: Path) -> bool:
     if not root.exists():
         return False
     if not root.is_dir():
+        # TODO: Says a configured transcript root exists but is not a
+        # directory.
         raise UserError(f"Radix transcriptuum directorium non est: {root}")
     return True
 
@@ -1340,6 +1370,15 @@ main {
   padding: 5rem 0 8rem;
 }
 .masthead { padding-bottom: 2rem; }
+.generator {
+  margin: 0 0 1.1rem;
+  font-family: var(--sans);
+  font-size: .68rem;
+  letter-spacing: .06em;
+  color: var(--faint);
+}
+.generator a { color: inherit; text-decoration: none; }
+.generator a:hover { color: var(--accent); text-decoration: underline; }
 h1 {
   margin: 0;
   font-size: clamp(1.9rem, 5.5vw, 2.9rem);
@@ -1436,9 +1475,9 @@ summary:hover { color: var(--muted); }
 /* INVIOLABLE: machine-generated prose renders only inside a .machine
    container, in the phosphor-terminal style — monospace green on
    near-black, in both color schemes — for maximal distinction from the
-   human's serif. The containers are .reply (agent replies), .asked
-   (questions the agent posed), and .chosen (option labels the agent wrote
-   and the human clicked). */
+   human's serif. The containers are .reply (agent replies) and .ballot
+   (multiple-choice questions the agent posed and the option labels it
+   wrote, including the ones the human picked). */
 .machine {
   --m-bg: #060d08;
   --m-ink: #56dd7f;
@@ -1531,14 +1570,9 @@ def elapsed_text(seconds: float) -> str:
     return "".join(f"{n}{unit}" for n, unit in ((hours, "h"), (minutes, "m"), (secs, "s")) if n) or "0s"
 
 
-# TODO: The deck line under the title states the number of human prompts and
-# the date range. The collapsed line under a prompt with no recorded reply
-# says the response was not found. The "thought for 5m27s" phrase (exact copy
-# specified by the human) conveys how long the agent worked on the reply.
-# The controls line lets the reader open or close every reply at once:
-# "aperi omnia" = open all, "claude omnia" = close all. All other rendered
-# text (repository name/path/remote, provider, model, timestamps, weekdays,
-# prompts, replies) is source data.
+# All rendered copy here is human-written or human-specified; everything
+# else on the page (repository name/path/remote, provider, model, effort,
+# timestamps, weekdays, prompts, ballots, replies) is source data.
 def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
     assert exchanges, "render() requires at least one exchange"
     locals_ = [e.timestamp.astimezone() for e in exchanges]
@@ -1557,17 +1591,16 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
             current_day = day
         model = f' <span class="model">{html.escape(exchange.model)}</span>' if exchange.model else ""
         effort = f' <span class="effort">({html.escape(exchange.effort)})</span>' if exchange.effort else ""
-        # TODO: The final exchange of the export is the only one that can
-        # plausibly still be in flight, so an empty reply there says the
-        # response was still generating at capture time (exact copy specified
-        # by the human); an empty reply anywhere else says there is none.
+        # The final exchange of the export is the only one that can plausibly
+        # still be in flight, so an empty reply there gets the still-
+        # generating note; an empty reply anywhere else means there is none.
         if exchange.reply == "" and number == count:
             reply = (
                 '<div class="reply machine empty">'
                 "<p>Response still generating when this transcript was captured</p></div>"
             )
         elif exchange.reply == "":
-            reply = '<div class="reply machine empty" lang="la"><p>No response.</p></div>'
+            reply = '<div class="reply machine empty"><p>No response.</p></div>'
         else:
             reply = f'<div class="reply machine">{markdown_html(exchange.reply)}</div>'
         thought = (
@@ -1633,10 +1666,11 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
 <body>
 <main>
 <header class="masthead">
+  <p class="generator"><a href="https://github.com/beeminder/sourcery">generated by sourcery</a></p>
   <h1>{title}</h1>
-  <p class="deck" lang="la">{count} {noun} · {range_text}</p>
+  <p class="deck">{count} {noun} · {range_text}</p>
   <p class="repo-path">{where}</p>
-  <p class="controls" lang="la"><a href="#" data-omnia="open">expand all</a> · <a href="#" data-omnia="close">collapse all</a></p>
+  <p class="controls"><a href="#" data-omnia="open">expand all</a> · <a href="#" data-omnia="close">collapse all</a></p>
 </header>
 {body}
 </main>
@@ -1656,17 +1690,19 @@ for (const control of document.querySelectorAll("[data-omnia]"))
 # ----------------------------------------------------------------------- exit
 
 
-# TODO: Explain that output is never overwritten and its parent directory
-# must already exist; write atomically so a partial document is never left
-# behind.
+# Output is written atomically so a partial document is never left behind.
 def write_output(path: Path, page: str) -> None:
     target = path.resolve()
     if target.exists():
+        # TODO: Says the output file already exists and to pick another path
+        # with --output or deliberately remove the old file.
         raise UserError(
             f"Fasciculus iam exsistit: {target}\n"
             "Elige aliam viam cum --output, vel fasciculum veterem consulto remove."
         )
     if not target.parent.is_dir():
+        # TODO: Says the output directory doesn't exist and to deliberately
+        # create it, then rerun.
         raise UserError(
             f"Directorium output non exsistit: {target.parent}\n"
             "Crea directorium consulto, deinde iterum curre."
@@ -1681,11 +1717,16 @@ def write_output(path: Path, page: str) -> None:
         try:
             os.link(temporary, target)
         except FileExistsError as exc:
+            # TODO: Says the output file appeared while writing, nothing was
+            # overwritten, and to pick another path with --output.
             raise UserError(
                 f"Fasciculus inter scribendum creatus est: {target}\n"
                 "Fasciculus novus non superscriptus est; aliam viam cum --output elige."
             ) from exc
         except OSError as exc:
+            # TODO: Says the file cannot be written because the filesystem
+            # doesn't support hard links, and to pick another path with
+            # --output.
             raise UserError(
                 f"Fasciculus scribi non potest: {target}\n{exc}\n"
                 "Systema fasciculorum vincula dura non fert; aliam viam cum --output elige."
@@ -1696,10 +1737,12 @@ def write_output(path: Path, page: str) -> None:
         raise
 
 
-# TODO: Explain exactly where transcript roots were sought and how to
-# configure nonstandard roots when no prompt belongs to the repository.
 def no_exchanges_error(repo: Path, roots: Roots) -> UserError:
     sought = "\n".join(f"  {path}" for path in roots.all())
+    # TODO: Says no prompts were attributed to this project, lists the
+    # transcript roots that were searched, explains the environment
+    # variables for nonstandard locations, and notes that VS Code chats
+    # attribute correctly only when the project is opened as a plain folder.
     return UserError(
         f"Nullae rogationes huic incepto attributae sunt: {repo}\n\n"
         f"Radices inspectae:\n{sought}\n\n"
@@ -1709,8 +1752,6 @@ def no_exchanges_error(repo: Path, roots: Roots) -> UserError:
     )
 
 
-# TODO: Report success with the exact output path and the number of exported
-# prompts; report actionable failures without leaving a partial document.
 def run(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     environment = os.environ if env is None else env
@@ -1723,8 +1764,11 @@ def run(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None)
             raise no_exchanges_error(repo, roots)
         write_output(options.output, render(repo, exchanges, repo_remote(repo)))
         output = options.output.resolve()
+        # TODO: Reports success with the output path and the number of
+        # exported prompts.
         print(f"Scriptum: {output}\nRogationes: {len(exchanges)}")
         if options.open_after and not webbrowser.open(output.as_uri()):
+            # TODO: Says the browser refused to open the file.
             raise UserError(f"Navigatrum fasciculum aperire recusavit: {output}")
         return 0
     except ExitMessage as exc:
