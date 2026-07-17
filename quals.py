@@ -399,8 +399,14 @@ class ClaudeQuals(Fixture):
         ]
         got = ace.claude_exchanges(self.path(records), self.repo)
         self.assertEqual(
-            [(e.prompt, e.asked, e.chosen) for e in got],
-            [("my own typed answer", "Q1\n\nQ2", "Yes (Recommended)")],
+            [(e.prompt, e.ballots) for e in got],
+            [(
+                "my own typed answer",
+                (
+                    ace.Ballot("Q1", ("Yes (Recommended)",), ("Yes (Recommended)",)),
+                    ace.Ballot("Q2", ("A",), ()),
+                ),
+            )],
         )
 
     def test_pure_click_answer_becomes_an_exchange(self):
@@ -419,12 +425,44 @@ class ClaudeQuals(Fixture):
         ]
         got = ace.claude_exchanges(self.path(records), self.repo)
         self.assertEqual(
-            [(e.prompt, e.asked, e.chosen, e.reply) for e in got],
-            [("", "Q1", "Delete it", "Deleting.")],
+            [(e.prompt, e.ballots, e.reply) for e in got],
+            [("", (ace.Ballot("Q1", ("Delete it",), ("Delete it",)),), "Deleting.")],
         )
+
+    def test_multiselect_comma_joined_labels_detected_as_clicks(self):
+        cwd = str(self.repo)
+        result = {
+            "questions": [{
+                "question": "Q1",
+                "header": "h",
+                "options": [{"label": "Tutorial"}, {"label": "Sandbox"}, {"label": "Version tag"}],
+            }],
+            "answers": {"Q1": "Tutorial, Sandbox"},
+        }
+        records = [
+            cu(
+                [{"type": "tool_result", "tool_use_id": "t1", "content": "answered"}],
+                cwd=cwd,
+                toolUseResult=result,
+            ),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual(got[0].ballots[0].picked, ("Tutorial", "Sandbox"))
+        self.assertEqual(got[0].prompt, "")
 
     def test_missing_timestamp_fails_loudly(self):
         path = self.path([cu("go", ts=None, cwd=str(self.repo))])
+        with self.assertRaises(ace.UserError):
+            ace.claude_exchanges(path, self.repo)
+
+    def test_live_capture_tolerates_truncated_final_line_only(self):
+        path = self.tmp / "claude" / "p1" / "live.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        good = json.dumps(cu("hi", cwd=str(self.repo)))
+        path.write_text(good + '\n{"type": "user", "mess', encoding="utf-8")
+        got = ace.claude_exchanges(path, self.repo)
+        self.assertEqual([e.prompt for e in got], ["hi"])
+        path.write_text('not json\n' + good + "\n", encoding="utf-8")
         with self.assertRaises(ace.UserError):
             ace.claude_exchanges(path, self.repo)
 
@@ -873,22 +911,27 @@ class RenderQuals(Fixture):
         self.assertNotIn("Response still generating", page)
 
     def test_machine_prose_only_inside_machine_containers(self):
+        ballot = ace.Ballot("Q?", ("A label", "B label"), ("A label",))
         page = ace.render(
             self.repo,
-            [exchange(prompt="typed words", reply="agent words", asked="Q?", chosen="A label")],
+            [exchange(prompt="typed words", reply="agent words", ballots=(ballot,))],
         )
         self.assertIn('<div class="reply machine">', page)
-        self.assertIn('<div class="asked machine">Q?</div>', page)
-        self.assertIn('<div class="chosen machine">✓ A label</div>', page)
+        self.assertIn('<div class="ballot machine">', page)
+        self.assertIn('<div class="ballot-question">Q?</div>', page)
+        self.assertIn('<div class="option picked">✓ A label</div>', page)
+        self.assertIn('<div class="option">· B label</div>', page)
         # The human's prompt must not sit inside any machine container.
         pre = page[page.index('<pre class="prompt">') : page.index("</pre>")]
         self.assertIn("typed words", pre)
         self.assertNotIn("machine", pre)
 
     def test_click_only_answer_renders_without_prompt_block(self):
-        page = ace.render(self.repo, [exchange(prompt="", asked="Q?", chosen="Delete it")])
+        ballot = ace.Ballot("Q?", ("Delete it", "Keep it"), ("Delete it",))
+        page = ace.render(self.repo, [exchange(prompt="", ballots=(ballot,))])
         self.assertNotIn('<pre class="prompt">', page)
-        self.assertIn('✓ Delete it', page)
+        self.assertIn("✓ Delete it", page)
+        self.assertIn("· Keep it", page)
 
     def test_reply_markdown_subset(self):
         html = ace.markdown_html("intro `x` **b** [l](https://e.com)\n\n```py\nx = 1 < 2\n```\n- item")
@@ -974,6 +1017,15 @@ class CliQuals(Fixture):
         code, _, _ = self.run_cli(["--repo", str(self.repo), "--output", str(out_path)])
         self.assertEqual(code, 2)
         self.assertEqual(out_path.read_text(encoding="utf-8"), "precious")
+
+    def test_unlinkable_filesystem_reported_not_tracebacked(self):
+        original = ace.os.link
+        ace.os.link = lambda src, dst: (_ for _ in ()).throw(OSError("no hardlinks"))
+        try:
+            with self.assertRaises(ace.UserError):
+                ace.write_output(self.tmp / "out.html", "page")
+        finally:
+            ace.os.link = original
 
     def test_no_exchanges_error_lists_roots(self):
         code, _, err = self.run_cli(["--repo", str(self.repo), "--output", str(self.tmp / "o.html")])

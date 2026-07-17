@@ -42,7 +42,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "4.2.0"
+VERSION = "4.4.0"
 UTC = dt.timezone.utc
 
 
@@ -52,6 +52,17 @@ class UserError(RuntimeError):
 
 class ExitMessage(RuntimeError):
     """A successful informational exit such as --help or --version."""
+
+
+@dataclasses.dataclass(frozen=True)
+class Ballot:
+    """One answered multiple-choice question: the agent's question and
+    option labels (machine prose) and which label(s) the human picked —
+    empty when the human typed their own answer instead."""
+
+    question: str
+    options: tuple[str, ...]
+    picked: tuple[str, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -66,8 +77,7 @@ class Exchange:
     effort: str = ""
     images: tuple[str, ...] = ()  # data: URIs of images pasted with the prompt
     elapsed: float = 0.0  # seconds the agent worked on the reply; 0 = unknown
-    asked: str = ""  # multiple-choice question(s) the agent posed (machine prose)
-    chosen: str = ""  # option label(s) the human clicked (machine prose, human-endorsed)
+    ballots: tuple[Ballot, ...] = ()  # multiple-choice questions the human answered
 
 
 @dataclasses.dataclass(frozen=True)
@@ -81,8 +91,7 @@ class Message:
     effort: str = ""
     images: tuple[str, ...] = ()
     active: float = 0.0  # seconds the agent worked to produce this message
-    asked: str = ""
-    chosen: str = ""
+    ballots: tuple[Ballot, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -303,6 +312,13 @@ def read_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
             try:
                 record = json.loads(line)
             except json.JSONDecodeError as exc:
+                # A line with no trailing newline is necessarily the file's
+                # last, and an unparseable one is a photograph of an append
+                # still in progress (live capture), not corruption: the
+                # complete prefix is the transcript. Damage mid-file is real
+                # corruption and stays loud.
+                if not line.endswith("\n"):
+                    return
                 raise UserError(
                     f"JSONL invalidum: {path}:{line_number}\n{exc}\n"
                     "Claude, Codex, et VS Code claude; deinde iterum curre."
@@ -407,41 +423,47 @@ def claude_denial_text(result: str, path: Path, line_number: int) -> str:
     )
 
 
-def claude_recovered(record: Mapping[str, Any], path: Path, line_number: int) -> tuple[str, str, str]:
-    """Return (typed, asked, chosen): the human's typed words, the question(s)
-    the agent posed, and the option label(s) the human clicked. An answer
-    matching an option label exactly is a click; anything else is typing."""
+def claude_recovered(record: Mapping[str, Any], path: Path, line_number: int) -> tuple[str, tuple[Ballot, ...]]:
+    """Return (typed, ballots): the human's typed words plus one Ballot per
+    answered multiple-choice question. An answer matching one option label —
+    or a comma-joined list of them (multi-select) — is a click; anything
+    else is typing and the ballot's picked set stays empty."""
     result = record.get("toolUseResult")
     match result:
         case str() if CLAUDE_DENIAL_FAMILY in result:
-            return claude_denial_text(result, path, line_number), "", ""
+            return claude_denial_text(result, path, line_number), ()
         case {"questions": list() as questions, "answers": dict() as answers}:
-            asked: list[str] = []
-            chosen: list[str] = []
+            ballots: list[Ballot] = []
             typed: list[str] = []
             for question in questions:
                 if not isinstance(question, dict):
                     continue
                 prompt_text = question.get("question")
                 answer = answers.get(prompt_text)
-                if not isinstance(answer, str) or answer == "":
+                if not isinstance(prompt_text, str) or not isinstance(answer, str) or answer == "":
                     continue
-                labels = {
-                    option.get("label")
+                labels = tuple(
+                    option["label"]
                     for option in question.get("options") or []
-                    if isinstance(option, dict)
-                }
-                if isinstance(prompt_text, str):
-                    asked.append(prompt_text)
-                (chosen if answer in labels else typed).append(answer)
-            return "\n\n".join(typed), "\n\n".join(asked), "\n\n".join(chosen)
+                    if isinstance(option, dict) and isinstance(option.get("label"), str)
+                )
+                parts = answer.split(", ")
+                if answer in labels:
+                    picked: tuple[str, ...] = (answer,)
+                elif len(parts) > 1 and all(part in labels for part in parts):
+                    picked = tuple(parts)
+                else:
+                    picked = ()
+                    typed.append(answer)
+                ballots.append(Ballot(question=prompt_text, options=labels, picked=picked))
+            return "\n\n".join(typed), tuple(ballots)
         case {"questions": _}:
             raise UserError(
                 f"Responsa interrogationum in forma ignota: {path}:{line_number}\n"
                 "Structura answers mutata videtur; claude_recovered renovandum est."
             )
         case _:
-            return "", "", ""
+            return "", ()
 
 
 def claude_prompt(content: Any) -> str:
@@ -557,15 +579,15 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
             if claude_origin_is_machine(typed_source, path, line_number):
                 continue
             text = claude_prompt(content)
-            asked = chosen = ""
+            ballots: tuple[Ballot, ...] = ()
             if text == "" and attachment is None:
-                text, asked, chosen = claude_recovered(record, path, line_number)
+                text, ballots = claude_recovered(record, path, line_number)
             if CLAUDE_CANNED.fullmatch(text):
                 continue
             images = claude_images(content, path, line_number)
-            if text == "" and images == () and chosen == "":
+            if text == "" and images == () and not any(b.picked for b in ballots):
                 continue
-            item = Message(role, timestamp, text, images=images, asked=asked, chosen=chosen)
+            item = Message(role, timestamp, text, images=images, ballots=ballots)
             pending[session] = 0.0
         else:
             model = message.get("model") if isinstance(message.get("model"), str) else ""
@@ -1078,8 +1100,8 @@ def paired(
                 if (
                     current is not None
                     and reply_parts == []
-                    and (current.prompt, current.images, current.chosen)
-                    == (message.text, message.images, message.chosen)
+                    and (current.prompt, current.images, current.ballots)
+                    == (message.text, message.images, message.ballots)
                 ):
                     continue
                 flush()
@@ -1092,8 +1114,7 @@ def paired(
                     reply="",
                     source=source,
                     images=message.images,
-                    asked=message.asked,
-                    chosen=message.chosen,
+                    ballots=message.ballots,
                 )
                 reply_parts = []
                 model = ""
@@ -1115,10 +1136,10 @@ def paired(
 def weave(exchanges: Iterable[Exchange]) -> list[Exchange]:
     """Merge all providers into one chronology, collapsing exact duplicates
     (resumed or forked sessions replay identical records into new files)."""
-    unique: dict[tuple[str, dt.datetime, str, str, str], Exchange] = {}
+    unique: dict[tuple[str, dt.datetime, str, tuple[Ballot, ...], str], Exchange] = {}
     for exchange in exchanges:
         unique.setdefault(
-            (exchange.provider, exchange.timestamp, exchange.prompt, exchange.chosen, exchange.reply),
+            (exchange.provider, exchange.timestamp, exchange.prompt, exchange.ballots, exchange.reply),
             exchange,
         )
     return sorted(unique.values(), key=lambda e: (e.timestamp, e.provider, e.session, e.prompt))
@@ -1419,26 +1440,23 @@ summary:hover { color: var(--muted); }
   background: var(--m-bg);
   color: var(--m-ink);
 }
-.asked {
+.ballot {
   margin: 1rem 0 .6rem;
-  padding: .6rem .85rem;
+  padding: .65rem .85rem;
   border-radius: .3rem;
-  border-left: 2px solid var(--m-line);
+  font-size: .8rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.ballot-question {
+  color: var(--m-dim);
   font-size: .74rem;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
+  margin-bottom: .35rem;
   white-space: pre-wrap;
 }
-.chosen {
-  margin: 0 0 .6rem;
-  padding: .55rem .85rem;
-  border-radius: .3rem;
-  font-size: .85rem;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-.exchange > .asked:first-child, .exchange > .chosen:first-child { margin-top: 0; }
+.ballot .option { color: var(--m-dim); }
+.ballot .option.picked { color: var(--m-bright); }
+.exchange > .ballot:first-child { margin-top: 0; }
 .reply {
   margin-top: .8rem;
   padding: 1rem 1.15rem;
@@ -1558,15 +1576,16 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
             for uri in exchange.images
         )
         attachments = f'\n<div class="attachments">{attached}</div>' if attached else ""
-        asked = (
-            f'\n<div class="asked machine">{html.escape(exchange.asked, quote=False)}</div>'
-            if exchange.asked
-            else ""
-        )
-        chosen = (
-            f'\n<div class="chosen machine">✓ {html.escape(exchange.chosen, quote=False)}</div>'
-            if exchange.chosen
-            else ""
+        ballots = "".join(
+            '\n<div class="ballot machine">'
+            f'\n<div class="ballot-question">{html.escape(ballot.question, quote=False)}</div>'
+            + "".join(
+                f'\n<div class="option{" picked" if label in ballot.picked else ""}">'
+                f'{"✓" if label in ballot.picked else "·"} {html.escape(label, quote=False)}</div>'
+                for label in ballot.options
+            )
+            + "\n</div>"
+            for ballot in exchange.ballots
         )
         prompt = (
             f'\n<pre class="prompt">{html.escape(exchange.prompt, quote=False)}</pre>'
@@ -1575,7 +1594,7 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
         )
         chunks.append(
             f'<article class="exchange" id="p{number}">'
-            f"{asked}{chosen}{prompt}{attachments}\n"
+            f"{ballots}{prompt}{attachments}\n"
             f"<details>\n<summary>{summary}</summary>\n{reply}\n</details>\n"
             "</article>"
         )
@@ -1596,6 +1615,9 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%F0%9F%90%9D%3C/text%3E%3C/svg%3E">
+<meta name="description" content="{count} {noun} · {range_text}">
+<meta property="og:title" content="{title}">
+<meta property="og:description" content="{count} {noun} · {range_text}">
 <title>{title}</title>
 <style>{CSS}</style>
 </head>
@@ -1653,6 +1675,11 @@ def write_output(path: Path, page: str) -> None:
             raise UserError(
                 f"Fasciculus inter scribendum creatus est: {target}\n"
                 "Fasciculus novus non superscriptus est; aliam viam cum --output elige."
+            ) from exc
+        except OSError as exc:
+            raise UserError(
+                f"Fasciculus scribi non potest: {target}\n{exc}\n"
+                "Systema fasciculorum vincula dura non fert; aliam viam cum --output elige."
             ) from exc
         temporary.unlink()
     except BaseException:
