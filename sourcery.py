@@ -42,7 +42,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "4.5.0"
+VERSION = "4.6.0"
 UTC = dt.timezone.utc
 
 
@@ -78,6 +78,11 @@ class Exchange:
     images: tuple[str, ...] = ()  # data: URIs of images pasted with the prompt
     elapsed: float = 0.0  # seconds the agent worked on the reply; 0 = unknown
     ballots: tuple[Ballot, ...] = ()  # multiple-choice questions the human answered
+    # The prompt's diffstat: repo lines the agent added and deleted before the
+    # next prompt, as recorded by the store (edits made through a shell tool
+    # leave no record, so these are floors; Copilot records none at all).
+    added: int = 0
+    deleted: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -92,6 +97,11 @@ class Message:
     images: tuple[str, ...] = ()
     active: float = 0.0  # seconds the agent worked to produce this message
     ballots: tuple[Ballot, ...] = ()
+    # Repo lines changed by tool calls: on a reply, the lines behind it; on a
+    # prompt, lines orphaned mid-turn by its arrival, which belong to the
+    # exchange this prompt closes.
+    added: int = 0
+    deleted: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -354,6 +364,20 @@ def under_dir(value: Any, root: Path) -> bool:
     return Path(value).expanduser().resolve().is_relative_to(root)
 
 
+# Jargon: to "tally" is to count the lines a recorded edit added and deleted;
+# every tally function returns an (added, deleted) pair.
+def diff_tally(lines: Iterable[str]) -> tuple[int, int]:
+    """Tally unified-diff hunk lines: +/- prefixes mark changed lines; the
+    +++/--- file-header lines of a full diff are not changes."""
+    added = deleted = 0
+    for line in lines:
+        if line.startswith("+") and not line.startswith("+++"):
+            added += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            deleted += 1
+    return (added, deleted)
+
+
 # --------------------------------------------------------------- Claude Code
 
 # Wrapper text items the Claude Code harness injects into the user role:
@@ -531,6 +555,32 @@ def claude_images(content: Any, path: Path, line_number: int) -> tuple[str, ...]
     return tuple(uris)
 
 
+def claude_tally(record: Mapping[str, Any], repo: Path, path: Path, line_number: int) -> tuple[int, int]:
+    """Tally the repo lines this record's tool result changed: edits and
+    overwrites carry structuredPatch hunks, file creations carry the whole
+    new content. Files outside the repo don't count, and neither do denied
+    edits (their toolUseResult is the denial string, and nothing was
+    written)."""
+    result = record.get("toolUseResult")
+    if not isinstance(result, dict) or not under_dir(result.get("filePath"), repo):
+        return (0, 0)
+    hunks = result.get("structuredPatch") or []
+    lines = [line for hunk in hunks for line in hunk.get("lines") or []]
+    if lines:
+        return diff_tally(lines)
+    if result.get("type") == "create":
+        content = result.get("content")
+        if not isinstance(content, str):
+            # TODO: Says a file-creation result has no content text — the
+            # format seems to have changed and claude_tally needs updating.
+            raise UserError(
+                f"Fructus creationis sine textu: {path}:{line_number}\n"
+                "Forma mutata videtur; claude_tally renovandum est."
+            )
+        return (len(content.splitlines()), 0)
+    return (0, 0)
+
+
 def claude_tool_seconds(record: Mapping[str, Any]) -> float:
     result = record.get("toolUseResult")
     result = result if isinstance(result, dict) else {}
@@ -550,6 +600,10 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
     # `pending` accrues per session until the next emitted message.
     previous: dict[str, dt.datetime] = {}
     pending: dict[str, float] = {}
+    # Repo lines added and deleted since the last emitted message, credited
+    # to the next reply — or, when a new prompt arrives first, carried on
+    # that prompt and credited to the exchange it closes.
+    tallies: dict[str, tuple[int, int]] = {}
     for line_number, record in read_jsonl(path):
         role = record.get("type")
         # A message typed while the agent was mid-turn is recorded not as a
@@ -592,6 +646,9 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
             pending[session] = pending.get(session, 0.0) + max(gap, 0.0)
         else:
             pending[session] = pending.get(session, 0.0) + claude_tool_seconds(record)
+            added, deleted = tallies.get(session, (0, 0))
+            grew = claude_tally(record, repo, path, line_number)
+            tallies[session] = (added + grew[0], deleted + grew[1])
         if role == "user":
             typed_source = attachment if attachment is not None else record
             content = attachment.get("prompt") if attachment is not None else message.get("content")
@@ -606,7 +663,9 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
             images = claude_images(content, path, line_number)
             if text == "" and images == () and not any(b.picked for b in ballots):
                 continue
-            item = Message(role, timestamp, text, images=images, ballots=ballots)
+            added, deleted = tallies.pop(session, (0, 0))
+            item = Message(role, timestamp, text, images=images, ballots=ballots,
+                           added=added, deleted=deleted)
             pending[session] = 0.0
         else:
             model = message.get("model") if isinstance(message.get("model"), str) else ""
@@ -616,7 +675,11 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
             if text == "":
                 continue
             effort = record.get("effort") if isinstance(record.get("effort"), str) else ""
-            item = Message(role, timestamp, text, model, effort, active=pending.pop(session, 0.0))
+            added, deleted = tallies.pop(session, (0, 0))
+            item = Message(
+                role, timestamp, text, model, effort,
+                active=pending.pop(session, 0.0), added=added, deleted=deleted,
+            )
         threads.setdefault(session, []).append(item)
     return [
         exchange
@@ -695,6 +758,25 @@ def codex_images(payload: Mapping[str, Any], path: Path, line_number: int) -> tu
     return tuple(images)
 
 
+def codex_tally(change: Any, path: Path, line_number: int) -> tuple[int, int]:
+    """Tally one file's change in an applied patch: updates carry a unified
+    diff, additions and deletions the whole content."""
+    match change:
+        case {"type": "update", "unified_diff": str() as diff}:
+            return diff_tally(diff.splitlines())
+        case {"type": "add", "content": str() as content}:
+            return (len(content.splitlines()), 0)
+        case {"type": "delete", "content": str() as content}:
+            return (0, len(content.splitlines()))
+        case _:
+            # TODO: Says a patch change is in an unrecognized form and to add
+            # it deliberately in codex_tally.
+            raise UserError(
+                f"Mutatio fasciculi in forma ignota: {path}:{line_number}\n"
+                "Adde hanc formam consulto in codex_tally."
+            )
+
+
 # Payload kinds that mark the model actively producing output. A timestamp
 # gap counts as working time only when it ends at one of these; gaps ending
 # anywhere else hide tool runtime, system sleep, approval waits, or idle time
@@ -713,6 +795,7 @@ def codex_exchanges(path: Path, repo: Path) -> list[Exchange]:
     messages: list[Message] = []
     previous: dt.datetime | None = None
     pending = 0.0
+    tally = (0, 0)  # repo lines (added, deleted) since the last message
     for line_number, record in read_jsonl(path):
         payload = record.get("payload")
         payload = payload if isinstance(payload, dict) else {}
@@ -739,6 +822,13 @@ def codex_exchanges(path: Path, repo: Path) -> list[Exchange]:
                 effort = payload.get("effort") if isinstance(payload.get("effort"), str) else effort
             case "event_msg":
                 kind = payload.get("type")
+                # A patch that failed to apply changed nothing, so only a
+                # successful application is tallied.
+                if kind == "patch_apply_end" and payload.get("success"):
+                    for changed, change in (payload.get("changes") or {}).items():
+                        if under_dir(changed, repo):
+                            grew = codex_tally(change, path, line_number)
+                            tally = (tally[0] + grew[0], tally[1] + grew[1])
                 if kind not in {"user_message", "agent_message"}:
                     continue
                 if not under_dir(cwd, repo):
@@ -756,11 +846,17 @@ def codex_exchanges(path: Path, repo: Path) -> list[Exchange]:
                     images = codex_images(payload, path, line_number)
                     pending = 0.0
                     if (prompt == "" and images == ()) or prompt.startswith(CODEX_CANNED_PREFIX):
-                        continue
-                    messages.append(Message("user", timestamp, prompt, images=images))
+                        continue  # not an exchange boundary: the tally rides on
+                    messages.append(Message("user", timestamp, prompt, images=images,
+                                            added=tally[0], deleted=tally[1]))
+                    tally = (0, 0)
                 else:
-                    messages.append(Message("assistant", timestamp, text, model, effort, active=pending))
+                    messages.append(
+                        Message("assistant", timestamp, text, model, effort,
+                                active=pending, added=tally[0], deleted=tally[1])
+                    )
                     pending = 0.0
+                    tally = (0, 0)
             case _:
                 continue
     return paired("Codex", session, messages, path)
@@ -1117,6 +1213,8 @@ def paired(
     effort = ""
 
     active = 0.0
+    added = 0
+    deleted = 0
 
     def flush() -> None:
         if current is not None:
@@ -1127,6 +1225,8 @@ def paired(
                     model=model,
                     effort=effort,
                     elapsed=active,
+                    added=added,
+                    deleted=deleted,
                 )
             )
 
@@ -1143,6 +1243,10 @@ def paired(
                     == (message.text, message.images, message.ballots)
                 ):
                     continue
+                # Lines the prompt orphaned mid-turn belong to the exchange
+                # it closes, whose reply never arrived to claim them.
+                added += message.added
+                deleted += message.deleted
                 flush()
                 current = Exchange(
                     timestamp=message.timestamp,
@@ -1159,6 +1263,8 @@ def paired(
                 model = ""
                 effort = ""
                 active = 0.0
+                added = 0
+                deleted = 0
             case "assistant":
                 if current is None:
                     continue  # reply to a dropped machine prompt; nothing to attach to
@@ -1166,6 +1272,8 @@ def paired(
                 model = message.model or model
                 effort = message.effort or effort
                 active += message.active
+                added += message.added
+                deleted += message.deleted
             case _:
                 raise AssertionError(message.role)
     flush()
@@ -1334,6 +1442,11 @@ CSS = r"""
   --reply-ink: #4a3f22;
   --accent: #a97b00;
   --stripe: #ffb300;
+  /* Diffstat mark pair, teal for added and red for deleted, validated per
+     mode against its page surface (CVD-simulated ΔE >= 10, contrast >= 3:1;
+     a plain green fails deutan/protan separation against these reds). */
+  --diff-add: #00785a;
+  --diff-del: #cf222e;
   --measure: 44rem;
   --serif: "Iowan Old Style", Charter, Georgia, "Times New Roman", serif;
   --sans: ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
@@ -1350,6 +1463,8 @@ CSS = r"""
     --reply-ink: #c9bc9e;
     --accent: #ffb300;
     --stripe: #ffb300;
+    --diff-add: #1fa179;
+    --diff-del: #f85149;
   }
 }
 * { box-sizing: border-box; }
@@ -1416,6 +1531,7 @@ summary a.anchor:hover { text-decoration: underline; }
   margin: 2.6rem -1.25rem 0;
 }
 .day {
+  clear: both;
   margin: 3.8rem 0 0;
   padding-bottom: .4rem;
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
@@ -1426,7 +1542,27 @@ summary a.anchor:hover { text-decoration: underline; }
   letter-spacing: .14em;
   font-variant-numeric: tabular-nums;
 }
-.exchange { margin: 2.6rem 0 0; }
+.exchange { margin: 2.6rem 0 0; clear: both; }
+/* The prompt's diffstat floats right of the prompt's first lines. Numbers
+   wear the metadata ink; polarity lives in the blocks (and in the signs and
+   the fixed added-first order). */
+.diffstat {
+  float: right;
+  display: inline-flex;
+  align-items: center;
+  gap: .5rem;
+  margin: .25rem 0 .5rem 1.1rem;
+  color: var(--faint);
+  font-family: var(--sans);
+  font-size: .68rem;
+  letter-spacing: .05em;
+  font-variant-numeric: tabular-nums;
+}
+.diffstat .blocks { display: inline-flex; gap: 2px; }
+.diffstat .blocks span { width: 7px; height: 7px; border-radius: 2px; }
+.diffstat .add { background: var(--diff-add); }
+.diffstat .del { background: var(--diff-del); }
+.diffstat .nil { background: var(--line); }
 pre.prompt {
   margin: 0;
   white-space: pre-wrap;
@@ -1489,6 +1625,7 @@ summary:hover { color: var(--muted); }
   color: var(--m-ink);
 }
 .ballot {
+  clear: right; /* its filled box must not run under a floated diffstat */
   margin: 1rem 0 .6rem;
   padding: .65rem .85rem;
   border-radius: .3rem;
@@ -1570,6 +1707,30 @@ def elapsed_text(seconds: float) -> str:
     return "".join(f"{n}{unit}" for n, unit in ((hours, "h"), (minutes, "m"), (secs, "s")) if n) or "0s"
 
 
+def diffstat(added: int, deleted: int) -> str:
+    """The prompt's infographic: signed line counts and five blocks split by
+    the added:deleted ratio (each whole line a block when five would cover
+    it, unfilled blocks padding the difference). Sign and order carry the
+    same polarity as the block colors, so no reading depends on color."""
+    if (added, deleted) == (0, 0):
+        return ""
+    total = added + deleted
+    if total <= 5:
+        plus, minus = added, deleted
+    else:
+        plus = min(max(round(5 * added / total), 1 if added else 0), 5 - (1 if deleted else 0))
+        minus = 5 - plus
+    blocks = (
+        '<span class="add"></span>' * plus
+        + '<span class="del"></span>' * minus
+        + '<span class="nil"></span>' * (5 - plus - minus)
+    )
+    return (
+        f'\n<div class="diffstat">+{added:,} −{deleted:,}'
+        f' <span class="blocks" aria-hidden="true">{blocks}</span></div>'
+    )
+
+
 # All rendered copy here is human-written or human-specified; everything
 # else on the page (repository name/path/remote, provider, model, effort,
 # timestamps, weekdays, prompts, ballots, replies) is source data.
@@ -1636,7 +1797,7 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
         )
         chunks.append(
             f'<article class="exchange" id="p{number}">'
-            f"{ballots}{prompt}{attachments}\n"
+            f"{diffstat(exchange.added, exchange.deleted)}{ballots}{prompt}{attachments}\n"
             f"<details>\n<summary>{summary}</summary>\n{reply}\n</details>\n"
             "</article>"
         )

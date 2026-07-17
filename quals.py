@@ -190,6 +190,123 @@ class ClaudeQuals(Fixture):
         # the T1 -> T2 gap itself (wait + run) is never counted.
         self.assertEqual([(e.prompt, e.elapsed) for e in got], [("go", 660.0)])
 
+    def test_edit_lines_tallied_to_prompting_exchange(self):
+        cwd = str(self.repo)
+        patch = {
+            "filePath": str(self.repo / "a.py"),
+            "oldString": "old",
+            "newString": "new one\nnew two",
+            "originalFile": "ctx\nold\n",
+            "structuredPatch": [
+                {"oldStart": 1, "oldLines": 2, "newStart": 1, "newLines": 3,
+                 "lines": [" ctx", "-old", "+new one", "+new two"]}
+            ],
+            "userModified": False,
+            "replaceAll": False,
+        }
+        create = {
+            "type": "create",
+            "filePath": str(self.repo / "b.py"),
+            "content": "one\ntwo\nthree\n",
+            "originalFile": None,
+            "structuredPatch": [],
+            "userModified": False,
+        }
+        records = [
+            cu("build it", ts=T0, cwd=cwd),
+            cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+               ts=T1, cwd=cwd, toolUseResult=patch),
+            cu([{"type": "tool_result", "tool_use_id": "t2", "content": "ok"}],
+               ts=T1, cwd=cwd, toolUseResult=create),
+            ca([{"type": "text", "text": "built"}], ts=T2, cwd=cwd),
+            cu("now a question, no edits", ts="2026-03-01T10:15:00.000Z", cwd=cwd),
+            ca([{"type": "text", "text": "answered"}], ts="2026-03-01T10:16:00.000Z", mid="m2", cwd=cwd),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.added, e.deleted) for e in got],
+            [("build it", 5, 1), ("now a question, no edits", 0, 0)],
+        )
+
+    def test_edits_outside_repo_and_denied_edits_not_tallied(self):
+        cwd = str(self.repo)
+        elsewhere = {
+            "filePath": "/somewhere/else/a.py",
+            "structuredPatch": [
+                {"oldStart": 1, "oldLines": 1, "newStart": 1, "newLines": 1, "lines": ["-x", "+y"]}
+            ],
+        }
+        denial = (
+            "The user doesn't want to proceed with this tool use. "
+            "The tool use was rejected (eg. if it was a file edit, the new_string "
+            "was NOT written to the file). STOP what you are doing and wait for "
+            "the user to tell you how to proceed."
+        )
+        records = [
+            cu("go", ts=T0, cwd=cwd),
+            cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+               ts=T1, cwd=cwd, toolUseResult=elsewhere),
+            cu([{"type": "tool_result", "tool_use_id": "t2", "content": denial}],
+               ts=T1, cwd=cwd, toolUseResult=denial),
+            ca([{"type": "text", "text": "hm"}], ts=T2, cwd=cwd),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual([(e.prompt, e.added, e.deleted) for e in got], [("go", 0, 0)])
+
+    def test_orphaned_edits_credited_to_interrupted_exchange(self):
+        cwd = str(self.repo)
+        patch = {
+            "filePath": str(self.repo / "a.py"),
+            "structuredPatch": [
+                {"oldStart": 1, "oldLines": 2, "newStart": 1, "newLines": 3,
+                 "lines": [" ctx", "-old", "+new one", "+new two"]}
+            ],
+        }
+        create = {
+            "type": "create",
+            "filePath": str(self.repo / "b.py"),
+            "content": "one\ntwo\nthree\n",
+            "structuredPatch": [],
+        }
+        queued = {
+            "type": "attachment",
+            "attachment": {
+                "type": "queued_command",
+                "commandMode": "prompt",
+                "prompt": [{"type": "text", "text": "wait, also do X"}],
+                "origin": {"kind": "human"},
+            },
+            "timestamp": T2,
+            "cwd": cwd,
+            "sessionId": "cs1",
+            "uuid": "q1",
+        }
+        records = [
+            cu("start the work", ts=T0, cwd=cwd),
+            cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+               ts=T1, cwd=cwd, toolUseResult=patch),
+            queued,  # arrives before the agent has said anything
+            cu([{"type": "tool_result", "tool_use_id": "t2", "content": "ok"}],
+               ts=T2, cwd=cwd, toolUseResult=create),
+            ca([{"type": "text", "text": "Did X."}], ts="2026-03-01T10:15:00.000Z", cwd=cwd),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.reply, e.added, e.deleted) for e in got],
+            [("start the work", "", 2, 1), ("wait, also do X", "Did X.", 3, 0)],
+        )
+
+    def test_file_creation_without_content_fails_loudly(self):
+        cwd = str(self.repo)
+        broken = {"type": "create", "filePath": str(self.repo / "b.py"), "structuredPatch": []}
+        records = [
+            cu("go", ts=T0, cwd=cwd),
+            cu([{"type": "tool_result", "tool_use_id": "t", "content": "ok"}],
+               ts=T1, cwd=cwd, toolUseResult=broken),
+        ]
+        with self.assertRaises(ace.UserError):
+            ace.claude_exchanges(self.path(records), self.repo)
+
     def test_queued_midturn_message_recovered_as_prompt(self):
         cwd = str(self.repo)
         def queued(mode, prompt, ts):
@@ -504,6 +621,18 @@ def cxagent(message, ts=T1):
     return {"type": "event_msg", "timestamp": ts, "payload": {"type": "agent_message", "message": message}}
 
 
+def cxpatch(changes, success=True, ts=T1):
+    payload = {
+        "type": "patch_apply_end",
+        "call_id": "c1",
+        "stdout": "",
+        "stderr": "",
+        "success": success,
+        "changes": changes,
+    }
+    return {"type": "event_msg", "timestamp": ts, "payload": payload}
+
+
 class CodexQuals(Fixture):
     def path(self, records, name="rollout-1.jsonl"):
         return write_jsonl(self.tmp / "codex" / "sessions" / "2026" / name, records)
@@ -601,6 +730,86 @@ class CodexQuals(Fixture):
         # 300s (prompt -> call) + 300s (output -> reply); the call -> output
         # gap (tool runtime, possibly spanning a sleep) is never counted.
         self.assertEqual([(e.prompt, e.elapsed) for e in got], [("go", 600.0)])
+
+    def test_patch_lines_tallied_to_prompting_exchange(self):
+        changes = {
+            str(self.repo / "a.js"): {
+                "type": "update",
+                "move_path": None,
+                "unified_diff": "@@ -1,2 +1,3 @@\n ctx\n-old\n+new one\n+new two",
+            },
+            str(self.repo / "b.js"): {"type": "add", "content": "one\ntwo\nthree"},
+            str(self.repo / "c.js"): {"type": "delete", "content": "bye\nbye"},
+        }
+        records = [
+            cxmeta(str(self.repo)),
+            cxuser("build it", ts=T0),
+            cxpatch(changes, ts=T1),
+            cxagent("built", ts=T2),
+            cxuser("just a question", ts="2026-03-01T10:15:00.000Z"),
+            cxagent("answered", ts="2026-03-01T10:16:00.000Z"),
+        ]
+        got = ace.codex_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.added, e.deleted) for e in got],
+            [("build it", 5, 3), ("just a question", 0, 0)],
+        )
+
+    def test_failed_and_foreign_patches_not_tallied(self):
+        outside = {"/somewhere/else/a.js": {"type": "add", "content": "x\ny"}}
+        failed = {str(self.repo / "a.js"): {"type": "add", "content": "x\ny"}}
+        records = [
+            cxmeta(str(self.repo)),
+            cxuser("go", ts=T0),
+            cxpatch(outside, ts=T1),
+            cxpatch(failed, success=False, ts=T1),
+            cxagent("hm", ts=T2),
+        ]
+        got = ace.codex_exchanges(self.path(records), self.repo)
+        self.assertEqual([(e.added, e.deleted) for e in got], [(0, 0)])
+
+    def test_orphaned_patch_credited_to_interrupted_exchange(self):
+        changes = {
+            str(self.repo / "a.js"): {
+                "type": "update",
+                "move_path": None,
+                "unified_diff": "@@ -1,2 +1,3 @@\n ctx\n-old\n+new one\n+new two",
+            },
+        }
+        records = [
+            cxmeta(str(self.repo)),
+            cxuser("q1", ts=T0),
+            cxpatch(changes, ts=T1),
+            cxuser("q2, before any reply", ts=T2),
+            cxagent("done", ts="2026-03-01T10:15:00.000Z"),
+        ]
+        got = ace.codex_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.reply, e.added, e.deleted) for e in got],
+            [("q1", "", 2, 1), ("q2, before any reply", "done", 0, 0)],
+        )
+
+    def test_canned_handoff_does_not_erase_pending_tally(self):
+        changes = {str(self.repo / "a.js"): {"type": "add", "content": "x\ny\nz"}}
+        records = [
+            cxmeta(str(self.repo)),
+            cxuser("q1", ts=T0),
+            cxpatch(changes, ts=T1),
+            cxuser("The following is the Codex agent history added since your last message.", ts=T2),
+            cxagent("done", ts="2026-03-01T10:15:00.000Z"),
+        ]
+        got = ace.codex_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.reply, e.added, e.deleted) for e in got],
+            [("q1", "done", 3, 0)],
+        )
+
+    def test_unknown_patch_change_form_fails_loudly(self):
+        changes = {str(self.repo / "a.js"): {"type": "transmogrify"}}
+        records = [cxmeta(str(self.repo)), cxuser("go"), cxpatch(changes)]
+        with self.assertRaises(ace.UserError) as ctx:
+            ace.codex_exchanges(self.path(records), self.repo)
+        self.assertIn("codex_tally", str(ctx.exception))
 
     def test_terminal_fix_template_dropped_even_in_codex(self):
         records = [
@@ -865,6 +1074,32 @@ class RenderQuals(Fixture):
         self.assertIn("thought for 5m27s", summary)
         page = ace.render(self.repo, [exchange()])
         self.assertNotIn("thought for", page)
+
+    def test_diffstat_shown_with_ratio_blocks(self):
+        page = ace.render(self.repo, [exchange(added=1234, deleted=45, prompt="hi")])
+        self.assertIn("+1,234 −45", page)
+        self.assertEqual(page.count('<span class="add"></span>'), 4)  # round(5·1234/1279)
+        self.assertEqual(page.count('<span class="del"></span>'), 1)
+        self.assertEqual(page.count('<span class="nil"></span>'), 0)
+        # The stat precedes the prompt so it floats beside the prompt's top.
+        self.assertLess(page.index('class="diffstat"'), page.index('class="prompt"'))
+        # A prompt that touched no code gets no diffstat at all.
+        page = ace.render(self.repo, [exchange()])
+        self.assertNotIn('<div class="diffstat">', page)
+
+    def test_diffstat_tiny_and_onesided_ratios(self):
+        page = ace.render(self.repo, [exchange(added=1, deleted=1)])
+        self.assertEqual(page.count('<span class="add"></span>'), 1)
+        self.assertEqual(page.count('<span class="del"></span>'), 1)
+        self.assertEqual(page.count('<span class="nil"></span>'), 3)
+        page = ace.render(self.repo, [exchange(added=0, deleted=7)])
+        self.assertIn("+0 −7", page)
+        self.assertEqual(page.count('<span class="add"></span>'), 0)
+        self.assertEqual(page.count('<span class="del"></span>'), 5)
+        # A nonzero side always gets at least one block.
+        page = ace.render(self.repo, [exchange(added=1, deleted=999)])
+        self.assertEqual(page.count('<span class="add"></span>'), 1)
+        self.assertEqual(page.count('<span class="del"></span>'), 4)
 
     def test_elapsed_text_formats(self):
         for seconds, expected in ((327, "5m27s"), (45, "45s"), (300, "5m"), (3661, "1h1m1s"), (0.4, "0s")):
