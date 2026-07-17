@@ -1246,14 +1246,15 @@ CSS = r"""
    dark mode gets the full #FFB300. */
 :root {
   color-scheme: light dark;
-  --bg: #fbf3e2;
+  --bg: #faf0d8;
   --ink: #1c1508;
   --muted: #77673f;
-  --faint: #af9c6c;
-  --line: #ecdfc0;
+  --faint: #a8945e;
+  --line: #eadbb4;
   --reply-bg: #f4e9cf;
   --reply-ink: #4a3f22;
   --accent: #a97b00;
+  --stripe: #ffb300;
   --measure: 44rem;
   --serif: "Iowan Old Style", Charter, Georgia, "Times New Roman", serif;
   --sans: ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
@@ -1269,12 +1270,14 @@ CSS = r"""
     --reply-bg: #1f1a12;
     --reply-ink: #c9bc9e;
     --accent: #ffb300;
+    --stripe: #ffb300;
   }
 }
 * { box-sizing: border-box; }
 html { background: var(--bg); }
 body {
   margin: 0;
+  border-top: 4px solid var(--stripe);
   background: var(--bg);
   color: var(--ink);
   font-family: var(--serif);
@@ -1327,8 +1330,8 @@ summary a.anchor:hover { text-decoration: underline; }
 .day {
   margin: 3.8rem 0 0;
   padding-bottom: .4rem;
-  border-bottom: 1px solid var(--line);
-  color: var(--faint);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  color: var(--accent);
   font-family: var(--sans);
   font-size: .68rem;
   font-weight: 600;
@@ -1375,6 +1378,7 @@ summary {
 summary::-webkit-details-marker { display: none; }
 summary::before {
   content: "▸";
+  color: var(--accent);
   font-size: .62rem;
   transition: transform .12s ease;
 }
