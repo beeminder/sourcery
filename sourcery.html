@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%F0%9F%90%9D%3C/text%3E%3C/svg%3E">
-<meta name="description" content="28 prompts · 2026-07-16 – 2026-07-17">
+<meta name="description" content="29 prompts · 2026-07-16 – 2026-07-17">
 <meta property="og:title" content="sourcery">
-<meta property="og:description" content="28 prompts · 2026-07-16 – 2026-07-17">
+<meta property="og:description" content="29 prompts · 2026-07-16 – 2026-07-17">
 <title>sourcery</title>
 <style>
 /* Beeminder hive: honey paper by day, warm black by night, goldenrod
@@ -244,7 +244,7 @@ summary:hover { color: var(--muted); }
 <main>
 <header class="masthead">
   <h1>sourcery</h1>
-  <p class="deck" lang="la">28 prompts · 2026-07-16 – 2026-07-17</p>
+  <p class="deck" lang="la">29 prompts · 2026-07-16 – 2026-07-17</p>
   <p class="repo-path"><a href="https://github.com/beeminder/sourcery">github.com/beeminder/sourcery</a></p>
   <p class="controls" lang="la"><a href="#" data-omnia="open">expand all</a> · <a href="#" data-omnia="close">collapse all</a></p>
 </header>
@@ -625,6 +625,13 @@ gh api -X POST repos/beeminder/sourcery/pages -f build_type=legacy -f &#x27;sour
 <p><strong>How the tradeoff resolved</strong>: the clutter you were worried about lives almost entirely in the option *descriptions*, and the schema forces *labels* to 1–5 words — so showing every label costs at most four short mono lines while capturing the full decision space. Descriptions never render anywhere (the agent's reply almost always restates the winning rationale, so even the collapsed view doesn't carry them). Everything in the ballot is machine prose, so it's all inside the phosphor block per the inviolable constraint, with brightness doing the human-signal work: your pick glows, the rest recede.</p>
 <p>Two bonuses the ballot structure enabled: <strong>multi-select answers</strong> that arrive as comma-joined labels — previously indistinguishable from typed text — are now detected exactly, each picked label getting its own ✓; and <strong>typed "Other" answers</strong> now show the ballot with nothing checked above your serif text, which quietly tells the reader you rejected every offered option and wrote your own.</p>
 <p>The dogfood regenerated with 28 exchanges and two ballots — including, one exchange after the theme ballot, this very turn's ballot showing <code>✓ Ballot, labels only (Recommended)</code>: the document now renders the decision about how to render decisions. Your regenerate-commit-push makes it live.</p></div>
+</details>
+</article>
+<article class="exchange" id="p29">
+<pre class="prompt">that works; thanks. anything else? i haven't bothered to translate all the latin in the tool's output, but i guess i need to before pointing others at this tool. can you put the explanatory TODOs right next to the latin bits to make that easier. don't put actual recommended english, i want that to come from my own brain.</pre>
+<details>
+<summary><a class="anchor" href="#p29"><time datetime="2026-07-17T18:11:51.046000+00:00">11:11</time></a> <span class="agent">Claude Code</span></summary>
+<div class="reply machine empty"><p>Response still generating when this transcript was captured</p></div>
 </details>
 </article>
 </main>

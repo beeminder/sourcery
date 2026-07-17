@@ -132,9 +132,6 @@ Environment variables (separated by {os.pathsep!r}) for nonstandard transcript l
 """
 
 
-# TODO: Explain that the command line is strict: --repo is required, options
-# cannot repeat, options taking a value must get one, unknown options are
-# rejected.
 def parse_args(argv: Sequence[str]) -> Options:
     values: dict[str, str] = {}
     flags: set[str] = set()
@@ -148,30 +145,35 @@ def parse_args(argv: Sequence[str]) -> Options:
                 raise ExitMessage(VERSION)
             case "--open":
                 if token in flags:
+                    # TODO: Says the --open flag was given more than once.
                     raise UserError("Argumentum --open iteratum est.")
                 flags.add(token)
                 i += 1
             case "--repo" | "--output":
                 if token in values:
+                    # TODO: Says this option was given more than once.
                     raise UserError(f"Argumentum {token} iteratum est.")
                 if i + 1 >= len(argv):
+                    # TODO: Says this option requires a path argument.
                     raise UserError(f"Argumentum {token} viam postulat.\n\n{help_text()}")
                 values[token] = argv[i + 1]
                 i += 2
             case _:
+                # TODO: Says this option is not recognized.
                 raise UserError(f"Argumentum ignotum: {token}\n\n{help_text()}")
     if "--repo" not in values:
+        # TODO: Says the --repo option is required.
         raise UserError(f"Argumentum --repo necessarium est.\n\n{help_text()}")
     repo = Path(values["--repo"]).expanduser()
     output = Path(values.get("--output", f"{repo.name}-ai-dialogus.html")).expanduser()
     return Options(repo=repo, output=output, open_after="--open" in flags)
 
 
-# TODO: Explain that the given path must exist and be a directory; messages
-# are attributed to it by working-directory prefix.
 def canonical_repo(path: Path) -> Path:
     candidate = path.resolve()
     if not candidate.is_dir():
+        # TODO: Says the project directory wasn't found and to give a path
+        # to an existing project directory.
         raise UserError(
             f"Directorium incepti non inventum: {candidate}\n"
             "Da viam exsistentem ad directorium incepti."
@@ -206,14 +208,14 @@ def repo_remote(repo: Path) -> str:
     return https_remote(url)
 
 
-# TODO: Explain that a configured transcript-root variable must contain at
-# least one path and that entries use the platform path separator.
 def env_paths(env: Mapping[str, str], key: str, defaults: Iterable[Path]) -> tuple[Path, ...]:
     raw = env.get(key)
     if raw is None:
         return tuple(defaults)
     paths = tuple(Path(piece).expanduser() for piece in raw.split(os.pathsep) if piece)
     if not paths:
+        # TODO: Says this environment variable is set but empty, and to
+        # either unset it or put at least one path in it.
         raise UserError(f"Variabilis {key} vacua est. Aufer eam vel saltem unam viam da.")
     return paths
 
@@ -251,12 +253,10 @@ def discover_roots(env: Mapping[str, str]) -> Roots:
     )
 
 
-# TODO: Identify a malformed or missing timestamp instead of inventing
-# chronology; accepted forms are ISO-8601 strings and epoch seconds or
-# milliseconds.
 def parse_time(value: Any) -> dt.datetime:
     match value:
         case bool():
+            # TODO: Says a timestamp is in an unrecognized form.
             raise UserError(f"Forma temporis ignota: {value!r}")
         case int() | float():
             seconds = float(value)
@@ -266,6 +266,7 @@ def parse_time(value: Any) -> dt.datetime:
             try:
                 return dt.datetime.fromtimestamp(seconds, tz=UTC)
             except (OverflowError, OSError, ValueError) as exc:
+                # TODO: Says a numeric timestamp is invalid.
                 raise UserError(f"Tempus numericum invalidum: {value!r}") from exc
         case str():
             raw = value.strip()
@@ -273,37 +274,42 @@ def parse_time(value: Any) -> dt.datetime:
             try:
                 parsed = dt.datetime.fromisoformat(normalized)
             except ValueError as exc:
+                # TODO: Says a timestamp is not valid ISO-8601.
                 raise UserError(f"Tempus ISO-8601 invalidum: {value!r}") from exc
             parsed = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
             return parsed.astimezone(UTC)
         case _:
+            # TODO: Says a timestamp is in an unrecognized form.
             raise UserError(f"Forma temporis ignota: {type(value).__name__}")
 
 
-# TODO: Identify unreadable or malformed JSON and name the file.
 def read_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except PermissionError as exc:
+        # TODO: Says read permission is missing for this file and to grant
+        # the terminal read access, then rerun.
         raise UserError(
             f"Licentia legendi deest: {path}\n"
             "Da terminali licentiam legendi hunc fasciculum et iterum curre."
         ) from exc
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # TODO: Says this file contains invalid JSON.
         raise UserError(f"JSON invalidum in {path}: {exc}") from exc
 
 
-# TODO: Identify unreadable or malformed JSONL with the exact file and line;
-# advise closing transcript writers before retrying.
 def read_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
     try:
         fh = path.open("r", encoding="utf-8")
     except PermissionError as exc:
+        # TODO: Says read permission is missing for this file and to grant
+        # the terminal read access, then rerun.
         raise UserError(
             f"Licentia legendi deest: {path}\n"
             "Da terminali licentiam legendi hunc fasciculum et iterum curre."
         ) from exc
     except OSError as exc:
+        # TODO: Says this file cannot be opened.
         raise UserError(f"Fasciculus aperiri non potest: {path}\n{exc}") from exc
     with fh:
         for line_number, line in enumerate(fh, start=1):
@@ -319,11 +325,14 @@ def read_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
                 # corruption and stays loud.
                 if not line.endswith("\n"):
                     return
+                # TODO: Says this file has invalid JSONL at this line, and to
+                # close Claude, Codex, and VS Code, then rerun.
                 raise UserError(
                     f"JSONL invalidum: {path}:{line_number}\n{exc}\n"
                     "Claude, Codex, et VS Code claude; deinde iterum curre."
                 ) from exc
             if not isinstance(record, dict):
+                # TODO: Says this JSONL line is not a JSON object.
                 raise UserError(f"Recordum JSONL obiectum non est: {path}:{line_number}")
             yield line_number, record
 
