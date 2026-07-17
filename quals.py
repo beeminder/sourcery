@@ -190,6 +190,39 @@ class ClaudeQuals(Fixture):
         # the T1 -> T2 gap itself (wait + run) is never counted.
         self.assertEqual([(e.prompt, e.elapsed) for e in got], [("go", 660.0)])
 
+    def test_queued_midturn_message_recovered_as_prompt(self):
+        cwd = str(self.repo)
+        def queued(mode, prompt, ts):
+            return {
+                "type": "attachment",
+                "attachment": {
+                    "type": "queued_command",
+                    "commandMode": mode,
+                    "prompt": prompt,
+                    "origin": {"kind": "human" if mode == "prompt" else "task-notification"},
+                },
+                "timestamp": ts,
+                "cwd": cwd,
+                "sessionId": "cs1",
+                "uuid": "q1",
+            }
+        records = [
+            cu("start the work", ts=T0, cwd=cwd),
+            ca([{"type": "text", "text": "Working."}], ts=T1, cwd=cwd),
+            queued("prompt", [{"type": "text", "text": "wait, also do X"}], T2),
+            queued("task-notification", "<task-notification>done</task-notification>", T2),
+            {"type": "attachment", "attachment": {"type": "todo_reminder"}, "timestamp": T2, "cwd": cwd},
+            ca([{"type": "text", "text": "Doing X."}], ts="2026-03-01T10:15:00.000Z", cwd=cwd, mid="m8"),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.reply) for e in got],
+            [("start the work", "Working."), ("wait, also do X", "Doing X.")],
+        )
+        bad = [queued("hologram-mode", [{"type": "text", "text": "x"}], T0)]
+        with self.assertRaises(ace.UserError):
+            ace.claude_exchanges(self.path(bad), self.repo)
+
     def test_machine_origin_records_dropped_human_kept_unknown_loud(self):
         cwd = str(self.repo)
         notification = (
@@ -827,6 +860,17 @@ class RenderQuals(Fixture):
     def test_empty_reply_marked(self):
         page = ace.render(self.repo, [exchange(reply="")])
         self.assertIn('class="reply machine empty"', page)
+
+    def test_only_final_empty_reply_marked_still_generating(self):
+        page = ace.render(
+            self.repo,
+            [exchange(prompt="a", reply=""), exchange(timestamp=utc(T1), prompt="b", reply="")],
+        )
+        self.assertEqual(page.count("Response still generating when this transcript was captured"), 1)
+        self.assertIn("No response.", page)
+        self.assertLess(page.index("No response."), page.index("Response still generating"))
+        page = ace.render(self.repo, [exchange(prompt="a", reply=""), exchange(timestamp=utc(T1), prompt="b", reply="done")])
+        self.assertNotIn("Response still generating", page)
 
     def test_machine_prose_only_inside_machine_containers(self):
         page = ace.render(

@@ -42,7 +42,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "4.0.0"
+VERSION = "4.2.0"
 UTC = dt.timezone.utc
 
 
@@ -515,12 +515,29 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
     pending: dict[str, float] = {}
     for line_number, record in read_jsonl(path):
         role = record.get("type")
-        if role not in {"user", "assistant"}:
+        # A message typed while the agent was mid-turn is recorded not as a
+        # user record but as a queued_command attachment; other attachment
+        # kinds (todo reminders, file-edit notices, ...) are machine chatter.
+        attachment = record.get("attachment") if role == "attachment" else None
+        if attachment is not None:
+            attachment = attachment if isinstance(attachment, dict) else {}
+            if attachment.get("type") != "queued_command":
+                continue
+            mode = attachment.get("commandMode")
+            if mode == "task-notification":
+                continue  # background-task wakeup queued as a command
+            if mode != "prompt":
+                raise UserError(
+                    f"Modus queued_command ignotus: {mode!r} in {path}:{line_number}\n"
+                    "Adde hunc modum consulto in claude_exchanges."
+                )
+            role = "user"
+        elif role not in {"user", "assistant"}:
             continue
         if any(record.get(flag) for flag in CLAUDE_SKIP_FLAGS):
             continue
         message = record.get("message")
-        if not isinstance(message, dict):
+        if attachment is None and not isinstance(message, dict):
             raise UserError(f"Recordum message obiectum non habet: {path}:{line_number}")
         if not under_dir(record.get("cwd"), repo):
             continue
@@ -535,15 +552,17 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
         else:
             pending[session] = pending.get(session, 0.0) + claude_tool_seconds(record)
         if role == "user":
-            if claude_origin_is_machine(record, path, line_number):
+            typed_source = attachment if attachment is not None else record
+            content = attachment.get("prompt") if attachment is not None else message.get("content")
+            if claude_origin_is_machine(typed_source, path, line_number):
                 continue
-            text = claude_prompt(message.get("content"))
+            text = claude_prompt(content)
             asked = chosen = ""
-            if text == "":
+            if text == "" and attachment is None:
                 text, asked, chosen = claude_recovered(record, path, line_number)
             if CLAUDE_CANNED.fullmatch(text):
                 continue
-            images = claude_images(message.get("content"), path, line_number)
+            images = claude_images(content, path, line_number)
             if text == "" and images == () and chosen == "":
                 continue
             item = Message(role, timestamp, text, images=images, asked=asked, chosen=chosen)
@@ -1511,7 +1530,16 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
             current_day = day
         model = f' <span class="model">{html.escape(exchange.model)}</span>' if exchange.model else ""
         effort = f' <span class="effort">({html.escape(exchange.effort)})</span>' if exchange.effort else ""
-        if exchange.reply == "":
+        # TODO: The final exchange of the export is the only one that can
+        # plausibly still be in flight, so an empty reply there says the
+        # response was still generating at capture time (exact copy specified
+        # by the human); an empty reply anywhere else says there is none.
+        if exchange.reply == "" and number == count:
+            reply = (
+                '<div class="reply machine empty">'
+                "<p>Response still generating when this transcript was captured</p></div>"
+            )
+        elif exchange.reply == "":
             reply = '<div class="reply machine empty" lang="la"><p>No response.</p></div>'
         else:
             reply = f'<div class="reply machine">{markdown_html(exchange.reply)}</div>'
