@@ -1474,7 +1474,10 @@ def markdown_html(text: str) -> str:
 # The whole design brief: with nothing expanded, the page is the human's
 # prompts and almost nothing else. Prompts get full ink and a reading face;
 # day markers and the disclosure line (time, agent, model) are set small and
-# faint; every machine-written word sits inside a closed <details>.
+# faint; machine-written words always wear the phosphor style, and all of
+# them sit inside a closed <details> except the ballot: the human's picks
+# are legible only against the question and labels the agent wrote, so the
+# ballot stays default-visible — in green, never mistakable for typing.
 CSS = r"""
 /* Beeminder hive: honey paper by day, warm black by night, goldenrod
    accents throughout. Light-mode goldenrod is darkened for text contrast;
@@ -1669,7 +1672,10 @@ summary:hover { color: var(--muted); }
    near-black, in both color schemes — for maximal distinction from the
    human's serif. The containers are .reply (agent replies) and .ballot
    (multiple-choice questions the agent posed and the option labels it
-   wrote, including the ones the human picked). */
+   wrote, including the ones the human picked). Machine styling and
+   collapsing are separate rules: .reply also hides behind the closed
+   disclosure, while .ballot is deliberately default-visible — collapsing
+   it would orphan the human's choice — but stays in phosphor. */
 .machine {
   --m-bg: #060d08;
   --m-ink: #56dd7f;

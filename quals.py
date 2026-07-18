@@ -1494,6 +1494,15 @@ class RenderQuals(Fixture):
         self.assertIn("typed words", pre)
         self.assertNotIn("machine", pre)
 
+    def test_ballot_stays_default_visible_outside_the_disclosure(self):
+        # Deliberate exception to machine-words-collapsed: the human's picks
+        # are legible only against the agent's question and labels, so the
+        # ballot renders before the closed <details>, still in phosphor.
+        ballot = ace.Ballot("Q?", ("A label", "B label"), ("A label",))
+        page = ace.render(self.repo, [exchange(prompt="typed words", ballots=(ballot,))])
+        article = page[page.index("<article") : page.index("</article>")]
+        self.assertLess(article.index('<div class="ballot machine">'), article.index("<details>"))
+
     def test_click_only_answer_renders_without_prompt_block(self):
         ballot = ace.Ballot("Q?", ("Delete it", "Keep it"), ("Delete it",))
         page = ace.render(self.repo, [exchange(prompt="", ballots=(ballot,))])
