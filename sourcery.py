@@ -42,7 +42,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "4.6.0"
+VERSION = "4.7.0"
 UTC = dt.timezone.utc
 
 
@@ -367,13 +367,15 @@ def under_dir(value: Any, root: Path) -> bool:
 # Jargon: to "tally" is to count the lines a recorded edit added and deleted;
 # every tally function returns an (added, deleted) pair.
 def diff_tally(lines: Iterable[str]) -> tuple[int, int]:
-    """Tally unified-diff hunk lines: +/- prefixes mark changed lines; the
-    +++/--- file-header lines of a full diff are not changes."""
+    """Tally unified-diff hunk lines: a +/- prefix marks an added/deleted
+    line. Callers pass only hunks — never the +++/--- file headers of a full
+    diff — so a line like "---" is a deletion whose content starts with
+    "--", not a header."""
     added = deleted = 0
     for line in lines:
-        if line.startswith("+") and not line.startswith("+++"):
+        if line.startswith("+"):
             added += 1
-        elif line.startswith("-") and not line.startswith("---"):
+        elif line.startswith("-"):
             deleted += 1
     return (added, deleted)
 
@@ -760,9 +762,11 @@ def codex_images(payload: Mapping[str, Any], path: Path, line_number: int) -> tu
 
 def codex_tally(change: Any, path: Path, line_number: int) -> tuple[int, int]:
     """Tally one file's change in an applied patch: updates carry a unified
-    diff, additions and deletions the whole content."""
+    diff starting at its first hunk (a diff bearing +++/--- file headers
+    would miscount them as changes, so it falls through and fails loudly),
+    additions and deletions the whole content."""
     match change:
-        case {"type": "update", "unified_diff": str() as diff}:
+        case {"type": "update", "unified_diff": str() as diff} if diff.startswith("@@"):
             return diff_tally(diff.splitlines())
         case {"type": "add", "content": str() as content}:
             return (len(content.splitlines()), 0)
@@ -1521,6 +1525,14 @@ h1 {
 }
 .controls a { color: var(--muted); text-decoration: none; }
 .controls a:hover { color: var(--accent); text-decoration: underline; }
+/* Minimap: the dialog at a glance, added lines above the midline and
+   deleted below, one clickable sliver per prompt. */
+.minimap { display: block; height: 48px; margin: 1.6rem 0 0; }
+.minimap .hit { fill: transparent; }
+.minimap .add { fill: var(--diff-add); }
+.minimap .del { fill: var(--diff-del); }
+.minimap .nil { fill: var(--line); }
+.minimap a:hover .hit { fill: color-mix(in srgb, var(--accent) 20%, transparent); }
 ::selection { background: color-mix(in srgb, var(--accent) 25%, transparent); }
 summary a.anchor { color: inherit; text-decoration: none; }
 summary a.anchor:hover { text-decoration: underline; }
@@ -1718,8 +1730,10 @@ def diffstat(added: int, deleted: int) -> str:
     if total <= 5:
         plus, minus = added, deleted
     else:
-        plus = min(max(round(5 * added / total), 1 if added else 0), 5 - (1 if deleted else 0))
-        minus = 5 - plus
+        # Floor both shares (never overstating either side, and splitting a
+        # tie symmetrically), but give any nonzero side its block.
+        plus = max(5 * added // total, 1 if added else 0)
+        minus = max(5 * deleted // total, 1 if deleted else 0)
     blocks = (
         '<span class="add"></span>' * plus
         + '<span class="del"></span>' * minus
@@ -1734,6 +1748,40 @@ def diffstat(added: int, deleted: int) -> str:
 # All rendered copy here is human-written or human-specified; everything
 # else on the page (repository name/path/remote, provider, model, effort,
 # timestamps, weekdays, prompts, ballots, replies) is source data.
+def minimap(exchanges: Sequence[Exchange], locals_: Sequence[dt.datetime]) -> str:
+    """A clickable map of the whole dialog: one sliver per prompt, in order,
+    linking to its permalink anchor. Added lines rise from the midline and
+    deleted lines hang below it, on a square-root scale against the peak so
+    small edits stay visible beside the big rewrite spikes; a prompt that
+    touched no code is a tick on the midline. Each sliver's hover title is
+    its time plus its counts — numerals only, so nothing here needs prose."""
+    peak = max(max(e.added, e.deleted) for e in exchanges)
+    unit = lambda v: f"{round(v, 1):g}"  # 30.0 -> "30"
+    slots: list[str] = []
+    for i, (e, local) in enumerate(zip(exchanges, locals_)):
+        x = 3 * i
+        stamp = local.strftime("%H:%M")
+        title = f"{stamp} +{e.added:,} −{e.deleted:,}" if e.added or e.deleted else stamp
+        bars = f'<rect class="hit" x="{x}" y="0" width="3" height="64"/>'
+        if e.added:
+            rise = round(30 * (e.added / peak) ** 0.5, 1)
+            bars += f'<rect class="add" x="{x}" y="{unit(32 - rise)}" width="2" height="{unit(rise)}"/>'
+        if e.deleted:
+            drop = 30 * (e.deleted / peak) ** 0.5
+            bars += f'<rect class="del" x="{x}" y="32" width="2" height="{unit(drop)}"/>'
+        if (e.added, e.deleted) == (0, 0):
+            bars += f'<rect class="nil" x="{x}" y="31" width="2" height="2"/>'
+        slots.append(f'<a href="#p{i + 1}"><title>{title}</title>{bars}</a>')
+    width = 3 * len(exchanges)
+    # TODO: The label says this is a map of the dialog, prompt by prompt.
+    return (
+        f'<svg class="minimap" viewBox="0 0 {width} 64" preserveAspectRatio="none"'
+        f' style="width:min(100%, {2 * width}px)" aria-label="Tabula dialogi, rogatio post rogationem">'
+        + "".join(slots)
+        + "</svg>"
+    )
+
+
 def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
     assert exchanges, "render() requires at least one exchange"
     locals_ = [e.timestamp.astimezone() for e in exchanges]
@@ -1741,6 +1789,11 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
     count = len(exchanges)
     noun = "prompt" if count == 1 else "prompts"
     range_text = first if first == last else f"{first} – {last}"
+    total_added = sum(e.added for e in exchanges)
+    total_deleted = sum(e.deleted for e in exchanges)
+    deck = f"{count} {noun} · {range_text}"
+    if (total_added, total_deleted) != (0, 0):
+        deck += f" · +{total_added:,} −{total_deleted:,}"
 
     chunks: list[str] = []
     current_day = None
@@ -1818,9 +1871,9 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%F0%9F%90%9D%3C/text%3E%3C/svg%3E">
-<meta name="description" content="{count} {noun} · {range_text}">
+<meta name="description" content="{deck}">
 <meta property="og:title" content="{title}">
-<meta property="og:description" content="{count} {noun} · {range_text}">
+<meta property="og:description" content="{deck}">
 <title>{title}</title>
 <style>{CSS}</style>
 </head>
@@ -1829,9 +1882,10 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
 <header class="masthead">
   <p class="generator"><a href="https://github.com/beeminder/sourcery">generated by sourcery</a></p>
   <h1>{title}</h1>
-  <p class="deck">{count} {noun} · {range_text}</p>
+  <p class="deck">{deck}</p>
   <p class="repo-path">{where}</p>
   <p class="controls"><a href="#" data-omnia="open">expand all</a> · <a href="#" data-omnia="close">collapse all</a></p>
+  {minimap(exchanges, locals_)}
 </header>
 {body}
 </main>

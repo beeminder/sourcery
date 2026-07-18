@@ -253,6 +253,27 @@ class ClaudeQuals(Fixture):
         got = ace.claude_exchanges(self.path(records), self.repo)
         self.assertEqual([(e.prompt, e.added, e.deleted) for e in got], [("go", 0, 0)])
 
+    def test_hunk_lines_that_look_like_diff_headers_still_counted(self):
+        # Deleting a line whose content is "--" or adding one starting with
+        # "++" stores hunk lines "---"/"+++...". Hunks never contain the
+        # file headers of a full diff, so every +/- prefix is a change.
+        cwd = str(self.repo)
+        patch = {
+            "filePath": str(self.repo / "notes.md"),
+            "structuredPatch": [
+                {"oldStart": 1, "oldLines": 2, "newStart": 1, "newLines": 2,
+                 "lines": ["---", "+++x;", " ctx"]}
+            ],
+        }
+        records = [
+            cu("go", ts=T0, cwd=cwd),
+            cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+               ts=T1, cwd=cwd, toolUseResult=patch),
+            ca([{"type": "text", "text": "done"}], ts=T2, cwd=cwd),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual([(e.added, e.deleted) for e in got], [(1, 1)])
+
     def test_orphaned_edits_credited_to_interrupted_exchange(self):
         cwd = str(self.repo)
         patch = {
@@ -804,6 +825,22 @@ class CodexQuals(Fixture):
             [("q1", "done", 3, 0)],
         )
 
+    def test_update_diff_with_file_headers_fails_loudly(self):
+        # Every observed update diff starts at its first hunk; a diff bearing
+        # +++/--- file headers means the format changed, and counting it
+        # naively would miscount the headers as changed lines.
+        changes = {
+            str(self.repo / "a.js"): {
+                "type": "update",
+                "move_path": None,
+                "unified_diff": "--- a/a.js\n+++ b/a.js\n@@ -1 +1 @@\n-x\n+y",
+            },
+        }
+        records = [cxmeta(str(self.repo)), cxuser("go"), cxpatch(changes)]
+        with self.assertRaises(ace.UserError) as ctx:
+            ace.codex_exchanges(self.path(records), self.repo)
+        self.assertIn("codex_tally", str(ctx.exception))
+
     def test_unknown_patch_change_form_fails_loudly(self):
         changes = {str(self.repo / "a.js"): {"type": "transmogrify"}}
         records = [cxmeta(str(self.repo)), cxuser("go"), cxpatch(changes)]
@@ -1100,6 +1137,48 @@ class RenderQuals(Fixture):
         page = ace.render(self.repo, [exchange(added=1, deleted=999)])
         self.assertEqual(page.count('<span class="add"></span>'), 1)
         self.assertEqual(page.count('<span class="del"></span>'), 4)
+        # An even split renders symmetrically, remainder unfilled.
+        page = ace.render(self.repo, [exchange(added=10, deleted=10)])
+        self.assertEqual(page.count('<span class="add"></span>'), 2)
+        self.assertEqual(page.count('<span class="del"></span>'), 2)
+        self.assertEqual(page.count('<span class="nil"></span>'), 1)
+
+    def test_deck_totals_shown_when_any_lines_counted(self):
+        page = ace.render(
+            self.repo,
+            [exchange(added=2, deleted=1), exchange(timestamp=utc(T1), prompt="b", added=3)],
+        )
+        local = utc(T0).astimezone().date().isoformat()
+        deck = f"2 prompts · {local} · +5 −1"
+        self.assertIn(f'<p class="deck">{deck}</p>', page)
+        self.assertIn(f'<meta name="description" content="{deck}">', page)
+        page = ace.render(self.repo, [exchange()])
+        self.assertNotIn("+0 −0", page)
+
+    def test_minimap_sliver_per_prompt_linked_and_scaled(self):
+        page = ace.render(
+            self.repo,
+            [
+                exchange(added=100, deleted=0),
+                exchange(timestamp=utc(T1), prompt="b", added=25, deleted=4),
+                exchange(timestamp=utc(T2), prompt="c"),
+            ],
+        )
+        svg = page[page.index('<svg class="minimap"') : page.index("</svg>")]
+        self.assertEqual(svg.count("<a "), 3)
+        for anchor in ('href="#p1"', 'href="#p2"', 'href="#p3"'):
+            self.assertIn(anchor, svg)
+        # Square-root scale against the peak side (100): 100 -> 30 units,
+        # 25 -> 15, and the second prompt's 4 deleted -> 6.
+        self.assertIn('height="30"', svg)
+        self.assertIn('height="15"', svg)
+        self.assertIn('height="6"', svg)
+        # A prompt that touched no code still gets a tick and its link,
+        # and every sliver has a full-height hit target.
+        self.assertIn('class="nil"', svg)
+        self.assertEqual(svg.count('class="hit"'), 3)
+        tick_time = utc(T2).astimezone().strftime("%H:%M")
+        self.assertIn(f"<title>{tick_time}</title>", svg)
 
     def test_elapsed_text_formats(self):
         for seconds, expected in ((327, "5m27s"), (45, "45s"), (300, "5m"), (3661, "1h1m1s"), (0.4, "0s")):
