@@ -42,7 +42,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "4.7.0"
+VERSION = "4.8.0"
 UTC = dt.timezone.utc
 
 
@@ -387,6 +387,12 @@ def diff_tally(lines: Iterable[str]) -> tuple[int, int]:
 # item is a wrapper only when the tag spans the entire item.
 CLAUDE_WRAPPER = re.compile(r"<(ide_[a-z_]+|system-reminder)>.*</\1>\s*", re.DOTALL)
 
+# A slash command is stored as two redundant XML-like fields. Matching both
+# fields prevents a partial or changed wrapper from becoming apparent typing.
+CLAUDE_COMMAND = re.compile(
+    r"\A<command-message>([^<]+)</command-message>\n<command-name>/\1</command-name>\Z"
+)
+
 # Record flags that mark machine-generated pseudo-messages: subagent traffic,
 # meta records, compaction summaries, and transcript-only continuation notes.
 CLAUDE_SKIP_FLAGS = ("isSidechain", "isMeta", "isCompactSummary", "isVisibleInTranscriptOnly")
@@ -508,11 +514,28 @@ def claude_recovered(record: Mapping[str, Any], path: Path, line_number: int) ->
             return "", ()
 
 
-def claude_prompt(content: Any) -> str:
+def claude_denial_key(record: Mapping[str, Any], text: str) -> tuple[Any, str] | None:
+    """Identify adjacent records produced by one denied parallel tool batch."""
+    match record.get("toolUseResult"):
+        case str() as result if CLAUDE_DENIAL_FAMILY in result:
+            return (record.get("promptId"), text)
+        case _:
+            return None
+
+
+def claude_prompt(content: Any, path: Path, line_number: int) -> str:
     """Return the human-typed text of a user record, or "" if none survives."""
     match content:
         case str():
-            return content
+            command = CLAUDE_COMMAND.fullmatch(content)
+            if content.startswith(("<command-message>", "<command-name>")) and command is None:
+                # TODO: Says a slash-command wrapper is malformed and the
+                # Claude transcript format should be inspected.
+                raise UserError(
+                    f"Involucrum imperii obliqui malformatum: {path}:{line_number}\n"
+                    "Forma transcripti Claude inspicienda est."
+                )
+            return CLAUDE_COMMAND.sub(r"/\1", content)
         case list():
             items = [item for item in content if isinstance(item, dict)]
             if any(item.get("type") == "tool_result" for item in items):
@@ -606,6 +629,7 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
     # to the next reply — or, when a new prompt arrives first, carried on
     # that prompt and credited to the exchange it closes.
     tallies: dict[str, tuple[int, int]] = {}
+    last_denial: dict[str, tuple[Any, str] | None] = {}
     for line_number, record in read_jsonl(path):
         role = record.get("type")
         # A message typed while the agent was mid-turn is recorded not as a
@@ -642,9 +666,14 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
             raise UserError(f"Tempus deest in recordo: {path}:{line_number}")
         timestamp = parse_time(record["timestamp"])
         session = str(record.get("sessionId") or path.stem)
-        gap = (timestamp - previous[session]).total_seconds() if session in previous else 0.0
-        previous[session] = timestamp
+        prior = previous.get(session, timestamp)
+        gap = (timestamp - prior).total_seconds()
+        previous[session] = max(prior, timestamp)
         if role == "assistant":
+            model = message.get("model") if isinstance(message.get("model"), str) else ""
+            if model == "<synthetic>":
+                continue  # harness notice (auth/API errors), not model output
+            last_denial.pop(session, None)
             pending[session] = pending.get(session, 0.0) + max(gap, 0.0)
         else:
             pending[session] = pending.get(session, 0.0) + claude_tool_seconds(record)
@@ -656,23 +685,27 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
             content = attachment.get("prompt") if attachment is not None else message.get("content")
             if claude_origin_is_machine(typed_source, path, line_number):
                 continue
-            text = claude_prompt(content)
+            text = claude_prompt(content, path, line_number)
             ballots: tuple[Ballot, ...] = ()
+            denial_key = None
             if text == "" and attachment is None:
                 text, ballots = claude_recovered(record, path, line_number)
+                denial_key = claude_denial_key(record, text)
             if CLAUDE_CANNED.fullmatch(text):
                 continue
             images = claude_images(content, path, line_number)
             if text == "" and images == () and not any(b.picked for b in ballots):
                 continue
+            # One typed act can fan out across several records (a denial
+            # reason stamped onto each rejected parallel tool call), so a
+            # repeat of the pending unanswered prompt is not a new prompt.
+            if denial_key is not None and denial_key == last_denial.get(session):
+                continue
+            last_denial[session] = denial_key
             added, deleted = tallies.pop(session, (0, 0))
             item = Message(role, timestamp, text, images=images, ballots=ballots,
-                           added=added, deleted=deleted)
-            pending[session] = 0.0
+                           active=pending.pop(session, 0.0), added=added, deleted=deleted)
         else:
-            model = message.get("model") if isinstance(message.get("model"), str) else ""
-            if model == "<synthetic>":
-                continue  # harness notice (auth/API errors), not model output
             text = "\n\n".join(claude_reply_blocks(message.get("content")))
             if text == "":
                 continue
@@ -686,7 +719,13 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
     return [
         exchange
         for session, messages in threads.items()
-        for exchange in paired("Claude Code", session, messages, path)
+        for exchange in paired(
+            "Claude Code",
+            session,
+            messages,
+            path,
+            (pending.get(session, 0.0), *tallies.get(session, (0, 0))),
+        )
     ]
 
 
@@ -848,11 +887,11 @@ def codex_exchanges(path: Path, repo: Path) -> list[Exchange]:
                 if kind == "user_message":
                     prompt = cut_canned_tail(codex_prompt(text, path))
                     images = codex_images(payload, path, line_number)
-                    pending = 0.0
                     if (prompt == "" and images == ()) or prompt.startswith(CODEX_CANNED_PREFIX):
                         continue  # not an exchange boundary: the tally rides on
                     messages.append(Message("user", timestamp, prompt, images=images,
-                                            added=tally[0], deleted=tally[1]))
+                                            active=pending, added=tally[0], deleted=tally[1]))
+                    pending = 0.0
                     tally = (0, 0)
                 else:
                     messages.append(
@@ -863,7 +902,7 @@ def codex_exchanges(path: Path, repo: Path) -> list[Exchange]:
                     tally = (0, 0)
             case _:
                 continue
-    return paired("Codex", session, messages, path)
+    return paired("Codex", session, messages, path, (pending, *tally))
 
 
 # ------------------------------------------------------- VS Code Copilot Chat
@@ -915,8 +954,9 @@ def vscode_reference_name(item: Mapping[str, Any]) -> str:
     return Path(fs_path).name if isinstance(fs_path, str) else ""
 
 
-def vscode_reply(response: Any, path: Path) -> str:
+def vscode_reply(response: Any, path: Path) -> tuple[str, str]:
     parts: list[str] = []
+    resolutions: list[Any] = []
     for item in response if isinstance(response, list) else []:
         if not isinstance(item, dict):
             # TODO: Says a response item is not a JSON object.
@@ -930,6 +970,8 @@ def vscode_reply(response: Any, path: Path) -> str:
             parts.append(value)
         elif kind == "inlineReference":
             parts.append(vscode_reference_name(item))
+        elif kind == "autoModeResolution":
+            resolutions.append(item.get("resolvedModel"))
         elif kind not in VSCODE_MUTE_KINDS:
             # TODO: Says a response item has an unrecognized kind and to add
             # it deliberately in VSCODE_MUTE_KINDS or vscode_reply.
@@ -937,7 +979,15 @@ def vscode_reply(response: Any, path: Path) -> str:
                 f"Genus membri responsi ignotum: {kind!r} in {path}\n"
                 "Adde hoc genus consulto in VSCODE_MUTE_KINDS vel vscode_reply."
             )
-    return "".join(parts)
+    match resolutions:
+        case []:
+            resolved_model = ""
+        case [str() as resolved_model] if resolved_model != "":
+            pass
+        case _:
+            # TODO: Says auto-mode model resolution is malformed.
+            raise UserError(f"Resolutio exemplaris auto-mode malformata: {path}")
+    return "".join(parts), resolved_model
 
 
 # Sessions are stored as a kind-0 snapshot followed by set (1),
@@ -1038,6 +1088,7 @@ def vscode_exchanges(path: Path, workspace: tuple[Path, ...], repo: Path) -> lis
         # totalElapsed would include waiting time; show no duration instead
         # of a wrong one.
         response = request.get("response")
+        reply, resolved_model = vscode_reply(response, path)
         paused = any(
             isinstance(item, dict)
             and item.get("kind") in {"confirmation", "elicitation", "elicitationSerialized"}
@@ -1050,10 +1101,10 @@ def vscode_exchanges(path: Path, workspace: tuple[Path, ...], repo: Path) -> lis
             Exchange(
                 timestamp=parse_time(request["timestamp"]),
                 provider="Copilot Chat",
-                model=model if isinstance(model, str) else "",
+                model=resolved_model or (model if isinstance(model, str) else ""),
                 session=session,
                 prompt=prompt,
-                reply=vscode_reply(request.get("response"), path),
+                reply=reply,
                 source=path,
                 images=tuple(
                     copilot_image_uri(variable, path)
@@ -1208,6 +1259,7 @@ def paired(
     session: str,
     messages: Iterable[Message],
     source: Path,
+    tail: tuple[float, int, int] = (0.0, 0, 0),
 ) -> list[Exchange]:
     """Fold a role-ordered message stream into prompt-plus-reply exchanges."""
     exchanges: list[Exchange] = []
@@ -1237,18 +1289,9 @@ def paired(
     for message in messages:
         match message.role:
             case "user":
-                # One typed act can fan out across several records (a denial
-                # reason stamped onto each rejected parallel tool call), so a
-                # repeat of the pending unanswered prompt is not a new prompt.
-                if (
-                    current is not None
-                    and reply_parts == []
-                    and (current.prompt, current.images, current.ballots)
-                    == (message.text, message.images, message.ballots)
-                ):
-                    continue
                 # Lines the prompt orphaned mid-turn belong to the exchange
                 # it closes, whose reply never arrived to claim them.
+                active += message.active
                 added += message.added
                 deleted += message.deleted
                 flush()
@@ -1280,6 +1323,9 @@ def paired(
                 deleted += message.deleted
             case _:
                 raise AssertionError(message.role)
+    active += tail[0]
+    added += tail[1]
+    deleted += tail[2]
     flush()
     return exchanges
 
@@ -1287,12 +1333,10 @@ def paired(
 def weave(exchanges: Iterable[Exchange]) -> list[Exchange]:
     """Merge all providers into one chronology, collapsing exact duplicates
     (resumed or forked sessions replay identical records into new files)."""
-    unique: dict[tuple[str, dt.datetime, str, tuple[Ballot, ...], str], Exchange] = {}
+    unique: dict[Exchange, Exchange] = {}
     for exchange in exchanges:
-        unique.setdefault(
-            (exchange.provider, exchange.timestamp, exchange.prompt, exchange.ballots, exchange.reply),
-            exchange,
-        )
+        identity = dataclasses.replace(exchange, session="", source=Path())
+        unique.setdefault(identity, exchange)
     return sorted(unique.values(), key=lambda e: (e.timestamp, e.provider, e.session, e.prompt))
 
 
@@ -1343,7 +1387,7 @@ def collect(repo: Path, roots: Roots) -> list[Exchange]:
 
 def markdown_inline(text: str) -> str:
     """Render a deliberately small, inert subset of inline Markdown."""
-    escaped = html.escape(text, quote=False)
+    escaped = html.escape(text, quote=True)
     stashed: list[str] = []
 
     def stash(match: re.Match[str]) -> str:
@@ -1354,7 +1398,7 @@ def markdown_inline(text: str) -> str:
     escaped = re.sub(r"(`+)(.+?)\1", stash, escaped)
     escaped = re.sub(
         r"\[([^\]]+)\]\((https?://[^\s)]+|mailto:[^\s)]+)\)",
-        lambda m: f'<a href="{html.escape(m.group(2), quote=True)}">{m.group(1)}</a>',
+        lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>',
         escaped,
     )
     escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)

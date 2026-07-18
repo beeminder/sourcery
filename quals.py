@@ -12,6 +12,7 @@ import io
 import json
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 
 import sourcery as ace
@@ -162,7 +163,16 @@ class ClaudeQuals(Fixture):
             ca([{"type": "text", "text": "API Error: 401"}], cwd=cwd, model="<synthetic>"),
         ]
         got = ace.claude_exchanges(self.path(records), self.repo)
-        self.assertEqual([(e.prompt, e.reply, e.model) for e in got], [("go", "", "")])
+        self.assertEqual(
+            [(e.prompt, e.reply, e.model, e.elapsed) for e in got],
+            [("go", "", "", 0.0)],
+        )
+
+    def test_identical_consecutive_prompts_are_two_human_acts(self):
+        cwd = str(self.repo)
+        records = [cu("retry", ts=T0, cwd=cwd), cu("retry", ts=T1, cwd=cwd)]
+        got = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual([(e.prompt, e.reply) for e in got], [("retry", ""), ("retry", "")])
 
     def test_cwd_outside_repo_excluded_subdir_included(self):
         records = [
@@ -189,6 +199,25 @@ class ClaudeQuals(Fixture):
         # 300s (prompt -> tool_use) + 60s recorded runtime + 300s (result -> reply);
         # the T1 -> T2 gap itself (wait + run) is never counted.
         self.assertEqual([(e.prompt, e.elapsed) for e in got], [("go", 660.0)])
+
+    def test_edits_and_tool_time_at_eof_credited_to_inflight_exchange(self):
+        cwd = str(self.repo)
+        patch = {
+            "filePath": str(self.repo / "a.py"),
+            "structuredPatch": [{"lines": ["-old", "+new"]}],
+            "durationMs": 60000,
+        }
+        records = [
+            cu("change it", ts=T0, cwd=cwd),
+            ca([{"type": "tool_use", "id": "t1", "name": "Edit", "input": {}}], ts=T1, cwd=cwd),
+            cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+               ts=T2, cwd=cwd, toolUseResult=patch),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.reply, e.elapsed, e.added, e.deleted) for e in got],
+            [("change it", "", 360.0, 1, 1)],
+        )
 
     def test_edit_lines_tallied_to_prompting_exchange(self):
         cwd = str(self.repo)
@@ -317,6 +346,28 @@ class ClaudeQuals(Fixture):
             [("start the work", "", 2, 1), ("wait, also do X", "Did X.", 3, 0)],
         )
 
+    def test_orphaned_work_time_credited_to_interrupted_exchange(self):
+        cwd = str(self.repo)
+        queued = {
+            "type": "attachment",
+            "attachment": {
+                "type": "queued_command",
+                "commandMode": "prompt",
+                "prompt": [{"type": "text", "text": "second"}],
+                "origin": {"kind": "human"},
+            },
+            "timestamp": T2,
+            "cwd": cwd,
+            "sessionId": "cs1",
+        }
+        records = [
+            cu("first", ts=T0, cwd=cwd),
+            ca([{"type": "tool_use", "id": "t1", "name": "Edit", "input": {}}], ts=T1, cwd=cwd),
+            queued,
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual([(e.prompt, e.elapsed) for e in got], [("first", 300.0), ("second", 0.0)])
+
     def test_file_creation_without_content_fails_loudly(self):
         cwd = str(self.repo)
         broken = {"type": "create", "filePath": str(self.repo / "b.py"), "structuredPatch": []}
@@ -361,6 +412,40 @@ class ClaudeQuals(Fixture):
         with self.assertRaises(ace.UserError):
             ace.claude_exchanges(self.path(bad), self.repo)
 
+    def test_queued_prompt_timestamp_does_not_rewind_activity_clock(self):
+        cwd = str(self.repo)
+        queued = {
+            "type": "attachment",
+            "attachment": {
+                "type": "queued_command",
+                "commandMode": "prompt",
+                "prompt": [{"type": "text", "text": "second"}],
+                "origin": {"kind": "human"},
+            },
+            "timestamp": "2026-03-01T10:06:00.000Z",
+            "cwd": cwd,
+            "sessionId": "cs1",
+        }
+        records = [
+            cu("first", ts=T0, cwd=cwd),
+            ca(
+                [
+                    {"type": "text", "text": "working"},
+                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
+                ],
+                ts=T1,
+                cwd=cwd,
+            ),
+            cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}], ts=T2, cwd=cwd),
+            queued,
+            ca([{"type": "text", "text": "done"}], ts="2026-03-01T10:11:00.000Z", cwd=cwd),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.elapsed) for e in got],
+            [("first", 300.0), ("second", 60.0)],
+        )
+
     def test_machine_origin_records_dropped_human_kept_unknown_loud(self):
         cwd = str(self.repo)
         notification = (
@@ -388,6 +473,21 @@ class ClaudeQuals(Fixture):
         ]
         got = ace.claude_exchanges(self.path(records), self.repo)
         self.assertEqual([e.prompt for e in got], ["[Request interrupted by user] but i typed this"])
+
+    def test_slash_command_wrapper_recovered_as_typed_command(self):
+        wrapped = "<command-message>insights</command-message>\n<command-name>/insights</command-name>"
+        got = ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)
+        self.assertEqual([e.prompt for e in got], ["/insights"])
+
+    def test_malformed_slash_command_wrapper_fails_loudly(self):
+        wrapped = "<command-message>insights</command-message>\n<command-name>/different</command-name>"
+        with self.assertRaises(ace.UserError):
+            ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)
+
+    def test_partial_slash_command_wrapper_fails_loudly(self):
+        wrapped = "<command-name>/insights</command-name>"
+        with self.assertRaises(ace.UserError):
+            ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)
 
     def test_rejection_reason_recovered_as_prompt(self):
         cwd = str(self.repo)
@@ -428,6 +528,69 @@ class ClaudeQuals(Fixture):
         got = ace.claude_exchanges(self.path(records), self.repo)
         self.assertEqual([(e.prompt, e.reply) for e in got], [("hold tight", "Standing by.")])
         self.assertEqual(got[0].timestamp, utc(T0))
+
+    def test_identical_adjacent_denial_feedback_with_distinct_prompt_ids_stays_distinct(self):
+        cwd = str(self.repo)
+        denial = (
+            "Error: The user doesn't want to proceed with this tool use. "
+            "The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). "
+            "The user provided the following reason for the rejection:  hold tight"
+        )
+        records = [
+            cu([{"type": "tool_result", "tool_use_id": "t1", "content": denial[7:]}],
+               ts=T0, cwd=cwd, toolUseResult=denial, promptId="act-1"),
+            cu([{"type": "tool_result", "tool_use_id": "t2", "content": denial[7:]}],
+               ts=T1, cwd=cwd, toolUseResult=denial, promptId="act-2"),
+            ca([{"type": "text", "text": "Standing by."}], ts=T2, cwd=cwd),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.reply) for e in got],
+            [("hold tight", ""), ("hold tight", "Standing by.")],
+        )
+
+    def test_denial_fanout_with_differing_machine_wrappers_collapses(self):
+        cwd = str(self.repo)
+        family = (
+            "The tool use was rejected (eg. if it was a file edit, "
+            "the new_string was NOT written to the file). "
+        )
+        denials = [
+            "Error: The user doesn't want to proceed with this tool use. "
+            f"{family}The user provided the following reason for the rejection: hold tight",
+            "Error: Permission for this tool use was denied. "
+            f'{family}To tell you how to proceed, the user said: "hold tight"',
+        ]
+        records = [
+            cu([{"type": "tool_result", "tool_use_id": f"t{i}", "content": denial[7:]}],
+               ts=ts, cwd=cwd, toolUseResult=denial, promptId="one-human-act")
+            for i, (ts, denial) in enumerate(zip((T0, T1), denials), start=1)
+        ]
+        records.append(ca([{"type": "text", "text": "Standing by."}], ts=T2, cwd=cwd))
+        got = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual([(e.prompt, e.reply) for e in got], [("hold tight", "Standing by.")])
+
+    def test_identical_denial_feedback_after_more_agent_work_stays_distinct(self):
+        cwd = str(self.repo)
+        denial = (
+            "Error: The user doesn't want to proceed with this tool use. "
+            "The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). "
+            "The user provided the following reason for the rejection:  hold tight"
+        )
+        records = [
+            cu([{"type": "tool_result", "tool_use_id": "t1", "content": denial[7:]}],
+               ts=T0, cwd=cwd, toolUseResult=denial, promptId="reused-prompt"),
+            ca([{"type": "tool_use", "id": "t2", "name": "Edit", "input": {}}],
+               ts="2026-03-01T10:01:00.000Z", cwd=cwd),
+            cu([{"type": "tool_result", "tool_use_id": "t2", "content": denial[7:]}],
+               ts=T1, cwd=cwd, toolUseResult=denial, promptId="reused-prompt"),
+            ca([{"type": "text", "text": "Standing by."}], ts=T2, cwd=cwd),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.reply) for e in got],
+            [("hold tight", ""), ("hold tight", "Standing by.")],
+        )
 
     def test_reasonless_denials_and_lookalike_tool_output_not_recovered(self):
         cwd = str(self.repo)
@@ -683,6 +846,19 @@ class CodexQuals(Fixture):
         got = ace.codex_exchanges(self.path(records), self.repo)
         self.assertEqual([e.prompt for e in got], ["fix the  bug\nplease"])
 
+    def test_identical_consecutive_prompts_are_two_human_acts(self):
+        records = [
+            cxmeta(str(self.repo)),
+            cxuser("retry", ts=T0),
+            cxuser("retry", ts=T1),
+            cxagent("done", ts=T2),
+        ]
+        got = ace.codex_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.reply) for e in got],
+            [("retry", ""), ("retry", "done")],
+        )
+
     def test_reasoning_and_token_counts_ignored(self):
         records = [
             cxmeta(str(self.repo)),
@@ -775,6 +951,38 @@ class CodexQuals(Fixture):
             [(e.prompt, e.added, e.deleted) for e in got],
             [("build it", 5, 3), ("just a question", 0, 0)],
         )
+
+    def test_patch_at_eof_credited_to_inflight_exchange(self):
+        changes = {
+            str(self.repo / "a.js"): {
+                "type": "update",
+                "move_path": None,
+                "unified_diff": "@@ -1 +1 @@\n-old\n+new",
+            },
+        }
+        records = [
+            cxmeta(str(self.repo)),
+            cxuser("change it", ts=T0),
+            {"type": "response_item", "timestamp": T1,
+             "payload": {"type": "function_call", "name": "apply_patch"}},
+            cxpatch(changes, ts=T2),
+        ]
+        got = ace.codex_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.reply, e.elapsed, e.added, e.deleted) for e in got],
+            [("change it", "", 300.0, 1, 1)],
+        )
+
+    def test_orphaned_work_time_credited_to_interrupted_exchange(self):
+        records = [
+            cxmeta(str(self.repo)),
+            cxuser("first", ts=T0),
+            {"type": "response_item", "timestamp": T1,
+             "payload": {"type": "function_call", "name": "shell"}},
+            cxuser("second", ts=T2),
+        ]
+        got = ace.codex_exchanges(self.path(records), self.repo)
+        self.assertEqual([(e.prompt, e.elapsed) for e in got], [("first", 300.0), ("second", 0.0)])
 
     def test_failed_and_foreign_patches_not_tallied(self):
         outside = {"/somewhere/else/a.js": {"type": "add", "content": "x\ny"}}
@@ -924,6 +1132,31 @@ class VscodeQuals(Fixture):
         self.assertEqual(got[0].model, "copilot/gemini-3.1-pro-preview")
         self.assertEqual(got[0].timestamp, dt.datetime.fromtimestamp(1772576233307 / 1000, tz=dt.timezone.utc))
 
+    def test_auto_mode_resolution_supplies_actual_model(self):
+        response = [
+            {
+                "kind": "autoModeResolution",
+                "resolvedModel": "gpt-5.4",
+                "resolvedModelName": "GPT-5.4",
+                "predictedLabel": "no_reasoning",
+                "confidence": 0.95,
+            },
+            md("done"),
+        ]
+        path = self.write_session(vssession([vsreq("q", response, model="copilot/auto")]))
+        got = ace.vscode_exchanges(path, (self.repo,), self.repo)
+        self.assertEqual([(e.reply, e.model) for e in got], [("done", "gpt-5.4")])
+
+    def test_malformed_or_duplicate_auto_mode_resolution_fails_loudly(self):
+        malformed = {"kind": "autoModeResolution"}
+        valid = {"kind": "autoModeResolution", "resolvedModel": "gpt-5.4"}
+        for response in ([malformed], [valid, valid]):
+            with self.subTest(response=response):
+                path = self.write_session(vssession([vsreq("q", response, model="copilot/auto")]))
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.vscode_exchanges(path, (self.repo,), self.repo)
+                self.assertIn("auto-mode", str(ctx.exception))
+
     def test_inline_reference_name_spliced_into_reply(self):
         response = [
             md("see "),
@@ -1064,6 +1297,20 @@ class WeaveQuals(Fixture):
         a = exchange(session="s1", source=Path("/f1"))
         b = exchange(session="s2", source=Path("/f2"))
         self.assertEqual(len(ace.weave([a, b])), 1)
+
+    def test_differing_exchange_metadata_is_not_deduplicated(self):
+        original = exchange(session="s1", source=Path("/f1"))
+        variants = [
+            exchange(session="s2", source=Path("/f2"), added=1),
+            exchange(session="s2", source=Path("/f2"), deleted=1),
+            exchange(session="s2", source=Path("/f2"), elapsed=1.0),
+            exchange(session="s2", source=Path("/f2"), model="another-model"),
+            exchange(session="s2", source=Path("/f2"), effort="high"),
+            exchange(session="s2", source=Path("/f2"), images=("data:image/png;base64,AA",)),
+        ]
+        for variant in variants:
+            with self.subTest(variant=variant):
+                self.assertEqual(len(ace.weave([original, variant])), 2)
 
 
 class RenderQuals(Fixture):
@@ -1263,6 +1510,24 @@ class RenderQuals(Fixture):
         self.assertIn("<li>item</li>", html)
         self.assertNotIn("[l]", html)
 
+    def test_reply_markdown_link_query_is_escaped_once(self):
+        got = ace.markdown_inline("[query](https://example.test/search?a=1&b=2)")
+        self.assertEqual(got, '<a href="https://example.test/search?a=1&amp;b=2">query</a>')
+
+    def test_reply_markdown_link_cannot_inject_an_attribute_through_code(self):
+        class AnchorParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.attrs = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "a":
+                    self.attrs.append(attrs)
+
+        parser = AnchorParser()
+        parser.feed(ace.markdown_inline('[x](https://e.test/`" onmouseover="alert(1)`)'))
+        self.assertEqual([[name for name, _ in attrs] for attrs in parser.attrs], [["href"]])
+
 
 # ------------------------------------------------------------------------ CLI
 
@@ -1354,8 +1619,13 @@ class CliQuals(Fixture):
         self.assertIn(str(self.claude_root), err)
 
     def test_version_and_help_exit_zero(self):
-        self.assertEqual(self.run_cli(["--version"])[0], 0)
+        code, out, err = self.run_cli(["--version"])
+        self.assertEqual((code, out, err), (0, "4.8.0\n", ""))
         self.assertEqual(self.run_cli(["--help"])[0], 0)
+
+    def test_minimum_python_version_is_documented(self):
+        readme = Path(ace.__file__).with_name("README.md").read_text(encoding="utf-8")
+        self.assertIn("Python 3.10 vel recentior requiritur.", readme)
 
 
 class RemoteQuals(Fixture):

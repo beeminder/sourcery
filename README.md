@@ -1,5 +1,8 @@
 ## Sourcery
 
+<!-- TODO: Says Sourcery requires Python 3.10 or newer. -->
+Python 3.10 vel recentior requiritur.
+
 This is a utility to compile a document with all the exact prompts you used to build whatever thing you've vibe-coded.
 It gives you a way to peruse the whole dialog with the AI that spawned/effectuated the app.
 
