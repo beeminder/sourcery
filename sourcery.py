@@ -12,7 +12,7 @@ and time. Supported stores:
 - Copilot Chat: VS Code User/workspaceStorage/*/chatSessions/*.{json,jsonl}
 
 Usage:
-    python3 sourcery.py --repo /path/to/project [--output out.html] [--open]
+    python3 sourcery.py REPODIR OUTPUT.html [--open]
 
 Nonstandard store locations can be supplied with path-separated environment
 variables: AI_CHAT_CLAUDE_ROOTS, AI_CHAT_CODEX_ROOTS, AI_CHAT_VSCODE_USER_ROOTS.
@@ -42,7 +42,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "4.8.0"
+VERSION = "5.0.0"
 UTC = dt.timezone.utc
 
 
@@ -77,6 +77,10 @@ class Exchange:
     effort: str = ""
     images: tuple[str, ...] = ()  # data: URIs of images pasted with the prompt
     elapsed: float = 0.0  # seconds the agent worked on the reply; 0 = unknown
+    # Wall-clock seconds from the prompt to the last reply record; 0 = unknown.
+    # Exceeds elapsed by whatever the working-time accounting cannot see: tool
+    # runtime the store never recorded, and waits on the human mid-turn.
+    wall: float = 0.0
     ballots: tuple[Ballot, ...] = ()  # multiple-choice questions the human answered
     # The prompt's diffstat: repo lines the agent added and deleted before the
     # next prompt, as recorded by the store (edits made through a shell tool
@@ -126,11 +130,11 @@ class Options:
 
 def help_text() -> str:
     return f"""Usage:
-  python3 sourcery.py --repo PATH [--output FILE.html] [--open]
+  python3 sourcery.py REPODIR OUTPUT.html [--open]
 
 Arguments:
-  --repo PATH     Directory containing the project to extract the dialog from.
-  --output FILE   Generate new html.
+  REPODIR         Directory containing the project to extract the dialog from.
+  OUTPUT.html     Generate new html.
   --open          Open the generated HTML in the browser.
   -h, --help      This help text.
   --version       Show version.
@@ -143,11 +147,9 @@ Environment variables (separated by {os.pathsep!r}) for nonstandard transcript l
 
 
 def parse_args(argv: Sequence[str]) -> Options:
-    values: dict[str, str] = {}
+    positionals: list[str] = []
     flags: set[str] = set()
-    i = 0
-    while i < len(argv):
-        token = argv[i]
+    for token in argv:
         match token:
             case "-h" | "--help":
                 raise ExitMessage(help_text())
@@ -158,25 +160,21 @@ def parse_args(argv: Sequence[str]) -> Options:
                     # TODO: Says the --open flag was given more than once.
                     raise UserError("Argumentum --open iteratum est.")
                 flags.add(token)
-                i += 1
-            case "--repo" | "--output":
-                if token in values:
-                    # TODO: Says this option was given more than once.
-                    raise UserError(f"Argumentum {token} iteratum est.")
-                if i + 1 >= len(argv):
-                    # TODO: Says this option requires a path argument.
-                    raise UserError(f"Argumentum {token} viam postulat.\n\n{help_text()}")
-                values[token] = argv[i + 1]
-                i += 2
-            case _:
+            case _ if token.startswith("-"):
                 # TODO: Says this option is not recognized.
                 raise UserError(f"Argumentum ignotum: {token}\n\n{help_text()}")
-    if "--repo" not in values:
-        # TODO: Says the --repo option is required.
-        raise UserError(f"Argumentum --repo necessarium est.\n\n{help_text()}")
-    repo = Path(values["--repo"]).expanduser()
-    output = Path(values.get("--output", f"{repo.name}-ai-dialogus.html")).expanduser()
-    return Options(repo=repo, output=output, open_after="--open" in flags)
+            case _:
+                positionals.append(token)
+    if len(positionals) != 2:
+        # TODO: Says exactly two arguments are required, the project
+        # directory and the output file.
+        raise UserError(f"Duo argumenta necessaria sunt: REPODIR et OUTPUT.html.\n\n{help_text()}")
+    repo, output = positionals
+    return Options(
+        repo=Path(repo).expanduser(),
+        output=Path(output).expanduser(),
+        open_after="--open" in flags,
+    )
 
 
 def canonical_repo(path: Path) -> Path:
@@ -609,7 +607,9 @@ def claude_tally(record: Mapping[str, Any], repo: Path, path: Path, line_number:
 def claude_tool_seconds(record: Mapping[str, Any]) -> float:
     result = record.get("toolUseResult")
     result = result if isinstance(result, dict) else {}
-    for key, scale in (("durationMs", 1000.0), ("durationSeconds", 1.0)):
+    # WebFetch records durationMs, WebSearch durationSeconds, Agent (subagent
+    # runs) totalDurationMs; no other tool records any duration at all.
+    for key, scale in (("durationMs", 1000.0), ("durationSeconds", 1.0), ("totalDurationMs", 1000.0)):
         value = result.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return value / scale
@@ -621,7 +621,9 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
     # Agent working time, distinguished from waiting-for-human time by where
     # a timestamp gap ends: a gap ending at an assistant record is generation;
     # a gap ending at a tool_result hides both tool runtime and permission
-    # waits, so only a duration the store itself recorded is credited there.
+    # waits, so only a duration the store itself recorded is credited there,
+    # capped by the gap: a recorded run can overlap work the timeline already
+    # counted (parallel tool calls, background subagents collected late).
     # `pending` accrues per session until the next emitted message.
     previous: dict[str, dt.datetime] = {}
     pending: dict[str, float] = {}
@@ -676,7 +678,9 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
             last_denial.pop(session, None)
             pending[session] = pending.get(session, 0.0) + max(gap, 0.0)
         else:
-            pending[session] = pending.get(session, 0.0) + claude_tool_seconds(record)
+            pending[session] = pending.get(session, 0.0) + min(
+                max(gap, 0.0), claude_tool_seconds(record)
+            )
             added, deleted = tallies.get(session, (0, 0))
             grew = claude_tally(record, repo, path, line_number)
             tallies[session] = (added + grew[0], deleted + grew[1])
@@ -1271,6 +1275,7 @@ def paired(
     active = 0.0
     added = 0
     deleted = 0
+    ended: dt.datetime | None = None  # arrival of the exchange's last reply message
 
     def flush() -> None:
         if current is not None:
@@ -1281,6 +1286,9 @@ def paired(
                     model=model,
                     effort=effort,
                     elapsed=active,
+                    # No reply means the wall span is unknown, the same
+                    # 0-sentinel elapsed uses.
+                    wall=(ended - current.timestamp).total_seconds() if ended else 0.0,
                     added=added,
                     deleted=deleted,
                 )
@@ -1312,12 +1320,14 @@ def paired(
                 active = 0.0
                 added = 0
                 deleted = 0
+                ended = None
             case "assistant":
                 if current is None:
                     continue  # reply to a dropped machine prompt; nothing to attach to
                 reply_parts.append(message.text)
                 model = message.model or model
                 effort = message.effort or effort
+                ended = message.timestamp
                 active += message.active
                 added += message.added
                 deleted += message.deleted
@@ -1867,8 +1877,20 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
             reply = '<div class="reply machine empty"><p>No response.</p></div>'
         else:
             reply = f'<div class="reply machine">{markdown_html(exchange.reply)}</div>'
+        # The wall span renders only when it reads longer than the working
+        # time: an equal-at-display-precision span repeats the number beside
+        # it, and a shorter one (activity credited off records later than the
+        # last reply) answers a question nobody asked.
+        # TODO: Says the turn's full span by the wall clock, prompt to final
+        # reply, beside the active working time already shown.
+        wall = (
+            f" · {elapsed_text(exchange.wall)} wall-clock time"
+            if exchange.wall > exchange.elapsed
+            and elapsed_text(exchange.wall) != elapsed_text(exchange.elapsed)
+            else ""
+        )
         thought = (
-            f' <span class="elapsed">thought for {elapsed_text(exchange.elapsed)}</span>'
+            f' <span class="elapsed">thought for {elapsed_text(exchange.elapsed)}{wall}</span>'
             if exchange.elapsed >= 0.5
             else ""
         )
@@ -1914,7 +1936,13 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
         where = f'<a href="{html.escape(remote, quote=True)}">{label}</a>'
     else:
         where = html.escape(str(repo))
+    # The warning comment must follow the doctype — a comment before it
+    # would throw browsers into quirks mode.
+    # TODO: Says this file is generated by sourcery and never hand-edited;
+    # the next generation overwrites it, so don't edit it in place.
     return f"""<!doctype html>
+<!-- Fasciculus hic a sourcery generatus est, numquam manu scriptus.
+     Noli emendare: generatio proxima omnia superscribet. -->
 <html lang="und">
 <head>
 <meta charset="utf-8">
@@ -1955,16 +1983,11 @@ for (const control of document.querySelectorAll("[data-omnia]"))
 # ----------------------------------------------------------------------- exit
 
 
-# Output is written atomically so a partial document is never left behind.
+# Output is written atomically so a partial document is never left behind;
+# an existing document is simply replaced — it is always generated, never
+# hand-edited (the page itself opens with a warning comment saying so).
 def write_output(path: Path, page: str) -> None:
     target = path.resolve()
-    if target.exists():
-        # TODO: Says the output file already exists and to pick another path
-        # with --output or deliberately remove the old file.
-        raise UserError(
-            f"Fasciculus iam exsistit: {target}\n"
-            "Elige aliam viam cum --output, vel fasciculum veterem consulto remove."
-        )
     if not target.parent.is_dir():
         # TODO: Says the output directory doesn't exist and to deliberately
         # create it, then rerun.
@@ -1979,24 +2002,7 @@ def write_output(path: Path, page: str) -> None:
             fh.write(page)
             fh.flush()
             os.fsync(fh.fileno())
-        try:
-            os.link(temporary, target)
-        except FileExistsError as exc:
-            # TODO: Says the output file appeared while writing, nothing was
-            # overwritten, and to pick another path with --output.
-            raise UserError(
-                f"Fasciculus inter scribendum creatus est: {target}\n"
-                "Fasciculus novus non superscriptus est; aliam viam cum --output elige."
-            ) from exc
-        except OSError as exc:
-            # TODO: Says the file cannot be written because the filesystem
-            # doesn't support hard links, and to pick another path with
-            # --output.
-            raise UserError(
-                f"Fasciculus scribi non potest: {target}\n{exc}\n"
-                "Systema fasciculorum vincula dura non fert; aliam viam cum --output elige."
-            ) from exc
-        temporary.unlink()
+        os.replace(temporary, target)
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
@@ -2009,7 +2015,7 @@ def no_exchanges_error(repo: Path, roots: Roots) -> UserError:
     # variables for nonstandard locations, and notes that VS Code chats
     # attribute correctly only when the project is opened as a plain folder.
     return UserError(
-        f"Nullae rogationes huic incepto attributae sunt: {repo}\n\n"
+        f"No prompts found: {repo}\n\n"
         f"Radices inspectae:\n{sought}\n\n"
         "Si transcripta alibi sunt, variabiles AI_CHAT_CLAUDE_ROOTS, "
         "AI_CHAT_CODEX_ROOTS, vel AI_CHAT_VSCODE_USER_ROOTS constitue.\n"
@@ -2031,7 +2037,7 @@ def run(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None)
         output = options.output.resolve()
         # TODO: Reports success with the output path and the number of
         # exported prompts.
-        print(f"Scriptum: {output}\nRogationes: {len(exchanges)}")
+        print(f"Written: {output}\nPrompts: {len(exchanges)}")
         if options.open_after and not webbrowser.open(output.as_uri()):
             # TODO: Says the browser refused to open the file.
             raise UserError(f"Navigatrum fasciculum aperire recusavit: {output}")
