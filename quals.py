@@ -11,6 +11,7 @@ import contextlib
 import datetime as dt
 import io
 import json
+import re
 import tempfile
 import unittest
 from html.parser import HTMLParser
@@ -1626,6 +1627,54 @@ class RenderQuals(Fixture):
         self.assertIn("✓ Delete it", page)
         self.assertIn("· Keep it", page)
 
+    def test_progress_rail_bar_and_one_mark_per_day(self):
+        # Replicata: a dialog spanning two days. Expectata: the page carries
+        # the Asterisk-style reading-progress rail — a fixed bar plus one
+        # clickable day mark per day header, each mark's label the header's
+        # exact text and its target an anchor the header itself carries.
+        page = ace.render(
+            self.repo,
+            [exchange(prompt="a"), exchange(timestamp=utc("2026-03-05T10:00:00.000Z"), prompt="b")],
+        )
+        self.assertIn('<div id="progress">', page)
+        self.assertIn('class="progress-bar"', page)
+        days = re.findall(
+            r'<h2 class="day" id="([^"]+)"><time datetime="[0-9-]+">([^<]+)</time></h2>', page
+        )
+        self.assertEqual(len(days), 2)
+        self.assertEqual(days[0][0], f"d{utc(T0).astimezone().date().isoformat()}")
+        marks = re.findall(
+            r'<a class="daymark" href="#([^"]+)">'
+            r'<span class="tick"></span><span class="text">([^<]+)</span></a>',
+            page,
+        )
+        self.assertEqual(marks, days)
+        # Two prompts on one day are one day header, so one mark.
+        page = ace.render(
+            self.repo, [exchange(prompt="a"), exchange(timestamp=utc(T1), prompt="b")]
+        )
+        self.assertEqual(page.count('class="daymark"'), 1)
+
+    def test_progress_rail_revealed_and_driven_by_script(self):
+        # The rail appears only once the reader has actually set off: the
+        # stylesheet ships the bar transparent and the marks offscreen, and
+        # the script shows them past 300px of scroll, resizing the bar on
+        # scroll and resize and after any disclosure opens or closes (which
+        # reflows the whole page under the rail).
+        page = ace.render(self.repo, [exchange()])
+        self.assertIn("scrollY > 300", page)
+        self.assertIn('addEventListener("scroll", sync, { passive: true })', page)
+        self.assertIn('addEventListener("resize", sync)', page)
+        self.assertIn('document.addEventListener("toggle", sync, true)', page)
+        self.assertIn("opacity: 0;", ace.CSS)
+        self.assertIn("#progress.show .progress-bar { opacity: 1; }", ace.CSS)
+        self.assertIn("#progress.show .daymark { transform: none; }", ace.CSS)
+
+    def test_progress_rail_absent_from_print(self):
+        # Scroll progress means nothing on paper; the print stylesheet drops
+        # the whole rail.
+        self.assertLess(ace.CSS.index("@media print"), ace.CSS.index("#progress { display: none; }"))
+
     def test_reply_markdown_subset(self):
         html = ace.markdown_html("intro `x` **b** [l](https://e.com)\n\n```py\nx = 1 < 2\n```\n- item")
         self.assertIn("<code>x</code>", html)
@@ -1758,7 +1807,7 @@ class CliQuals(Fixture):
 
     def test_version_and_help_exit_zero(self):
         code, out, err = self.run_cli(["--version"])
-        self.assertEqual((code, out, err), (0, "5.1.0\n", ""))
+        self.assertEqual((code, out, err), (0, "5.2.0\n", ""))
         code, out, _ = self.run_cli(["--help"])
         self.assertEqual(code, 0)
         self.assertIn("REPODIR", out)

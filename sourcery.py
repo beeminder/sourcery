@@ -42,7 +42,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "5.1.0"
+VERSION = "5.2.0"
 UTC = dt.timezone.utc
 
 
@@ -1601,6 +1601,62 @@ h1 {
 .minimap .del { fill: var(--diff-del); }
 .minimap .nil { fill: var(--line); }
 .minimap a:hover .hit { fill: color-mix(in srgb, var(--accent) 20%, transparent); }
+/* The reading-progress rail, the device Asterisk magazine runs down its
+   left margin: a goldenrod column — the top stripe's vertical sibling —
+   fixed to the viewport's left edge, its height the fraction of the page
+   scrolled past, invisible until the reader has actually set off (the
+   script adds .show past 300px of scroll). One tick per day header hangs
+   on the same percent scale, so the bar's tip touches a day's tick at the
+   exact moment that day reaches the top of the viewport; a tick's label
+   appears on hover and clicking it jumps to the day. The bar's width
+   cedes continuously as the viewport narrows toward the text column, and
+   below 54rem the marks leave entirely. */
+#progress .progress-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: clamp(6px, calc((100vw - var(--measure)) / 2 - 12px), 32px);
+  height: 0;
+  opacity: 0;
+  background: var(--stripe);
+  transition: opacity .1s linear;
+  z-index: 10;
+}
+#progress .daymark {
+  position: fixed;
+  left: 0;
+  z-index: 11;
+  display: flex;
+  margin-top: -12px;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: .65rem;
+  letter-spacing: .04em;
+  font-variant-numeric: tabular-nums;
+  text-decoration: none;
+  transform: translateX(-100%);
+  transition: transform .2s ease;
+}
+#progress .tick {
+  width: 46px;
+  height: 12px;
+  border-bottom: 1px solid var(--ink);
+}
+#progress .text {
+  margin-left: .5rem;
+  padding: .1rem .4rem;
+  border: 1px solid var(--line);
+  border-radius: .3rem;
+  background: var(--bg);
+  opacity: 0;
+  transition: opacity .2s ease-in;
+}
+#progress .daymark:hover .text { opacity: 1; }
+#progress.show .progress-bar { opacity: 1; }
+#progress.show .daymark { transform: none; }
+@media (max-width: 54rem) {
+  #progress .daymark { display: none; }
+}
 ::selection { background: color-mix(in srgb, var(--accent) 25%, transparent); }
 summary a.anchor { color: inherit; text-decoration: none; }
 summary a.anchor:hover { text-decoration: underline; }
@@ -1778,6 +1834,7 @@ summary:hover { color: var(--muted); }
 .reply.empty { font-style: italic; color: var(--m-dim); }
 @media print {
   :root { --bg: white; --ink: black; --faint: #777; --muted: #555; --line: #bbb; --reply-bg: white; --reply-ink: #333; }
+  #progress { display: none; }
   .machine { --m-bg: white; --m-ink: #14572e; --m-bright: #14572e; --m-dim: #4d7a5d; --m-line: #9dbfa8; background: white; border: 1px solid var(--m-line); }
   .reply pre.code { background: white; }
   main { width: 100%; padding: 0; }
@@ -1786,6 +1843,46 @@ summary:hover { color: var(--muted); }
   details > .reply { display: block !important; }
   summary::before { content: ""; }
 }
+"""
+
+
+JS = r"""
+for (const control of document.querySelectorAll("[data-omnia]"))
+  control.addEventListener("click", (event) => {
+    event.preventDefault();
+    const open = control.dataset.omnia === "open";
+    for (const details of document.querySelectorAll("details")) details.open = open;
+  });
+/* The reading-progress rail: the bar's height and each day mark's top
+   share one scale — percent of full scroll travel — so the bar's tip
+   touches a day's tick at the exact moment that day's header reaches the
+   top of the viewport. A header past the last reachable scroll position
+   can never get there; its mark pins to 100%, where the bar arrives at
+   the very bottom of the page. */
+const progress = document.getElementById("progress");
+const bar = progress.querySelector(".progress-bar");
+const marks = [...progress.querySelectorAll(".daymark")].map(
+  (mark) => [mark, document.getElementById(mark.hash.slice(1))],
+);
+let ticking = false;
+const sync = () => {
+  if (ticking) return;
+  ticking = true;
+  requestAnimationFrame(() => {
+    const travel = Math.max(document.documentElement.scrollHeight - innerHeight, 1);
+    progress.classList.toggle("show", scrollY > 300);
+    bar.style.height = 100 * scrollY / travel + "%";
+    for (const [mark, header] of marks)
+      mark.style.top =
+        Math.min(100 * (header.getBoundingClientRect().top + scrollY) / travel, 100) + "%";
+    ticking = false;
+  });
+};
+addEventListener("scroll", sync, { passive: true });
+addEventListener("resize", sync);
+/* Opening or closing a disclosure reflows the whole page under the rail. */
+document.addEventListener("toggle", sync, true);
+sync();
 """
 
 
@@ -1882,12 +1979,16 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
         deck += f" · +{total_added:,} −{total_deleted:,}"
 
     chunks: list[str] = []
+    days: list[tuple[str, str]] = []  # (day, header text), one per day header
     current_day = None
     for number, (exchange, local) in enumerate(zip(exchanges, locals_), start=1):
         day = local.date().isoformat()
         if day != current_day:
             weekday = WEEKDAYS[local.date().weekday()]
-            chunks.append(f'<h2 class="day"><time datetime="{day}">{day} {weekday}</time></h2>')
+            chunks.append(
+                f'<h2 class="day" id="d{day}"><time datetime="{day}">{day} {weekday}</time></h2>'
+            )
+            days.append((day, f"{day} {weekday}"))
             current_day = day
         model = f' <span class="model">{html.escape(exchange.model)}</span>' if exchange.model else ""
         effort = f' <span class="effort">({html.escape(exchange.effort)})</span>' if exchange.effort else ""
@@ -1955,6 +2056,21 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
         )
 
     body = "\n".join(chunks)
+    # The reading-progress rail's day marks are generated here, where the
+    # days are known; the script only measures and positions them.
+    marks = "".join(
+        f'\n<a class="daymark" href="#d{day}">'
+        f'<span class="tick"></span><span class="text">{label}</span></a>'
+        for day, label in days
+    )
+    # TODO: The label names the day-mark rail, for assistive tech, as the
+    # index of the dialog's days.
+    rail = (
+        '<div id="progress">\n'
+        '<div class="progress-bar" aria-hidden="true"></div>\n'
+        f'<nav class="daymarks" aria-label="Index dierum">{marks}\n</nav>\n'
+        "</div>"
+    )
     title = html.escape(repo.name)
     # The subtitle answers "where this lives": the public remote when there
     # is one, the local directory otherwise.
@@ -1983,6 +2099,7 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
 <style>{CSS}</style>
 </head>
 <body>
+{rail}
 <main>
 <header class="masthead">
   <p class="generator"><a href="https://github.com/beeminder/sourcery">generated by sourcery</a></p>
@@ -1994,14 +2111,7 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
 </header>
 {body}
 </main>
-<script>
-for (const control of document.querySelectorAll("[data-omnia]"))
-  control.addEventListener("click", (event) => {{
-    event.preventDefault();
-    const open = control.dataset.omnia === "open";
-    for (const details of document.querySelectorAll("details")) details.open = open;
-  }});
-</script>
+<script>{JS}</script>
 </body>
 </html>
 """
