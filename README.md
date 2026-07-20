@@ -18,8 +18,6 @@ See how this tool itself came to life at [sourcery.html][sourcery.html].
 
 ## Notes to self
 
-request: make it easier to visually distinguish which agent the human is talking to. right now all we have is the down-popped click-to-expand line at the end of the prompt.
-
 later: have this work for multiple people. maybe get all the agent transcript data as a JSON file for each person, commit them all to version control, and then this utility makes sure the JSON file for the person running it is up to date and then generates the sourcery.html file from the set of JSON files?
 
 sooner: speaking of JSON files, if you switch computers or something, you don't want to lose any of the transcript.
