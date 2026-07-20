@@ -42,7 +42,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "5.2.1"
+VERSION = "5.3.0"
 UTC = dt.timezone.utc
 
 
@@ -401,6 +401,14 @@ CLAUDE_COMMAND_ARGS = re.compile(
     r"<command-args>([^<]*)</command-args>\Z"
 )
 
+# A harness-local command (/model, /config, ...) records its captured output
+# as a pseudo-user record. The output is machine text, and its arrival also
+# reclassifies the slash-command prompt sharing its promptId: that pair was
+# harness configuration, not dialogue, so both records vanish together.
+CLAUDE_LOCAL_STDOUT = re.compile(
+    r"\A<local-command-stdout>.*</local-command-stdout>\s*\Z", re.DOTALL
+)
+
 # Record flags that mark machine-generated pseudo-messages: subagent traffic,
 # meta records, compaction summaries, and transcript-only continuation notes.
 CLAUDE_SKIP_FLAGS = ("isSidechain", "isMeta", "isCompactSummary", "isVisibleInTranscriptOnly")
@@ -646,6 +654,10 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
     # that prompt and credited to the exchange it closes.
     tallies: dict[str, tuple[int, int]] = {}
     last_denial: dict[str, tuple[Any, str] | None] = {}
+    # Sessions whose most recently emitted message is a recovered slash
+    # command, mapped to that record's promptId, so a local-command-stdout
+    # record can find and unsend its paired command.
+    command_prompt: dict[str, Any] = {}
     for line_number, record in read_jsonl(path):
         role = record.get("type")
         # A message typed while the agent was mid-turn is recorded not as a
@@ -698,12 +710,46 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
             added, deleted = tallies.get(session, (0, 0))
             grew = claude_tally(record, repo, path, line_number)
             tallies[session] = (added + grew[0], deleted + grew[1])
+        is_command = False
         if role == "user":
             typed_source = attachment if attachment is not None else record
             content = attachment.get("prompt") if attachment is not None else message.get("content")
+            if attachment is None and isinstance(content, str) and content.startswith(
+                "<local-command-stdout>"
+            ):
+                if not CLAUDE_LOCAL_STDOUT.fullmatch(content):
+                    # TODO: Says a local-command-stdout wrapper is malformed
+                    # and the Claude transcript format should be inspected.
+                    raise UserError(
+                        f"Involucrum local-command-stdout malformatum: {path}:{line_number}\n"
+                        "Forma transcripti Claude inspicienda est."
+                    )
+                if session not in command_prompt or command_prompt[session] != record.get(
+                    "promptId"
+                ):
+                    # TODO: Says captured local-command output appeared without
+                    # the slash command it answers and the Claude transcript
+                    # format should be inspected.
+                    raise UserError(
+                        f"Effluxus imperii localis sine imperio compari: {path}:{line_number}\n"
+                        "Forma transcripti Claude inspicienda est."
+                    )
+                # Unsend the command: give back the work time and edits it
+                # absorbed so they ride the next real prompt instead.
+                unsent = threads[session].pop()
+                pending[session] = pending.get(session, 0.0) + unsent.active
+                added, deleted = tallies.get(session, (0, 0))
+                tallies[session] = (added + unsent.added, deleted + unsent.deleted)
+                command_prompt.pop(session, None)
+                continue
             if claude_origin_is_machine(typed_source, path, line_number):
                 continue
             text = claude_prompt(content, path, line_number)
+            # These two prefixes are harness-serialized or claude_prompt has
+            # already crashed, so typed text can never be marked unsendable.
+            is_command = isinstance(content, str) and content.startswith(
+                ("<command-message>", "<command-name>")
+            )
             ballots: tuple[Ballot, ...] = ()
             denial_key = None
             if text == "" and attachment is None:
@@ -734,6 +780,10 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
                 active=pending.pop(session, 0.0), added=added, deleted=deleted,
             )
         threads.setdefault(session, []).append(item)
+        if is_command:
+            command_prompt[session] = record.get("promptId")
+        else:
+            command_prompt.pop(session, None)
     return [
         exchange
         for session, messages in threads.items()

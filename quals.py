@@ -574,6 +574,75 @@ class ClaudeQuals(Fixture):
         with self.assertRaises(ace.UserError):
             ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)
 
+    def test_local_command_and_its_stdout_both_vanish(self):
+        cwd = str(self.repo)
+        wrapped = (
+            "<command-name>/remit</command-name>\n            "
+            "<command-message>remit</command-message>\n            "
+            "<command-args>everything owed</command-args>"
+        )
+        records = [
+            cu("real question", ts=T0, cwd=cwd),
+            ca([{"type": "text", "text": "Real answer."}], ts=T1, cwd=cwd),
+            cu(wrapped, ts=T2, cwd=cwd, promptId="pq1"),
+            cu("<local-command-stdout>Remitted.</local-command-stdout>",
+               ts=T2, cwd=cwd, promptId="pq1"),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual([(e.prompt, e.reply) for e in got], [("real question", "Real answer.")])
+
+    def test_unsent_local_command_gives_back_orphaned_edits(self):
+        cwd = str(self.repo)
+        patch = {
+            "filePath": str(self.repo / "a.py"),
+            "structuredPatch": [
+                {"oldStart": 1, "oldLines": 1, "newStart": 1, "newLines": 1,
+                 "lines": ["-old", "+new"]}
+            ],
+        }
+        wrapped = (
+            "<command-message>remit</command-message>\n"
+            "<command-name>/remit</command-name>"
+        )
+        records = [
+            cu("start the work", ts=T0, cwd=cwd),
+            cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+               ts=T1, cwd=cwd, toolUseResult=patch),
+            cu(wrapped, ts=T2, cwd=cwd, promptId="pq1"),
+            cu("<local-command-stdout>ok</local-command-stdout>", ts=T2, cwd=cwd, promptId="pq1"),
+            cu("carry on", ts=T2, cwd=cwd),
+            ca([{"type": "text", "text": "Done."}], ts="2026-03-01T10:15:00.000Z", cwd=cwd),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.reply, e.added, e.deleted) for e in got],
+            [("start the work", "", 1, 1), ("carry on", "Done.", 0, 0)],
+        )
+
+    def test_local_stdout_without_its_command_fails_loudly(self):
+        record = cu("<local-command-stdout>ok</local-command-stdout>", cwd=str(self.repo))
+        with self.assertRaises(ace.UserError):
+            ace.claude_exchanges(self.path([record]), self.repo)
+
+    def test_malformed_local_stdout_fails_loudly(self):
+        record = cu("<local-command-stdout>truncated", cwd=str(self.repo))
+        with self.assertRaises(ace.UserError):
+            ace.claude_exchanges(self.path([record]), self.repo)
+
+    def test_typed_text_resembling_a_command_is_never_unsent(self):
+        # Only harness-serialized command wrappers may be unsent by a stdout
+        # record; pasted text that merely looks command-ish must not be, so
+        # the stdout finds no paired command and the export crashes loudly.
+        cwd = str(self.repo)
+        records = [
+            cu("<command-args>i pasted this myself</command-args>", ts=T0, cwd=cwd,
+               promptId="pq1"),
+            cu("<local-command-stdout>ok</local-command-stdout>", ts=T1, cwd=cwd,
+               promptId="pq1"),
+        ]
+        with self.assertRaises(ace.UserError):
+            ace.claude_exchanges(self.path(records), self.repo)
+
     def test_rejection_reason_recovered_as_prompt(self):
         cwd = str(self.repo)
         denial = (
@@ -1834,7 +1903,7 @@ class CliQuals(Fixture):
 
     def test_version_and_help_exit_zero(self):
         code, out, err = self.run_cli(["--version"])
-        self.assertEqual((code, out, err), (0, "5.2.1\n", ""))
+        self.assertEqual((code, out, err), (0, "5.3.0\n", ""))
         code, out, _ = self.run_cli(["--help"])
         self.assertEqual(code, 0)
         self.assertIn("REPODIR", out)
