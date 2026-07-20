@@ -42,7 +42,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "5.0.0"
+VERSION = "5.1.0"
 UTC = dt.timezone.utc
 
 
@@ -1508,6 +1508,14 @@ CSS = r"""
      a plain green fails deutan/protan separation against these reds). */
   --diff-add: #00785a;
   --diff-del: #cf222e;
+  /* Provider identity trio for the exchange edge stripe and meta-line chip,
+     validated per mode against its page surface (within-trio CVD-simulated
+     ΔE >= 8.7, contrast >= 3:1) and against the diffstat pair and accent.
+     Identity never rides on color alone: the agent's name sits beside the
+     chip in every meta line. */
+  --claude: #b02777;
+  --codex: #076f9e;
+  --copilot: #6a2fc2;
   --measure: 44rem;
   --serif: "Iowan Old Style", Charter, Georgia, "Times New Roman", serif;
   --sans: ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
@@ -1526,6 +1534,9 @@ CSS = r"""
     --stripe: #ffb300;
     --diff-add: #1fa179;
     --diff-del: #f85149;
+    --claude: #d84f97;
+    --codex: #1a94b4;
+    --copilot: #8a75f0;
   }
 }
 * { box-sizing: border-box; }
@@ -1611,7 +1622,10 @@ summary a.anchor:hover { text-decoration: underline; }
   letter-spacing: .14em;
   font-variant-numeric: tabular-nums;
 }
-.exchange { margin: 2.6rem 0 0; clear: both; }
+.exchange { margin: 2.6rem 0 0; clear: both; border-left: 3px solid var(--provider); padding-left: 0.85rem; }
+.exchange.claude { --provider: var(--claude); }
+.exchange.codex { --provider: var(--codex); }
+.exchange.copilot { --provider: var(--copilot); }
 /* The prompt's diffstat floats right of the prompt's first lines. Numbers
    wear the metadata ink; polarity lives in the blocks (and in the signs and
    the fixed added-first order). */
@@ -1677,6 +1691,12 @@ summary::before {
 }
 details[open] > summary::before { transform: rotate(90deg); }
 summary:hover { color: var(--muted); }
+/* The agent's marks in the meta line: a small square chip wearing the
+   provider color (the same hue as the edge stripe) and the agent's name a
+   step louder than the rest of the line — promoted ink, never the mark
+   color, so the reading survives any color deficiency. */
+.chip { display: inline-block; width: 8px; height: 8px; border-radius: 2px; background: var(--provider); }
+.agent { color: var(--muted); font-weight: 600; }
 /* INVIOLABLE: machine-generated prose renders only inside a .machine
    container, in the phosphor-terminal style — monospace green on
    near-black, in both color schemes — for maximal distinction from the
@@ -1842,6 +1862,12 @@ def minimap(exchanges: Sequence[Exchange], locals_: Sequence[dt.datetime]) -> st
     )
 
 
+# CSS class per provider, keying the exchange's edge stripe and meta-line
+# chip to its agent. A provider missing here crashes render() (KeyError)
+# rather than shipping an unmarked exchange.
+PROVIDER_SLUGS = {"Claude Code": "claude", "Codex": "codex", "Copilot Chat": "copilot"}
+
+
 def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
     assert exchanges, "render() requires at least one exchange"
     locals_ = [e.timestamp.astimezone() for e in exchanges]
@@ -1897,6 +1923,7 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
         summary = (
             f'<a class="anchor" href="#p{number}">'
             f'<time datetime="{exchange.timestamp.isoformat()}">{local.strftime("%H:%M")}</time></a>'
+            f' <span class="chip"></span>'
             f' <span class="agent">{html.escape(exchange.provider)}</span>{model}{effort}{thought}'
         )
         attached = "".join(
@@ -1921,7 +1948,7 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
             else ""
         )
         chunks.append(
-            f'<article class="exchange" id="p{number}">'
+            f'<article class="exchange {PROVIDER_SLUGS[exchange.provider]}" id="p{number}">'
             f"{diffstat(exchange.added, exchange.deleted)}{ballots}{prompt}{attachments}\n"
             f"<details>\n<summary>{summary}</summary>\n{reply}\n</details>\n"
             "</article>"
