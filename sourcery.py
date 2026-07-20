@@ -42,7 +42,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "5.2.0"
+VERSION = "5.2.1"
 UTC = dt.timezone.utc
 
 
@@ -391,6 +391,16 @@ CLAUDE_COMMAND = re.compile(
     r"\A<command-message>([^<]+)</command-message>\n<command-name>/\1</command-name>\Z"
 )
 
+# Claude Code ≥2.1.215 puts the name first, indents the wrapper, and stores
+# any typed arguments in a third field. The arguments are real typing and
+# must reappear after the command name; only the inter-tag whitespace, which
+# the harness generates, is matched leniently.
+CLAUDE_COMMAND_ARGS = re.compile(
+    r"\A<command-name>/([^<]+)</command-name>\n\s*"
+    r"<command-message>\1</command-message>\n\s*"
+    r"<command-args>([^<]*)</command-args>\Z"
+)
+
 # Record flags that mark machine-generated pseudo-messages: subagent traffic,
 # meta records, compaction summaries, and transcript-only continuation notes.
 CLAUDE_SKIP_FLAGS = ("isSidechain", "isMeta", "isCompactSummary", "isVisibleInTranscriptOnly")
@@ -525,15 +535,19 @@ def claude_prompt(content: Any, path: Path, line_number: int) -> str:
     """Return the human-typed text of a user record, or "" if none survives."""
     match content:
         case str():
-            command = CLAUDE_COMMAND.fullmatch(content)
-            if content.startswith(("<command-message>", "<command-name>")) and command is None:
+            if command := CLAUDE_COMMAND.fullmatch(content):
+                return "/" + command.group(1)
+            if command := CLAUDE_COMMAND_ARGS.fullmatch(content):
+                name, args = command.groups()
+                return f"/{name} {args}" if args else f"/{name}"
+            if content.startswith(("<command-message>", "<command-name>")):
                 # TODO: Says a slash-command wrapper is malformed and the
                 # Claude transcript format should be inspected.
                 raise UserError(
                     f"Involucrum imperii obliqui malformatum: {path}:{line_number}\n"
                     "Forma transcripti Claude inspicienda est."
                 )
-            return CLAUDE_COMMAND.sub(r"/\1", content)
+            return content
         case list():
             items = [item for item in content if isinstance(item, dict)]
             if any(item.get("type") == "tool_result" for item in items):

@@ -547,6 +547,33 @@ class ClaudeQuals(Fixture):
         with self.assertRaises(ace.UserError):
             ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)
 
+    def test_slash_command_wrapper_with_args_recovered_with_typed_args(self):
+        wrapped = (
+            "<command-name>/remit</command-name>\n            "
+            "<command-message>remit</command-message>\n            "
+            "<command-args>everything owed</command-args>"
+        )
+        got = ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)
+        self.assertEqual([e.prompt for e in got], ["/remit everything owed"])
+
+    def test_slash_command_wrapper_with_empty_args_recovered_as_bare_command(self):
+        wrapped = (
+            "<command-name>/remit</command-name>\n            "
+            "<command-message>remit</command-message>\n            "
+            "<command-args></command-args>"
+        )
+        got = ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)
+        self.assertEqual([e.prompt for e in got], ["/remit"])
+
+    def test_slash_command_args_wrapper_with_mismatched_name_fails_loudly(self):
+        wrapped = (
+            "<command-name>/remit</command-name>\n            "
+            "<command-message>different</command-message>\n            "
+            "<command-args>everything owed</command-args>"
+        )
+        with self.assertRaises(ace.UserError):
+            ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)
+
     def test_rejection_reason_recovered_as_prompt(self):
         cwd = str(self.repo)
         denial = (
@@ -1807,7 +1834,7 @@ class CliQuals(Fixture):
 
     def test_version_and_help_exit_zero(self):
         code, out, err = self.run_cli(["--version"])
-        self.assertEqual((code, out, err), (0, "5.2.0\n", ""))
+        self.assertEqual((code, out, err), (0, "5.2.1\n", ""))
         code, out, _ = self.run_cli(["--help"])
         self.assertEqual(code, 0)
         self.assertIn("REPODIR", out)
