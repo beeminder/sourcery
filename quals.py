@@ -1216,6 +1216,28 @@ class CodexQuals(Fixture):
             ace.codex_exchanges(self.path(records), self.repo)
         self.assertIn("codex_tally", str(ctx.exception))
 
+    def test_update_with_empty_diff_counts_nothing(self):
+        # A successfully applied patch can leave a file textually unchanged,
+        # recorded as an update with an empty diff.
+        changes = {
+            str(self.repo / "a.js"): {
+                "type": "update",
+                "move_path": None,
+                "unified_diff": "",
+            },
+        }
+        records = [
+            cxmeta(str(self.repo)),
+            cxuser("q1", ts=T0),
+            cxpatch(changes, ts=T1),
+            cxagent("done", ts=T2),
+        ]
+        got = ace.codex_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.reply, e.added, e.deleted) for e in got],
+            [("q1", "done", 0, 0)],
+        )
+
     def test_unknown_patch_change_form_fails_loudly(self):
         changes = {str(self.repo / "a.js"): {"type": "transmogrify"}}
         records = [cxmeta(str(self.repo)), cxuser("go"), cxpatch(changes)]

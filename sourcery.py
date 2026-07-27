@@ -870,11 +870,16 @@ def codex_images(payload: Mapping[str, Any], path: Path, line_number: int) -> tu
 def codex_tally(change: Any, path: Path, line_number: int) -> tuple[int, int]:
     """Tally one file's change in an applied patch: updates carry a unified
     diff starting at its first hunk (a diff bearing +++/--- file headers
-    would miscount them as changes, so it falls through and fails loudly),
-    additions and deletions the whole content."""
+    would miscount them as changes, so it falls through and fails loudly)
+    or an empty diff when the patch left the file unchanged, additions and
+    deletions the whole content."""
     match change:
         case {"type": "update", "unified_diff": str() as diff} if diff.startswith("@@"):
             return diff_tally(diff.splitlines())
+        case {"type": "update", "unified_diff": ""}:
+            # A successfully applied patch can leave a file textually
+            # unchanged; nothing to count.
+            return (0, 0)
         case {"type": "add", "content": str() as content}:
             return (len(content.splitlines()), 0)
         case {"type": "delete", "content": str() as content}:
