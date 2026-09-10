@@ -1001,7 +1001,8 @@ COPILOT_CANNED = re.compile(r'@\w+ Enable: "|@workspace /explain ')
 
 
 # Copilot serializes pasted-image bytes as an object with numeric-string
-# keys plus a mimeType.
+# keys plus a mimeType. Newer sessions instead carry the whole payload
+# already encoded in a "$base64" field.
 def copilot_image_uri(variable: Mapping[str, Any], path: Path) -> str:
     value = variable.get("value")
     mime = variable.get("mimeType")
@@ -1009,7 +1010,11 @@ def copilot_image_uri(variable: Mapping[str, Any], path: Path) -> str:
         # TODO: Says a pasted image is stored in an unrecognized form.
         raise UserError(f"Imago in forma ignota: {path}")
     try:
-        data = bytes(value[str(i)] for i in range(len(value)))
+        match value:
+            case {"$base64": encoded}:
+                data = base64.b64decode(encoded, validate=True)
+            case _:
+                data = bytes(value[str(i)] for i in range(len(value)))
     except (KeyError, TypeError, ValueError) as exc:
         # TODO: Says a pasted image is stored in an unrecognized form.
         raise UserError(f"Imago in forma ignota: {path}\n{exc}") from exc

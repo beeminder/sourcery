@@ -7,6 +7,7 @@ lets unittest report what happened instead.
 """
 
 import ast
+import binascii
 import contextlib
 import datetime as dt
 import io
@@ -1431,6 +1432,35 @@ class VscodeQuals(Fixture):
         path = self.write_session(vssession([vsreq("q", [], variables=variables)]))
         got = ace.vscode_exchanges(path, (self.repo,), self.repo)
         self.assertEqual(got[0].images, ("data:image/png;base64,QUJD",))
+
+    def test_pasted_image_base64_field_decoded(self):
+        variables = [
+            {"kind": "image", "id": "i", "name": "Pasted Image", "mimeType": "image/png",
+             "isPasted": True, "value": {"$base64": "QUJD"}},
+        ]
+        path = self.write_session(vssession([vsreq("q", [], variables=variables)]))
+        got = ace.vscode_exchanges(path, (self.repo,), self.repo)
+        self.assertEqual(got[0].images, ("data:image/png;base64,QUJD",))
+
+    def test_unrecognized_image_form_fails_loudly(self):
+        # Each shape names the cause it must fail on, so a shape that fails for
+        # some unrelated reason cannot pass by accident.
+        shapes = [
+            ("QUJD", type(None)),
+            ({"$base64": "!!"}, binascii.Error),
+            ({"$base64": 3}, TypeError),
+            ({"nope": 1}, KeyError),
+            ({"0": "A"}, TypeError),
+        ]
+        for value, cause in shapes:
+            with self.subTest(value=value):
+                variables = [{"kind": "image", "id": "i", "name": "Pasted Image",
+                              "mimeType": "image/png", "value": value}]
+                path = self.write_session(vssession([vsreq("q", [], variables=variables)]))
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.vscode_exchanges(path, (self.repo,), self.repo)
+                self.assertIn(str(path), str(ctx.exception))
+                self.assertIsInstance(ctx.exception.__cause__, cause)
 
     def test_workspace_outside_repo_excluded_and_empty_session_ok(self):
         path = self.write_session(vssession([vsreq("q", [])]))
