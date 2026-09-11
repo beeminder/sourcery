@@ -9,20 +9,26 @@ lets unittest report what happened instead.
 import ast
 import binascii
 import contextlib
+import dataclasses
 import datetime as dt
 import io
 import json
+import os
 import re
+import shutil
+import stat
 import tempfile
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
 
 import sourcery as ace
+import unrender
 
 T0 = "2026-03-01T10:00:00.000Z"
 T1 = "2026-03-01T10:05:00.000Z"
 T2 = "2026-03-01T10:10:00.000Z"
+T3 = "2026-03-01T10:15:00.000Z"
 
 
 def utc(iso: str) -> dt.datetime:
@@ -92,7 +98,7 @@ class ClaudeQuals(Fixture):
 
     def test_string_prompt_kept_character_exact(self):
         text = "  two  spaces\n\ttab, trailing blank line\n\n"
-        got = ace.claude_exchanges(self.path([cu(text, cwd=str(self.repo))]), self.repo)
+        got = ace.claude_exchanges(self.path([cu(text, cwd=str(self.repo))]), self.repo)[0]
         self.assertEqual([e.prompt for e in got], [text])
         self.assertEqual(got[0].provider, "Claude Code")
         self.assertEqual(got[0].timestamp, utc(T0))
@@ -105,12 +111,12 @@ class ClaudeQuals(Fixture):
             {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA"}},
             {"type": "text", "text": "real prompt, exactly  this"},
         ]
-        got = ace.claude_exchanges(self.path([cu(content, cwd=str(self.repo))]), self.repo)
+        got = ace.claude_exchanges(self.path([cu(content, cwd=str(self.repo))]), self.repo)[0]
         self.assertEqual([e.prompt for e in got], ["real prompt, exactly  this"])
 
     def test_wrapper_only_message_yields_nothing(self):
         content = [{"type": "text", "text": "<ide_opened_file>x</ide_opened_file>"}]
-        got = ace.claude_exchanges(self.path([cu(content, cwd=str(self.repo))]), self.repo)
+        got = ace.claude_exchanges(self.path([cu(content, cwd=str(self.repo))]), self.repo)[0]
         self.assertEqual(got, [])
 
     def test_tool_results_and_flagged_records_skipped(self):
@@ -122,7 +128,7 @@ class ClaudeQuals(Fixture):
             cu("This session is being continued...", cwd=cwd, isCompactSummary=True),
             cu("transcript-only", cwd=cwd, isVisibleInTranscriptOnly=True),
         ]
-        self.assertEqual(ace.claude_exchanges(self.path(records), self.repo), [])
+        self.assertEqual(ace.claude_exchanges(self.path(records), self.repo)[0], [])
 
     def test_reply_joins_text_blocks_across_streamed_records(self):
         cwd = str(self.repo)
@@ -133,7 +139,7 @@ class ClaudeQuals(Fixture):
             ca([{"type": "tool_use", "id": "t", "name": "Bash", "input": {}}], cwd=cwd, mid="mA"),
             ca([{"type": "text", "text": "Part two."}], ts=T2, cwd=cwd, mid="mB", effort="xhigh"),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0].prompt, "go")
         self.assertEqual(got[0].reply, "Part one.\n\nPart two.")
@@ -148,7 +154,7 @@ class ClaudeQuals(Fixture):
             cu([png, {"type": "text", "text": "look at this"}], cwd=cwd),
             cu([dict(png)], ts=T1, cwd=cwd),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.images) for e in got],
             [("look at this", ("data:image/png;base64,AAA",)), ("", ("data:image/png;base64,AAA",))],
@@ -157,7 +163,7 @@ class ClaudeQuals(Fixture):
     def test_unrecognized_image_form_fails_loudly(self):
         content = [{"type": "image", "source": {"type": "url", "url": "https://x"}}]
         with self.assertRaises(ace.UserError):
-            ace.claude_exchanges(self.path([cu(content, cwd=str(self.repo))]), self.repo)
+            ace.claude_exchanges(self.path([cu(content, cwd=str(self.repo))]), self.repo)[0]
 
     def test_synthetic_harness_notices_dropped(self):
         cwd = str(self.repo)
@@ -165,7 +171,7 @@ class ClaudeQuals(Fixture):
             cu("go", cwd=cwd),
             ca([{"type": "text", "text": "API Error: 401"}], cwd=cwd, model="<synthetic>"),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.reply, e.model, e.elapsed) for e in got],
             [("go", "", "", 0.0)],
@@ -174,7 +180,7 @@ class ClaudeQuals(Fixture):
     def test_identical_consecutive_prompts_are_two_human_acts(self):
         cwd = str(self.repo)
         records = [cu("retry", ts=T0, cwd=cwd), cu("retry", ts=T1, cwd=cwd)]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([(e.prompt, e.reply) for e in got], [("retry", ""), ("retry", "")])
 
     def test_cwd_outside_repo_excluded_subdir_included(self):
@@ -182,7 +188,7 @@ class ClaudeQuals(Fixture):
             cu("outside", cwd="/somewhere/else"),
             cu("inside", ts=T1, cwd=str(self.repo / "sub" / "dir")),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([e.prompt for e in got], ["inside"])
 
     def test_elapsed_excludes_permission_wait_credits_recorded_tool_time(self):
@@ -198,7 +204,7 @@ class ClaudeQuals(Fixture):
             ),
             ca([{"type": "text", "text": "done"}], ts="2026-03-01T10:15:00.000Z", cwd=cwd, mid="m9"),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         # 300s (prompt -> tool_use) + 60s recorded runtime + 300s (result -> reply);
         # the T1 -> T2 gap itself (wait + run) is never counted.
         self.assertEqual([(e.prompt, e.elapsed) for e in got], [("go", 660.0)])
@@ -216,7 +222,7 @@ class ClaudeQuals(Fixture):
             ),
             ca([{"type": "text", "text": "report"}], ts="2026-03-01T10:15:00.000Z", cwd=cwd, mid="m9"),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         # 300s (prompt -> tool_use) + 240s recorded subagent runtime + 300s
         # (result -> reply).
         self.assertEqual([(e.prompt, e.elapsed) for e in got], [("go", 840.0)])
@@ -235,7 +241,7 @@ class ClaudeQuals(Fixture):
             ),
             ca([{"type": "text", "text": "report"}], ts="2026-03-01T10:07:00.000Z", cwd=cwd, mid="m9"),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         # 300s (prompt -> tool_use) + min(60s gap, 240s recorded) + 60s
         # (result -> reply).
         self.assertEqual([(e.prompt, e.elapsed) for e in got], [("go", 420.0)])
@@ -250,7 +256,7 @@ class ClaudeQuals(Fixture):
             ca([{"type": "text", "text": "done"}], ts="2026-03-01T10:15:00.000Z", cwd=cwd, mid="m9"),
             cu("next", ts="2026-03-01T18:00:00.000Z", cwd=cwd),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         # Wall clock runs from the prompt to its final reply record (900s),
         # exceeding elapsed (600s) by the unrecorded tool-result gap; the
         # second exchange never got a reply, so its wall is unknown.
@@ -272,7 +278,7 @@ class ClaudeQuals(Fixture):
             cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
                ts=T2, cwd=cwd, toolUseResult=patch),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.reply, e.elapsed, e.added, e.deleted) for e in got],
             [("change it", "", 360.0, 1, 1)],
@@ -310,7 +316,7 @@ class ClaudeQuals(Fixture):
             cu("now a question, no edits", ts="2026-03-01T10:15:00.000Z", cwd=cwd),
             ca([{"type": "text", "text": "answered"}], ts="2026-03-01T10:16:00.000Z", mid="m2", cwd=cwd),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.added, e.deleted) for e in got],
             [("build it", 5, 1), ("now a question, no edits", 0, 0)],
@@ -338,7 +344,7 @@ class ClaudeQuals(Fixture):
                ts=T1, cwd=cwd, toolUseResult=denial),
             ca([{"type": "text", "text": "hm"}], ts=T2, cwd=cwd),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([(e.prompt, e.added, e.deleted) for e in got], [("go", 0, 0)])
 
     def test_hunk_lines_that_look_like_diff_headers_still_counted(self):
@@ -359,7 +365,7 @@ class ClaudeQuals(Fixture):
                ts=T1, cwd=cwd, toolUseResult=patch),
             ca([{"type": "text", "text": "done"}], ts=T2, cwd=cwd),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([(e.added, e.deleted) for e in got], [(1, 1)])
 
     def test_orphaned_edits_credited_to_interrupted_exchange(self):
@@ -399,7 +405,7 @@ class ClaudeQuals(Fixture):
                ts=T2, cwd=cwd, toolUseResult=create),
             ca([{"type": "text", "text": "Did X."}], ts="2026-03-01T10:15:00.000Z", cwd=cwd),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.reply, e.added, e.deleted) for e in got],
             [("start the work", "", 2, 1), ("wait, also do X", "Did X.", 3, 0)],
@@ -424,7 +430,7 @@ class ClaudeQuals(Fixture):
             ca([{"type": "tool_use", "id": "t1", "name": "Edit", "input": {}}], ts=T1, cwd=cwd),
             queued,
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([(e.prompt, e.elapsed) for e in got], [("first", 300.0), ("second", 0.0)])
 
     def test_file_creation_without_content_fails_loudly(self):
@@ -436,7 +442,7 @@ class ClaudeQuals(Fixture):
                ts=T1, cwd=cwd, toolUseResult=broken),
         ]
         with self.assertRaises(ace.UserError):
-            ace.claude_exchanges(self.path(records), self.repo)
+            ace.claude_exchanges(self.path(records), self.repo)[0]
 
     def test_queued_midturn_message_recovered_as_prompt(self):
         cwd = str(self.repo)
@@ -462,14 +468,14 @@ class ClaudeQuals(Fixture):
             {"type": "attachment", "attachment": {"type": "todo_reminder"}, "timestamp": T2, "cwd": cwd},
             ca([{"type": "text", "text": "Doing X."}], ts="2026-03-01T10:15:00.000Z", cwd=cwd, mid="m8"),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.reply) for e in got],
             [("start the work", "Working."), ("wait, also do X", "Doing X.")],
         )
         bad = [queued("hologram-mode", [{"type": "text", "text": "x"}], T0)]
         with self.assertRaises(ace.UserError):
-            ace.claude_exchanges(self.path(bad), self.repo)
+            ace.claude_exchanges(self.path(bad), self.repo)[0]
 
     def test_queued_prompt_timestamp_does_not_rewind_activity_clock(self):
         cwd = str(self.repo)
@@ -499,7 +505,7 @@ class ClaudeQuals(Fixture):
             queued,
             ca([{"type": "text", "text": "done"}], ts="2026-03-01T10:11:00.000Z", cwd=cwd),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.elapsed) for e in got],
             [("first", 300.0), ("second", 60.0)],
@@ -516,12 +522,12 @@ class ClaudeQuals(Fixture):
             cu("typed with origin", ts=T1, cwd=cwd, origin={"kind": "human"}),
             cu("typed without origin", ts=T2, cwd=cwd),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([e.prompt for e in got], ["typed with origin", "typed without origin"])
         with self.assertRaises(ace.UserError):
             ace.claude_exchanges(
                 self.path([cu("x", cwd=cwd, origin={"kind": "hologram"})]), self.repo
-            )
+            )[0]
 
     def test_interrupt_markers_dropped_but_typed_text_around_them_kept(self):
         cwd = str(self.repo)
@@ -530,23 +536,23 @@ class ClaudeQuals(Fixture):
             cu("[Request interrupted by user for tool use]", ts=T1, cwd=cwd),
             cu("[Request interrupted by user] but i typed this", ts=T2, cwd=cwd),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([e.prompt for e in got], ["[Request interrupted by user] but i typed this"])
 
     def test_slash_command_wrapper_recovered_as_typed_command(self):
         wrapped = "<command-message>insights</command-message>\n<command-name>/insights</command-name>"
-        got = ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)
+        got = ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)[0]
         self.assertEqual([e.prompt for e in got], ["/insights"])
 
     def test_malformed_slash_command_wrapper_fails_loudly(self):
         wrapped = "<command-message>insights</command-message>\n<command-name>/different</command-name>"
         with self.assertRaises(ace.UserError):
-            ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)
+            ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)[0]
 
     def test_partial_slash_command_wrapper_fails_loudly(self):
         wrapped = "<command-name>/insights</command-name>"
         with self.assertRaises(ace.UserError):
-            ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)
+            ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)[0]
 
     def test_slash_command_wrapper_with_args_recovered_with_typed_args(self):
         wrapped = (
@@ -554,7 +560,7 @@ class ClaudeQuals(Fixture):
             "<command-message>remit</command-message>\n            "
             "<command-args>everything owed</command-args>"
         )
-        got = ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)
+        got = ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)[0]
         self.assertEqual([e.prompt for e in got], ["/remit everything owed"])
 
     def test_slash_command_wrapper_with_empty_args_recovered_as_bare_command(self):
@@ -563,7 +569,7 @@ class ClaudeQuals(Fixture):
             "<command-message>remit</command-message>\n            "
             "<command-args></command-args>"
         )
-        got = ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)
+        got = ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)[0]
         self.assertEqual([e.prompt for e in got], ["/remit"])
 
     def test_slash_command_args_wrapper_with_mismatched_name_fails_loudly(self):
@@ -573,7 +579,7 @@ class ClaudeQuals(Fixture):
             "<command-args>everything owed</command-args>"
         )
         with self.assertRaises(ace.UserError):
-            ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)
+            ace.claude_exchanges(self.path([cu(wrapped, cwd=str(self.repo))]), self.repo)[0]
 
     def test_local_command_and_its_stdout_both_vanish(self):
         cwd = str(self.repo)
@@ -589,7 +595,7 @@ class ClaudeQuals(Fixture):
             cu("<local-command-stdout>Remitted.</local-command-stdout>",
                ts=T2, cwd=cwd, promptId="pq1"),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([(e.prompt, e.reply) for e in got], [("real question", "Real answer.")])
 
     def test_unsent_local_command_gives_back_orphaned_edits(self):
@@ -614,7 +620,7 @@ class ClaudeQuals(Fixture):
             cu("carry on", ts=T2, cwd=cwd),
             ca([{"type": "text", "text": "Done."}], ts="2026-03-01T10:15:00.000Z", cwd=cwd),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.reply, e.added, e.deleted) for e in got],
             [("start the work", "", 1, 1), ("carry on", "Done.", 0, 0)],
@@ -623,12 +629,12 @@ class ClaudeQuals(Fixture):
     def test_local_stdout_without_its_command_fails_loudly(self):
         record = cu("<local-command-stdout>ok</local-command-stdout>", cwd=str(self.repo))
         with self.assertRaises(ace.UserError):
-            ace.claude_exchanges(self.path([record]), self.repo)
+            ace.claude_exchanges(self.path([record]), self.repo)[0]
 
     def test_malformed_local_stdout_fails_loudly(self):
         record = cu("<local-command-stdout>truncated", cwd=str(self.repo))
         with self.assertRaises(ace.UserError):
-            ace.claude_exchanges(self.path([record]), self.repo)
+            ace.claude_exchanges(self.path([record]), self.repo)[0]
 
     def test_typed_text_resembling_a_command_is_never_unsent(self):
         # Only harness-serialized command wrappers may be unsent by a stdout
@@ -642,7 +648,7 @@ class ClaudeQuals(Fixture):
                promptId="pq1"),
         ]
         with self.assertRaises(ace.UserError):
-            ace.claude_exchanges(self.path(records), self.repo)
+            ace.claude_exchanges(self.path(records), self.repo)[0]
 
     def test_rejection_reason_recovered_as_prompt(self):
         cwd = str(self.repo)
@@ -655,7 +661,7 @@ class ClaudeQuals(Fixture):
             cu([{"type": "tool_result", "tool_use_id": "t1", "content": denial[7:]}], cwd=cwd, toolUseResult=denial),
             ca([{"type": "text", "text": "Understood."}], cwd=cwd),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.reply) for e in got],
             [("hold tight, i'm catching you up", "Understood.")],
@@ -680,7 +686,7 @@ class ClaudeQuals(Fixture):
             denial_record(T1, "t2"),
             ca([{"type": "text", "text": "Standing by."}], ts=T2, cwd=cwd),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([(e.prompt, e.reply) for e in got], [("hold tight", "Standing by.")])
         self.assertEqual(got[0].timestamp, utc(T0))
 
@@ -698,7 +704,7 @@ class ClaudeQuals(Fixture):
                ts=T1, cwd=cwd, toolUseResult=denial, promptId="act-2"),
             ca([{"type": "text", "text": "Standing by."}], ts=T2, cwd=cwd),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.reply) for e in got],
             [("hold tight", ""), ("hold tight", "Standing by.")],
@@ -722,7 +728,7 @@ class ClaudeQuals(Fixture):
             for i, (ts, denial) in enumerate(zip((T0, T1), denials), start=1)
         ]
         records.append(ca([{"type": "text", "text": "Standing by."}], ts=T2, cwd=cwd))
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([(e.prompt, e.reply) for e in got], [("hold tight", "Standing by.")])
 
     def test_identical_denial_feedback_after_more_agent_work_stays_distinct(self):
@@ -741,7 +747,7 @@ class ClaudeQuals(Fixture):
                ts=T1, cwd=cwd, toolUseResult=denial, promptId="reused-prompt"),
             ca([{"type": "text", "text": "Standing by."}], ts=T2, cwd=cwd),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.reply) for e in got],
             [("hold tight", ""), ("hold tight", "Standing by.")],
@@ -780,7 +786,7 @@ class ClaudeQuals(Fixture):
                 toolUseResult={"stdout": lookalike, "stderr": ""},
             ),
         ]
-        self.assertEqual(ace.claude_exchanges(self.path(records), self.repo), [])
+        self.assertEqual(ace.claude_exchanges(self.path(records), self.repo)[0], [])
 
     def test_plan_and_permission_feedback_variants_recovered(self):
         cwd = str(self.repo)
@@ -807,7 +813,7 @@ class ClaudeQuals(Fixture):
                 ),
             ),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([e.prompt for e in got], ["make the plan shorter", "use uv instead"])
 
     def test_mutated_answers_structure_fails_loudly(self):
@@ -819,7 +825,7 @@ class ClaudeQuals(Fixture):
             ),
         ]
         with self.assertRaises(ace.UserError):
-            ace.claude_exchanges(self.path(records), self.repo)
+            ace.claude_exchanges(self.path(records), self.repo)[0]
 
     def test_unrecognized_denial_variant_fails_loudly(self):
         denial = (
@@ -835,7 +841,7 @@ class ClaudeQuals(Fixture):
             ),
         ]
         with self.assertRaises(ace.UserError):
-            ace.claude_exchanges(self.path(records), self.repo)
+            ace.claude_exchanges(self.path(records), self.repo)[0]
 
     def test_answers_split_into_typed_asked_and_chosen(self):
         cwd = str(self.repo)
@@ -853,7 +859,7 @@ class ClaudeQuals(Fixture):
                 toolUseResult=result,
             ),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.ballots) for e in got],
             [(
@@ -879,7 +885,7 @@ class ClaudeQuals(Fixture):
             ),
             ca([{"type": "text", "text": "Deleting."}], cwd=cwd),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.ballots, e.reply) for e in got],
             [("", (ace.Ballot("Q1", ("Delete it",), ("Delete it",)),), "Deleting.")],
@@ -902,32 +908,32 @@ class ClaudeQuals(Fixture):
                 toolUseResult=result,
             ),
         ]
-        got = ace.claude_exchanges(self.path(records), self.repo)
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(got[0].ballots[0].picked, ("Tutorial", "Sandbox"))
         self.assertEqual(got[0].prompt, "")
 
     def test_missing_timestamp_fails_loudly(self):
         path = self.path([cu("go", ts=None, cwd=str(self.repo))])
         with self.assertRaises(ace.UserError):
-            ace.claude_exchanges(path, self.repo)
+            ace.claude_exchanges(path, self.repo)[0]
 
     def test_live_capture_tolerates_truncated_final_line_only(self):
         path = self.tmp / "claude" / "p1" / "live.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         good = json.dumps(cu("hi", cwd=str(self.repo)))
         path.write_text(good + '\n{"type": "user", "mess', encoding="utf-8")
-        got = ace.claude_exchanges(path, self.repo)
+        got = ace.claude_exchanges(path, self.repo)[0]
         self.assertEqual([e.prompt for e in got], ["hi"])
         path.write_text('not json\n' + good + "\n", encoding="utf-8")
         with self.assertRaises(ace.UserError):
-            ace.claude_exchanges(path, self.repo)
+            ace.claude_exchanges(path, self.repo)[0]
 
     def test_malformed_jsonl_cites_file_and_line(self):
         path = self.tmp / "claude" / "p1" / "bad.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('{"type": "system"}\nnot json\n', encoding="utf-8")
         with self.assertRaises(ace.UserError) as ctx:
-            ace.claude_exchanges(path, self.repo)
+            ace.claude_exchanges(path, self.repo)[0]
         self.assertIn(str(path), str(ctx.exception))
         self.assertIn(":2", str(ctx.exception))
 
@@ -988,7 +994,7 @@ class CodexQuals(Fixture):
             cxuser(wrapped),
             cxagent("Looks fine."),
         ]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([e.prompt for e in got], ["sure, let's see how it looks"])
         self.assertEqual(got[0].reply, "Looks fine.")
         self.assertEqual(got[0].model, "gpt-5.3-codex")
@@ -998,7 +1004,7 @@ class CodexQuals(Fixture):
 
     def test_plain_message_kept_verbatim(self):
         records = [cxmeta(str(self.repo)), cxuser("fix the  bug\nplease")]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([e.prompt for e in got], ["fix the  bug\nplease"])
 
     def test_identical_consecutive_prompts_are_two_human_acts(self):
@@ -1008,7 +1014,7 @@ class CodexQuals(Fixture):
             cxuser("retry", ts=T1),
             cxagent("done", ts=T2),
         ]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.reply) for e in got],
             [("retry", ""), ("retry", "done")],
@@ -1022,24 +1028,24 @@ class CodexQuals(Fixture):
             {"type": "event_msg", "timestamp": T0, "payload": {"type": "token_count", "info": {}}},
             cxagent("done"),
         ]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([(e.prompt, e.reply) for e in got], [("go", "done")])
 
     def test_machine_sessions_skipped(self):
         subagent = [cxmeta(str(self.repo), source={"subagent": {"other": "guardian"}}), cxuser("audit")]
         titler = [cxmeta(str(self.repo), source="exec"), cxuser("Generate a concise UI title")]
-        self.assertEqual(ace.codex_exchanges(self.path(subagent, "a.jsonl"), self.repo), [])
-        self.assertEqual(ace.codex_exchanges(self.path(titler, "b.jsonl"), self.repo), [])
+        self.assertEqual(ace.codex_exchanges(self.path(subagent, "a.jsonl"), self.repo)[0], [])
+        self.assertEqual(ace.codex_exchanges(self.path(titler, "b.jsonl"), self.repo)[0], [])
 
     def test_unknown_source_fails_loudly(self):
         path = self.path([cxmeta(str(self.repo), source="quantum"), cxuser("hi")])
         with self.assertRaises(ace.UserError) as ctx:
-            ace.codex_exchanges(path, self.repo)
+            ace.codex_exchanges(path, self.repo)[0]
         self.assertIn("quantum", str(ctx.exception))
 
     def test_cwd_outside_repo_excluded(self):
         records = [cxmeta("/elsewhere"), cxuser("hi")]
-        self.assertEqual(ace.codex_exchanges(self.path(records), self.repo), [])
+        self.assertEqual(ace.codex_exchanges(self.path(records), self.repo)[0], [])
 
     def test_agent_history_handoff_dropped(self):
         records = [
@@ -1047,7 +1053,7 @@ class CodexQuals(Fixture):
             cxuser("The following is the Codex agent history added since your last message."),
             cxuser("real question", ts=T1),
         ]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([e.prompt for e in got], ["real question"])
 
     def test_pasted_image_data_uris_pass_through(self):
@@ -1055,7 +1061,7 @@ class CodexQuals(Fixture):
             cxmeta(str(self.repo)),
             cxuser("see image", images=["data:image/png;base64,QUJD"]),
         ]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(got[0].images, ("data:image/png;base64,QUJD",))
 
     def test_elapsed_excludes_overnight_idle_before_next_turn(self):
@@ -1067,7 +1073,7 @@ class CodexQuals(Fixture):
             cxuser("q2", ts="2026-03-02T09:00:01.000Z"),
             cxagent("a2", ts="2026-03-02T09:01:01.000Z"),
         ]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([(e.prompt, e.elapsed) for e in got], [("q1", 300.0), ("q2", 60.0)])
 
     def test_elapsed_excludes_tool_output_gaps(self):
@@ -1078,7 +1084,7 @@ class CodexQuals(Fixture):
             {"type": "response_item", "timestamp": T2, "payload": {"type": "function_call_output", "output": "x"}},
             cxagent("done", ts="2026-03-01T10:15:00.000Z"),
         ]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         # 300s (prompt -> call) + 300s (output -> reply); the call -> output
         # gap (tool runtime, possibly spanning a sleep) is never counted.
         self.assertEqual([(e.prompt, e.elapsed) for e in got], [("go", 600.0)])
@@ -1091,7 +1097,7 @@ class CodexQuals(Fixture):
             {"type": "response_item", "timestamp": T2, "payload": {"type": "function_call_output", "output": "x"}},
             cxagent("done", ts="2026-03-01T10:15:00.000Z"),
         ]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         # Wall clock runs from the prompt to the final agent_message (900s),
         # exceeding elapsed (600s) by the uncounted tool-output gap.
         self.assertEqual([(e.prompt, e.elapsed, e.wall) for e in got], [("go", 600.0, 900.0)])
@@ -1114,7 +1120,7 @@ class CodexQuals(Fixture):
             cxuser("just a question", ts="2026-03-01T10:15:00.000Z"),
             cxagent("answered", ts="2026-03-01T10:16:00.000Z"),
         ]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.added, e.deleted) for e in got],
             [("build it", 5, 3), ("just a question", 0, 0)],
@@ -1135,7 +1141,7 @@ class CodexQuals(Fixture):
              "payload": {"type": "function_call", "name": "apply_patch"}},
             cxpatch(changes, ts=T2),
         ]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.reply, e.elapsed, e.added, e.deleted) for e in got],
             [("change it", "", 300.0, 1, 1)],
@@ -1149,7 +1155,7 @@ class CodexQuals(Fixture):
              "payload": {"type": "function_call", "name": "shell"}},
             cxuser("second", ts=T2),
         ]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([(e.prompt, e.elapsed) for e in got], [("first", 300.0), ("second", 0.0)])
 
     def test_failed_and_foreign_patches_not_tallied(self):
@@ -1162,7 +1168,7 @@ class CodexQuals(Fixture):
             cxpatch(failed, success=False, ts=T1),
             cxagent("hm", ts=T2),
         ]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([(e.added, e.deleted) for e in got], [(0, 0)])
 
     def test_orphaned_patch_credited_to_interrupted_exchange(self):
@@ -1180,7 +1186,7 @@ class CodexQuals(Fixture):
             cxuser("q2, before any reply", ts=T2),
             cxagent("done", ts="2026-03-01T10:15:00.000Z"),
         ]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.reply, e.added, e.deleted) for e in got],
             [("q1", "", 2, 1), ("q2, before any reply", "done", 0, 0)],
@@ -1195,7 +1201,7 @@ class CodexQuals(Fixture):
             cxuser("The following is the Codex agent history added since your last message.", ts=T2),
             cxagent("done", ts="2026-03-01T10:15:00.000Z"),
         ]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.reply, e.added, e.deleted) for e in got],
             [("q1", "done", 3, 0)],
@@ -1214,7 +1220,7 @@ class CodexQuals(Fixture):
         }
         records = [cxmeta(str(self.repo)), cxuser("go"), cxpatch(changes)]
         with self.assertRaises(ace.UserError) as ctx:
-            ace.codex_exchanges(self.path(records), self.repo)
+            ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertIn("codex_tally", str(ctx.exception))
 
     def test_update_with_empty_diff_counts_nothing(self):
@@ -1233,7 +1239,7 @@ class CodexQuals(Fixture):
             cxpatch(changes, ts=T1),
             cxagent("done", ts=T2),
         ]
-        got = ace.codex_exchanges(self.path(records), self.repo)
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertEqual(
             [(e.prompt, e.reply, e.added, e.deleted) for e in got],
             [("q1", "done", 0, 0)],
@@ -1243,7 +1249,7 @@ class CodexQuals(Fixture):
         changes = {str(self.repo / "a.js"): {"type": "transmogrify"}}
         records = [cxmeta(str(self.repo)), cxuser("go"), cxpatch(changes)]
         with self.assertRaises(ace.UserError) as ctx:
-            ace.codex_exchanges(self.path(records), self.repo)
+            ace.codex_exchanges(self.path(records), self.repo)[0]
         self.assertIn("codex_tally", str(ctx.exception))
 
     def test_terminal_fix_template_dropped_even_in_codex(self):
@@ -1251,7 +1257,7 @@ class CodexQuals(Fixture):
             cxmeta(str(self.repo)),
             cxuser("I get the following error. Please fix the error. Completed code only, no commentary.\n\n$ x\nboom"),
         ]
-        self.assertEqual(ace.codex_exchanges(self.path(records), self.repo), [])
+        self.assertEqual(ace.codex_exchanges(self.path(records), self.repo)[0], [])
 
 
 # ------------------------------------------------------ VS Code / Copilot Chat
@@ -1288,6 +1294,29 @@ def vssession(requests, version=3, sid="v1"):
     }
 
 
+def vsterminal_notice(response, rid="r2", ts=1772576233307, elapsed_ms=None):
+    # VS Code starts a request by itself when a terminal command the agent
+    # launched exits: the user-role text is its completion notice plus the
+    # captured output, and the request carries three marker fields no typed
+    # request has (shape observed 2026-09-10).
+    request = vsreq(
+        "[Terminal 00000000-0000-4000-8000-000000000000 notification: command "
+        "completed with exit code 143. The terminal has been cleaned up.]\n"
+        "Terminal output:\n$ python3 -m http.server 8000\n"
+        "Serving HTTP on :: port 8000 (http://[::]:8000/) ...\nTerminated: 15\n",
+        response,
+        ts=ts,
+        rid=rid,
+        elapsed_ms=elapsed_ms,
+    )
+    request.update(
+        isSystemInitiated=True,
+        systemInitiatedLabel="` python3 -m http.server 8000` completed",
+        terminalExecutionId="00000000-0000-4000-8000-000000000000",
+    )
+    return request
+
+
 class VscodeQuals(Fixture):
     def write_session(self, state, name="s.json"):
         path = self.tmp / "chatSessions" / name
@@ -1315,7 +1344,7 @@ class VscodeQuals(Fixture):
             {"kind": "markdownVuln"},
         ]
         path = self.write_session(vssession([vsreq("do the  thing", response)]))
-        got = ace.vscode_exchanges(path, (self.repo,), self.repo)
+        got = ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
         self.assertEqual([e.prompt for e in got], ["do the  thing"])
         self.assertEqual(got[0].reply, "Chunk one chunk two.")
         self.assertEqual(got[0].provider, "Copilot Chat")
@@ -1334,7 +1363,7 @@ class VscodeQuals(Fixture):
             md("done"),
         ]
         path = self.write_session(vssession([vsreq("q", response, model="copilot/auto")]))
-        got = ace.vscode_exchanges(path, (self.repo,), self.repo)
+        got = ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
         self.assertEqual([(e.reply, e.model) for e in got], [("done", "gpt-5.4")])
 
     def test_malformed_or_duplicate_auto_mode_resolution_fails_loudly(self):
@@ -1344,7 +1373,7 @@ class VscodeQuals(Fixture):
             with self.subTest(response=response):
                 path = self.write_session(vssession([vsreq("q", response, model="copilot/auto")]))
                 with self.assertRaises(ace.UserError) as ctx:
-                    ace.vscode_exchanges(path, (self.repo,), self.repo)
+                    ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
                 self.assertIn("auto-mode", str(ctx.exception))
 
     def test_inline_reference_name_spliced_into_reply(self):
@@ -1354,20 +1383,20 @@ class VscodeQuals(Fixture):
             md(" for details"),
         ]
         path = self.write_session(vssession([vsreq("q", response)]))
-        got = ace.vscode_exchanges(path, (self.repo,), self.repo)
+        got = ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
         self.assertEqual(got[0].reply, "see foo.py for details")
 
     def test_unknown_response_kind_fails_loudly(self):
         path = self.write_session(vssession([vsreq("q", [{"kind": "hologram"}])]))
         with self.assertRaises(ace.UserError) as ctx:
-            ace.vscode_exchanges(path, (self.repo,), self.repo)
+            ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
         self.assertIn("hologram", str(ctx.exception))
         self.assertIn(str(path), str(ctx.exception))
 
     def test_unknown_version_fails_loudly(self):
         path = self.write_session(vssession([vsreq("q", [])], version=2))
         with self.assertRaises(ace.UserError):
-            ace.vscode_exchanges(path, (self.repo,), self.repo)
+            ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
 
     def test_mutation_log_replayed(self):
         base = vssession([])
@@ -1382,9 +1411,43 @@ class VscodeQuals(Fixture):
             {"kind": 3, "k": ["customTitle"]},
         ]
         path = write_jsonl(self.tmp / "chatSessions" / "m.jsonl", lines)
-        got = ace.vscode_exchanges(path, (self.repo,), self.repo)
+        got = ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
         self.assertEqual([e.prompt for e in got], ["first", "second"])
         self.assertEqual(got[1].reply, "late reply")
+
+    def test_system_initiated_terminal_notice_dropped_typed_kept(self):
+        # Replicata: a typed prompt, then the request VS Code fabricates when
+        # the agent's terminal command exits (marked isSystemInitiated), then
+        # another typed prompt. Expectata: exchanges for the two typed prompts
+        # only. Resultata before the fix: the notice rendered as a third
+        # human prompt, terminal log and all.
+        requests = [
+            vsreq("start the server", [md("started")], rid="r1", ts=1772576233307),
+            vsterminal_notice([md("The server stopped.")], rid="r2", ts=1772576300000, elapsed_ms=26000),
+            vsreq("thanks", [md("ok")], rid="r3", ts=1772576400000),
+        ]
+        path = self.write_session(vssession(requests))
+        got = ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
+        self.assertEqual([e.prompt for e in got], ["start the server", "thanks"])
+
+    def test_explicitly_not_system_initiated_request_kept(self):
+        # An explicit false marker is a typed request: VS Code does store
+        # explicit false for other boolean request fields.
+        request = vsreq("typed", [md("r")])
+        request["isSystemInitiated"] = False
+        path = self.write_session(vssession([request]))
+        got = ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
+        self.assertEqual([e.prompt for e in got], ["typed"])
+
+    def test_unrecognized_system_initiated_marker_fails_loudly(self):
+        # A marker that is neither true nor false could hide typing behind a
+        # truthy value, so it must crash rather than be coerced either way.
+        for marker in ("true", 1):
+            request = vsreq("typed", [md("r")])
+            request["isSystemInitiated"] = marker
+            path = self.write_session(vssession([request]))
+            with self.assertRaises(ace.UserError):
+                ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
 
     def test_button_and_template_requests_dropped_typed_kept(self):
         requests = [
@@ -1406,7 +1469,7 @@ class VscodeQuals(Fixture):
             ),
         ]
         path = self.write_session(vssession(requests))
-        got = ace.vscode_exchanges(path, (self.repo,), self.repo)
+        got = ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
         self.assertEqual(
             [e.prompt for e in got],
             ["can you fix this:\n\n$ ./x.py\nTraceback", "(general reminder about AGENTS.md)"],
@@ -1414,13 +1477,13 @@ class VscodeQuals(Fixture):
 
     def test_elapsed_taken_from_result_timings(self):
         path = self.write_session(vssession([vsreq("q", [md("r")], elapsed_ms=327000)]))
-        got = ace.vscode_exchanges(path, (self.repo,), self.repo)
+        got = ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
         self.assertEqual(got[0].elapsed, 327.0)
 
     def test_elapsed_suppressed_when_turn_paused_for_confirmation(self):
         response = [md("r"), {"kind": "confirmation"}]
         path = self.write_session(vssession([vsreq("q", response, elapsed_ms=41000000)]))
-        got = ace.vscode_exchanges(path, (self.repo,), self.repo)
+        got = ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
         self.assertEqual(got[0].elapsed, 0.0)
 
     def test_pasted_image_bytes_rebuilt_file_attachments_ignored(self):
@@ -1430,7 +1493,7 @@ class VscodeQuals(Fixture):
              "isPasted": True, "value": {"0": 65, "1": 66, "2": 67}},
         ]
         path = self.write_session(vssession([vsreq("q", [], variables=variables)]))
-        got = ace.vscode_exchanges(path, (self.repo,), self.repo)
+        got = ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
         self.assertEqual(got[0].images, ("data:image/png;base64,QUJD",))
 
     def test_pasted_image_base64_field_decoded(self):
@@ -1439,7 +1502,7 @@ class VscodeQuals(Fixture):
              "isPasted": True, "value": {"$base64": "QUJD"}},
         ]
         path = self.write_session(vssession([vsreq("q", [], variables=variables)]))
-        got = ace.vscode_exchanges(path, (self.repo,), self.repo)
+        got = ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
         self.assertEqual(got[0].images, ("data:image/png;base64,QUJD",))
 
     def test_unrecognized_image_form_fails_loudly(self):
@@ -1458,7 +1521,7 @@ class VscodeQuals(Fixture):
                               "mimeType": "image/png", "value": value}]
                 path = self.write_session(vssession([vsreq("q", [], variables=variables)]))
                 with self.assertRaises(ace.UserError) as ctx:
-                    ace.vscode_exchanges(path, (self.repo,), self.repo)
+                    ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
                 self.assertIn(str(path), str(ctx.exception))
                 self.assertIsInstance(ctx.exception.__cause__, cause)
 
@@ -1466,16 +1529,16 @@ class VscodeQuals(Fixture):
         path = self.write_session(vssession([vsreq("q", [])]))
         other = self.tmp / "other"
         other.mkdir()
-        self.assertEqual(ace.vscode_exchanges(path, (other,), self.repo), [])
+        self.assertEqual(ace.vscode_exchanges(path, (other,), self.repo)[0], [])
         empty = self.write_session(vssession([]), "e.json")
-        self.assertEqual(ace.vscode_exchanges(empty, (self.repo,), self.repo), [])
+        self.assertEqual(ace.vscode_exchanges(empty, (self.repo,), self.repo)[0], [])
 
     def test_straddling_multiroot_workspace_fails_loudly(self):
         other = self.tmp / "other"
         other.mkdir()
         path = self.write_session(vssession([vsreq("q", [])]))
         with self.assertRaises(ace.UserError):
-            ace.vscode_exchanges(path, (self.repo, other), self.repo)
+            ace.vscode_exchanges(path, (self.repo, other), self.repo)[0]
 
     def test_strip_jsonc_preserves_commas_inside_strings(self):
         raw = '{\n  // note\n  "folders": [\n    {"path": "we,]ird, }name"}, /* x */\n  ],\n}\n'
@@ -1925,15 +1988,18 @@ class CliQuals(Fixture):
         self.assertEqual(code, 2)
         self.assertIn("absent", err)
 
-    def test_existing_output_overwritten(self):
+    def test_existing_output_without_snapshot_rejected(self):
+        # Replicata: the output path already holds a file carrying no
+        # snapshot — a page from before snapshots, or not a sourcery page at
+        # all. Expectata: exit 2 naming the path, file left byte-identical.
+        # Resultata before snapshots: silently overwritten.
         self.populate()
         out_path = self.tmp / "out.html"
         out_path.write_text("stale generation", encoding="utf-8")
         code, _, err = self.run_cli([str(self.repo), str(out_path)])
-        self.assertEqual(code, 0, err)
-        page = out_path.read_text(encoding="utf-8")
-        self.assertNotIn("stale generation", page)
-        self.assertIn("claude prompt", page)
+        self.assertEqual(code, 2)
+        self.assertIn(str(out_path), err)
+        self.assertEqual(out_path.read_text(encoding="utf-8"), "stale generation")
 
     def test_failed_write_leaves_no_debris(self):
         target = self.tmp / "out.html"
@@ -1953,9 +2019,481 @@ class CliQuals(Fixture):
         self.assertEqual(code, 2)
         self.assertIn(str(self.claude_root), err)
 
+    def generate(self, out_path):
+        code, out, err = self.run_cli([str(self.repo), str(out_path)])
+        self.assertEqual(code, 0, err)
+        return out, out_path.read_text(encoding="utf-8")
+
+    def test_pruned_session_kept_from_page(self):
+        # Replicata: run, then the Claude session file vanishes from the store
+        # (pruned, or this is another machine). Expectata: the next run keeps
+        # that exchange from the page. Resultata before snapshots: gone.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        (self.claude_root / "p" / "s.jsonl").unlink()
+        out, page = self.generate(out_path)
+        for text in ("claude prompt", "claude reply", "codex prompt", "copilot prompt"):
+            self.assertIn(text, page)
+        self.assertIn("Prompts: 3", out)
+        # The kept exchange keeps its place in time among the fresh ones.
+        order = [page.index("claude prompt"), page.index("codex prompt"), page.index("copilot prompt")]
+        self.assertEqual(order, sorted(order))
+
+    def test_empty_stores_regenerate_from_page_alone(self):
+        # A new machine: no transcript roots exist at all, only the page.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        _, first = self.generate(out_path)
+        for root in (self.claude_root, self.codex_root, self.vscode_root):
+            shutil.rmtree(root)
+        _, again = self.generate(out_path)
+        self.assertEqual(again, first)
+
+    def test_store_record_supersedes_page_copy(self):
+        # The store is the truth for a record it still holds: the record's
+        # text changes under the same timestamp, so the page copy is replaced.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        write_jsonl(
+            self.claude_root / "p" / "s.jsonl",
+            [
+                cu("revised claude prompt", ts=T0, cwd=str(self.repo)),
+                ca([{"type": "text", "text": "revised reply"}], cwd=str(self.repo)),
+            ],
+        )
+        out, page = self.generate(out_path)
+        self.assertIn("revised claude prompt", page)
+        self.assertIn("revised reply", page)
+        self.assertNotIn('<pre class="prompt">claude prompt</pre>', page)
+        self.assertNotIn(">claude reply<", page)
+        self.assertIn("Prompts: 3", out)
+
+    def test_reclassified_record_purged_even_when_session_yields_nothing(self):
+        # Replicata: after a run, a parser fix classes the Copilot session's
+        # only request as machine text (system-initiated). Expectata: the
+        # store still holds the record, so the page's copy is purged even
+        # though the session now yields no exchange at all. Resultata under a
+        # session-level rule: the session looked pruned and the stale copy
+        # stayed forever.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        request = vsreq("copilot prompt", [md("copilot reply")], ts=int(utc(T2).timestamp() * 1000))
+        request["isSystemInitiated"] = True
+        (self.vscode_root / "workspaceStorage" / "h1" / "chatSessions" / "a.json").write_text(
+            json.dumps(vssession([request])), encoding="utf-8"
+        )
+        out, page = self.generate(out_path)
+        self.assertNotIn("copilot prompt", page)
+        self.assertIn("Prompts: 2", out)
+
+    def test_shrunk_live_session_keeps_typed_prompt(self):
+        # Replicata: a store restored from an older backup still holds the
+        # session file but not its later records. Expectata: the page's copies
+        # of those records survive. Resultata under a session-level rule: the
+        # live session purged them, and nothing replaced them.
+        records = [
+            cu("first", ts=T0, cwd=str(self.repo)),
+            ca([{"type": "text", "text": "reply one"}], ts=T1, cwd=str(self.repo)),
+            cu("second", ts=T2, cwd=str(self.repo)),
+            ca([{"type": "text", "text": "reply two"}], ts=T3, cwd=str(self.repo)),
+        ]
+        path = write_jsonl(self.claude_root / "p" / "s.jsonl", records)
+        out_path = self.tmp / "out.html"
+        out, _ = self.generate(out_path)
+        self.assertIn("Prompts: 2", out)
+        write_jsonl(path, records[:2])
+        out, page = self.generate(out_path)
+        self.assertIn("second", page)
+        self.assertIn("reply two", page)
+        self.assertIn("Prompts: 2", out)
+
+    def test_existing_output_from_other_repo_rejected(self):
+        self.populate()
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        other = self.tmp / "other"
+        other.mkdir()
+        before = out_path.read_bytes()
+        code, _, err = self.run_cli([str(other), str(out_path)])
+        self.assertEqual(code, 2)
+        self.assertIn("other", err)
+        self.assertIn(self.repo.name, err)
+        self.assertEqual(out_path.read_bytes(), before)
+
+    def test_rerun_with_unchanged_stores_byte_identical(self):
+        self.populate()
+        out_path = self.tmp / "out.html"
+        _, first = self.generate(out_path)
+        _, again = self.generate(out_path)
+        self.assertEqual(again, first)
+
+    def test_forked_session_copy_not_duplicated_after_original_pruned(self):
+        # Replicata: a fork replays identical records into a new session
+        # file; the page holds one copy; then the original file is pruned.
+        # Expectata: the fork's live record supersedes the page copy and the
+        # prompt renders once. Resultata with session in the holding: the page
+        # copy, tagged with the pruned session, survived beside the fork's.
+        self.populate()
+        write_jsonl(
+            self.claude_root / "p" / "fork.jsonl",
+            [
+                cu("claude prompt", ts=T0, cwd=str(self.repo), session="cs2"),
+                ca([{"type": "text", "text": "claude reply"}], cwd=str(self.repo), session="cs2"),
+            ],
+        )
+        out_path = self.tmp / "out.html"
+        out, _ = self.generate(out_path)
+        self.assertIn("Prompts: 3", out)
+        (self.claude_root / "p" / "s.jsonl").unlink()
+        out, page = self.generate(out_path)
+        self.assertIn("Prompts: 3", out)
+        self.assertEqual(page.count('<pre class="prompt">claude prompt</pre>'), 1)
+
+    def test_in_flight_reply_completed_on_rerun(self):
+        # Replicata: the page captured the last exchange mid-generation; the
+        # store then gains the reply. Expectata: the rerun shows the reply,
+        # once. Resultata under a pure union: the prompt rendered twice, once
+        # still generating.
+        path = write_jsonl(self.claude_root / "p" / "s.jsonl", [cu("claude prompt", ts=T0, cwd=str(self.repo))])
+        out_path = self.tmp / "out.html"
+        _, page = self.generate(out_path)
+        self.assertIn("Response still generating", page)
+        write_jsonl(
+            path,
+            [
+                cu("claude prompt", ts=T0, cwd=str(self.repo)),
+                ca([{"type": "text", "text": "late reply"}], cwd=str(self.repo)),
+            ],
+        )
+        _, page = self.generate(out_path)
+        self.assertIn("late reply", page)
+        self.assertNotIn("still generating", page)
+        self.assertEqual(page.count('<pre class="prompt">claude prompt</pre>'), 1)
+
+    def test_snapshot_omits_store_paths(self):
+        self.populate()
+        out_path = self.tmp / "out.html"
+        _, page = self.generate(out_path)
+        block = ace.SNAPSHOT.search(page).group(1)
+        for root in (self.claude_root, self.codex_root, self.vscode_root):
+            self.assertNotIn(str(root), block)
+        self.assertNotIn('"source"', block)
+
+    def test_malformed_snapshot_rejected_and_page_untouched(self):
+        self.populate()
+        out_path = self.tmp / "out.html"
+        _, page = self.generate(out_path)
+        block = ace.SNAPSHOT.search(page).group(1)
+        data = json.loads(block)
+        data["exchanges"][0]["author"] = "someone"
+        foreign = json.dumps(data).replace("<", "\\u003c")
+        for bad in ("{not json", foreign):
+            broken = page.replace(block, bad)
+            self.assertNotEqual(broken, page)
+            out_path.write_text(broken, encoding="utf-8")
+            code, _, err = self.run_cli([str(self.repo), str(out_path)])
+            self.assertEqual(code, 2)
+            self.assertIn(str(out_path), err)
+            self.assertEqual(out_path.read_text(encoding="utf-8"), broken)
+
+    def test_prompt_quoting_the_snapshot_opener_does_not_confuse_the_reader(self):
+        # Replicata: a typed prompt is the snapshot opener line itself plus a
+        # closing tag. Expectata: the page still holds exactly one block and
+        # gives the prompt back byte-exact. Resultata with an unescaped block:
+        # two openers, and the reader refuses the page.
+        text = ace.SNAPSHOT_OPEN + "\n{}\n</script>"
+        write_jsonl(self.claude_root / "p" / "s.jsonl", [cu(text, ts=T0, cwd=str(self.repo))])
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        _, page = self.generate(out_path)
+        self.assertEqual(len(ace.SNAPSHOT.findall(page)), 1)
+        self.assertEqual([e.prompt for e in ace.inherit(out_path, self.repo)], [text])
+
+    def test_collect_reports_holdings_and_unwoven_exchanges(self):
+        self.populate()
+        write_jsonl(
+            self.claude_root / "p" / "fork.jsonl",
+            [
+                cu("claude prompt", ts=T0, cwd=str(self.repo), session="cs2"),
+                ca([{"type": "text", "text": "claude reply"}], cwd=str(self.repo), session="cs2"),
+            ],
+        )
+        exchanges, holdings = ace.collect(self.repo, ace.discover_roots(self.env))
+        self.assertEqual(len(exchanges), 4)
+        self.assertEqual(len(ace.weave(exchanges)), 3)
+        self.assertEqual(
+            holdings, {("Claude Code", utc(T0)), ("Codex", utc(T1)), ("Copilot Chat", utc(T2))}
+        )
+
+    def test_flagship_legacy_page_imported_then_merged_with_partial_store(self):
+        # Replicata: a page from before snapshots, rendered from all three
+        # providers; then the Claude session is pruned, the Copilot request's
+        # text is revised in place under the same timestamp, and Codex is
+        # intact plus one new prompt. unrender.py imports the page, then
+        # sourcery.py merges. Expectata: the pruned Claude prompt is kept from
+        # the page, the Copilot page copy is superseded by the store's reading,
+        # the Codex prompt renders once under its store session, the new Codex
+        # prompt is added, all in order; a rerun is byte-identical.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        _, page = self.generate(out_path)
+        out_path.write_text(legacy(page), encoding="utf-8")
+        (self.claude_root / "p" / "s.jsonl").unlink()
+        revised = vsreq("revised copilot prompt", [md("revised copilot reply")], ts=int(utc(T2).timestamp() * 1000))
+        (self.vscode_root / "workspaceStorage" / "h1" / "chatSessions" / "a.json").write_text(
+            json.dumps(vssession([revised])), encoding="utf-8"
+        )
+        write_jsonl(
+            self.codex_root / "sessions" / "2026" / "rollout-1.jsonl",
+            [
+                cxmeta(str(self.repo)),
+                cxuser("codex prompt", ts=T1),
+                cxagent("codex reply", ts=T2),
+                cxuser("new codex prompt", ts=T3),
+                cxagent("new codex reply", ts="2026-03-01T10:20:00.000Z"),
+            ],
+        )
+        self.assertEqual(self.run_cli([str(self.repo), str(out_path)])[0], 2)  # a legacy page is refused
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = unrender.run([str(self.repo), str(out_path)])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual({e.session for e in ace.inherit(out_path, self.repo)}, {"unrendered"})
+        out, merged = self.generate(out_path)
+        self.assertIn("Prompts: 4", out)
+        for text in (
+            "claude prompt", "claude reply", "codex prompt", "new codex prompt",
+            "revised copilot prompt", "revised copilot reply",
+        ):
+            self.assertIn(text, merged)
+        self.assertNotIn('<pre class="prompt">copilot prompt</pre>', merged)
+        self.assertEqual(merged.count('<pre class="prompt">codex prompt</pre>'), 1)
+        order = [
+            merged.index(f'<pre class="prompt">{text}</pre>')
+            for text in ("claude prompt", "codex prompt", "revised copilot prompt", "new codex prompt")
+        ]
+        self.assertEqual(order, sorted(order))
+        sessions = {e.prompt: e.session for e in ace.inherit(out_path, self.repo)}
+        self.assertEqual((sessions["codex prompt"], sessions["claude prompt"]), ("cx1", "unrendered"))
+        _, again = self.generate(out_path)
+        self.assertEqual(again, merged)
+
+    def test_every_json_escape_survives_page_round_trip(self):
+        text = (
+            'quote " backslash \\ slash / bs \b ff \f nl \n cr \r tab \t nul \x00 del \x7f '
+            "ls   ps   lit \\u003c amp & lt < gt > tag </script> cmt <!-- --> cdata ]]> "
+            "astral \U0001F41D combining é crlf \r\n opener " + ace.SNAPSHOT_OPEN
+        )
+        write_jsonl(
+            self.claude_root / "p" / "s.jsonl",
+            [cu(text, ts=T0, cwd=str(self.repo)), ca([{"type": "text", "text": text}], cwd=str(self.repo))],
+        )
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        (self.claude_root / "p" / "s.jsonl").unlink()
+        _, page = self.generate(out_path)
+        self.assertEqual([(e.prompt, e.reply) for e in ace.inherit(out_path, self.repo)], [(text, text)])
+        self.assertEqual(len(ace.SNAPSHOT.findall(page)), 1)
+        self.assertEqual(count_scripts(page), 2)
+
+    def test_tool_result_at_same_millisecond_elsewhere_never_purges_page_copy(self):
+        # Replicata: the page holds a Claude prompt at T0 from session A; A is
+        # pruned; session B, still in the store, has a bare tool_result record
+        # at T0 (tool plumbing, no typing). Expectata: the page copy is kept —
+        # a record that could never have been rendered is no holding.
+        # Resultata before the fix: purged, and nothing replaced it.
+        write_jsonl(
+            self.claude_root / "p" / "a.jsonl",
+            [
+                cu("precious prompt", ts=T0, cwd=str(self.repo), session="A"),
+                ca([{"type": "text", "text": "reply"}], cwd=str(self.repo), session="A"),
+            ],
+        )
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        (self.claude_root / "p" / "a.jsonl").unlink()
+        write_jsonl(
+            self.claude_root / "p" / "b.jsonl",
+            [
+                cu("other prompt", ts="2026-03-01T09:59:00.000Z", cwd=str(self.repo), session="B"),
+                ca(
+                    [{"type": "tool_use", "id": "t1", "name": "Read", "input": {}}],
+                    ts="2026-03-01T09:59:30.000Z", cwd=str(self.repo), session="B",
+                ),
+                cu(
+                    [{"type": "tool_result", "tool_use_id": "t1", "content": "file contents"}],
+                    ts=T0, cwd=str(self.repo), session="B", toolUseResult={"type": "text", "file": {}},
+                ),
+                ca([{"type": "text", "text": "other reply"}], ts=T1, cwd=str(self.repo), session="B"),
+            ],
+        )
+        out, page = self.generate(out_path)
+        self.assertIn("precious prompt", page)
+        self.assertIn("Prompts: 2", out)
+
+    def test_store_copy_wins_even_when_less_complete(self):
+        # Replicata: the page holds a prompt with its reply; the store's copy
+        # of the session then loses the reply record but keeps the prompt
+        # (a restore from an older backup). Expectata, deliberately: the
+        # store's reading wins and the page now shows the prompt awaiting a
+        # reply — a parser fix that empties a reply (harness notices were once
+        # rendered as replies) must purge the stale text, and the merge cannot
+        # tell that case from this one. The typed prompt itself is kept.
+        records = [
+            cu("first", ts=T0, cwd=str(self.repo)),
+            ca([{"type": "text", "text": "reply one"}], ts=T1, cwd=str(self.repo)),
+        ]
+        path = write_jsonl(self.claude_root / "p" / "s.jsonl", records)
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        write_jsonl(path, records[:1])
+        out, page = self.generate(out_path)
+        self.assertIn("first", page)
+        self.assertNotIn("reply one", page)
+        self.assertIn("Prompts: 1", out)
+
+    def test_snapshot_missing_field_rejected_and_page_untouched(self):
+        # A snapshot another schema wrote: a row lacking a field, even one the
+        # dataclass would default, is refused rather than thawed into a guess.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        _, page = self.generate(out_path)
+        block = ace.SNAPSHOT.search(page).group(1)
+        data = json.loads(block)
+        for row in data["exchanges"]:
+            del row["effort"]
+        broken = page.replace(block, json.dumps(data).replace("<", "\\u003c"))
+        out_path.write_text(broken, encoding="utf-8")
+        code, _, err = self.run_cli([str(self.repo), str(out_path)])
+        self.assertEqual(code, 2)
+        self.assertIn(str(out_path), err)
+        self.assertEqual(out_path.read_text(encoding="utf-8"), broken)
+
+    def test_snapshot_version_key_is_provenance_not_a_gate(self):
+        self.populate()
+        out_path = self.tmp / "out.html"
+        _, page = self.generate(out_path)
+        block = ace.SNAPSHOT.search(page).group(1)
+        self.assertEqual(json.loads(block)["sourcery"], ace.VERSION)
+        out_path.write_text(
+            page.replace(block, block.replace(json.dumps(ace.VERSION), '"0.0.0"', 1)), encoding="utf-8"
+        )
+        code, out, err = self.run_cli([str(self.repo), str(out_path)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Prompts: 3", out)
+
+    def test_copilot_button_click_without_timestamp_fails_loudly(self):
+        # Every request is a holding, so its timestamp is checked before the
+        # button-click skip: a click without one is loud where it was skipped.
+        storage = self.vscode_root / "workspaceStorage" / "h1"
+        (storage / "chatSessions").mkdir(parents=True)
+        (storage / "workspace.json").write_text(json.dumps({"folder": self.repo.as_uri()}), encoding="utf-8")
+        click = vsreq("@agent Try Again", [], confirmation="Try Again")
+        del click["timestamp"]
+        typed = vsreq("typed", [md("reply")], rid="r9")
+        (storage / "chatSessions" / "a.json").write_text(json.dumps(vssession([click, typed])), encoding="utf-8")
+        code, _, err = self.run_cli([str(self.repo), str(self.tmp / "o.html")])
+        self.assertEqual(code, 2)
+        self.assertIn("Tempus deest", err)
+        self.assertFalse((self.tmp / "o.html").exists())
+
+    def test_open_flag_opens_the_written_page(self):
+        self.populate()
+        out_path = self.tmp / "out.html"
+        opened = []
+        original = ace.webbrowser.open
+        ace.webbrowser.open = lambda uri: opened.append(uri) or True
+        try:
+            code, _, err = self.run_cli([str(self.repo), str(out_path), "--open"])
+            self.assertEqual(code, 0, err)
+            self.assertEqual(opened, [out_path.resolve().as_uri()])
+            ace.webbrowser.open = lambda uri: False
+            code, out, err = self.run_cli([str(self.repo), str(out_path), "--open"])
+            self.assertEqual(code, 2)
+            self.assertIn(str(out_path), err)
+            self.assertIn("Prompts: 3", out)  # the page is written before the browser is asked
+        finally:
+            ace.webbrowser.open = original
+        self.assertEqual(len(ace.SNAPSHOT.findall(out_path.read_text(encoding="utf-8"))), 1)
+
+    def test_relative_output_path_inherits_previous_page(self):
+        self.populate()
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        try:
+            code, _, err = self.run_cli([str(self.repo), "out.html"])
+            self.assertEqual(code, 0, err)
+            (self.claude_root / "p" / "s.jsonl").unlink()
+            code, out, err = self.run_cli([str(self.repo), "out.html"])
+            self.assertEqual(code, 0, err)
+            self.assertIn("Prompts: 3", out)
+            self.assertIn(str(self.tmp / "out.html"), out)
+        finally:
+            os.chdir(cwd)
+
+    def test_output_path_that_is_a_directory_rejected_cleanly(self):
+        self.populate()
+        out_dir = self.tmp / "out.html"
+        out_dir.mkdir()
+        code, _, err = self.run_cli([str(self.repo), str(out_dir)])
+        self.assertEqual(code, 2)
+        self.assertIn(str(out_dir), err)
+
+    def test_unreadable_output_page_rejected_cleanly(self):
+        self.populate()
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        before = out_path.read_bytes()
+        out_path.chmod(0)
+        try:
+            code, _, err = self.run_cli([str(self.repo), str(out_path)])
+        finally:
+            out_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        self.assertEqual(code, 2)
+        self.assertIn(str(out_path), err)
+        self.assertEqual(out_path.read_bytes(), before)
+
+    def test_printed_count_deck_articles_and_snapshot_agree(self):
+        self.populate()
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        (self.claude_root / "p" / "s.jsonl").unlink()
+        write_jsonl(
+            self.codex_root / "sessions" / "2026" / "rollout-1.jsonl",
+            [cxmeta(str(self.repo)), cxuser("codex prompt", ts=T1), cxagent("codex reply", ts=T2), cxuser("later", ts=T3)],
+        )
+        out, page = self.generate(out_path)
+        count = int(out.split("Prompts: ")[1])
+        self.assertEqual(count, 4)
+        self.assertEqual(page.count("<article "), count)
+        self.assertIn(f'<p class="deck">{count} prompts', page)
+        self.assertEqual(len(json.loads(ace.SNAPSHOT.search(page).group(1))["exchanges"]), count)
+        self.assertEqual(len(ace.inherit(out_path, self.repo)), count)
+
+    def test_kept_and_fresh_sharing_a_timestamp_both_survive_in_stable_order(self):
+        write_jsonl(
+            self.claude_root / "p" / "s.jsonl",
+            [cu("claude at t", ts=T0, cwd=str(self.repo)), ca([{"type": "text", "text": "r"}], cwd=str(self.repo))],
+        )
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        (self.claude_root / "p" / "s.jsonl").unlink()
+        write_jsonl(
+            self.codex_root / "sessions" / "2026" / "rollout-1.jsonl",
+            [cxmeta(str(self.repo)), cxuser("codex at t", ts=T0), cxagent("codex reply", ts=T1)],
+        )
+        out, page = self.generate(out_path)
+        self.assertIn("Prompts: 2", out)
+        self.assertLess(page.index("claude at t"), page.index("codex at t"))
+        _, again = self.generate(out_path)
+        self.assertEqual(again, page)
+
     def test_version_and_help_exit_zero(self):
         code, out, err = self.run_cli(["--version"])
-        self.assertEqual((code, out, err), (0, "5.3.0\n", ""))
+        self.assertEqual((code, out, err), (0, "5.4.0\n", ""))
         code, out, _ = self.run_cli(["--help"])
         self.assertEqual(code, 0)
         self.assertIn("REPODIR", out)
@@ -1991,6 +2529,194 @@ class RemoteQuals(Fixture):
         self.assertEqual(ace.repo_remote(self.repo), "")
 
 
+# ------------------------------------------------------------------ snapshot
+
+MAXIMAL = dict(
+    timestamp=utc("2026-03-01T10:00:00.123456Z"),
+    provider="Codex",
+    model="gpt-5.4",
+    session="cx1",
+    prompt='<p>&amp; "quoted"\n\ttab and trailing blank\n\n',
+    reply="**bold** `code` </script> <!--<script>alert(1)</script>-->",
+    source=Path("/store/rollout.jsonl"),
+    effort="xhigh",
+    images=("data:image/png;base64,AA==",),
+    elapsed=0.1 + 0.2,
+    wall=1234.5678,
+    ballots=(ace.Ballot("Which?", ("a", "b"), ("b",)), ace.Ballot("Typed?", ("x",), ())),
+    added=1234,
+    deleted=5,
+)
+
+
+def maximal_exchange(**overrides):
+    return exchange(**{**MAXIMAL, **overrides})
+
+
+def count_scripts(page):
+    class Tally(HTMLParser):
+        scripts = 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "script":
+                self.scripts += 1
+
+    tally = Tally()
+    tally.feed(page)
+    return tally.scripts
+
+
+class SnapshotQuals(Fixture):
+    def test_freeze_thaw_round_trips_every_field(self):
+        given = maximal_exchange()
+        thawed = ace.thaw(json.loads(json.dumps(ace.freeze(given))), self.tmp / "page.html")
+        self.assertEqual(thawed.source, self.tmp / "page.html")
+        restored = dataclasses.replace(thawed, source=given.source)
+        self.assertEqual(restored, given)
+        self.assertEqual(hash(restored), hash(given))
+        self.assertEqual(ace.weave([given, thawed]), [given])
+
+    def test_freeze_omits_the_store_path(self):
+        self.assertNotIn("source", ace.freeze(maximal_exchange()))
+
+    def test_thaw_rejects_unknown_and_missing_fields(self):
+        frozen = ace.freeze(maximal_exchange())
+        page = self.tmp / "page.html"
+        with self.assertRaises(ValueError):
+            ace.thaw({**frozen, "author": "someone"}, page)
+        for missing in ("prompt", "effort", "wall", "images", "ballots"):
+            with self.assertRaises(ValueError, msg=missing):
+                ace.thaw({k: v for k, v in frozen.items() if k != missing}, page)
+
+    def test_thaw_rejects_wrong_types_and_ranges(self):
+        # A hand-edited snapshot must not thaw into a guess: every field's
+        # JSON type and range is checked before an Exchange is built.
+        frozen = ace.freeze(maximal_exchange())
+        page = self.tmp / "page.html"
+        for field, value in (
+            ("images", "abc"),
+            ("images", [1]),
+            ("elapsed", "5"),
+            ("elapsed", True),
+            ("elapsed", float("nan")),
+            ("elapsed", -1),
+            ("wall", float("inf")),
+            ("added", 1.5),
+            ("added", -1),
+            ("provider", "Foo"),
+            ("prompt", None),
+            ("session", 123),
+            ("timestamp", 1772576233307),
+            ("ballots", "ab"),
+            ("ballots", [{"question": "q", "options": ["a"], "picked": [], "extra": 1}]),
+            ("ballots", [{"question": 5, "options": [], "picked": []}]),
+            ("ballots", [{"question": "q", "options": "ab", "picked": []}]),
+        ):
+            with self.assertRaises(ValueError, msg=(field, value)):
+                ace.thaw({**frozen, field: value}, page)
+
+    def test_bare_tool_result_is_no_holding(self):
+        # Tool plumbing that carries no typing was never rendered, so it must
+        # never purge a page copy that merely shares its millisecond.
+        claude = write_jsonl(
+            self.tmp / "claude" / "p" / "s.jsonl",
+            [
+                cu("typed", ts=T0, cwd=str(self.repo)),
+                ca([{"type": "tool_use", "id": "t1", "name": "Read", "input": {}}], ts=T1, cwd=str(self.repo)),
+                cu(
+                    [{"type": "tool_result", "tool_use_id": "t1", "content": "file contents"}],
+                    ts=T2, cwd=str(self.repo), toolUseResult={"type": "text", "file": {}},
+                ),
+                ca([{"type": "text", "text": "reply"}], ts=T3, cwd=str(self.repo)),
+            ],
+        )
+        exchanges, holdings = ace.claude_exchanges(claude, self.repo)
+        self.assertEqual([e.prompt for e in exchanges], ["typed"])
+        self.assertEqual(holdings, {("Claude Code", utc(T0))})
+
+    def test_snapshot_block_is_inert_json_without_angle_brackets(self):
+        given = maximal_exchange()
+        page = ace.render(self.repo, [given], "")
+        found = ace.SNAPSHOT.findall(page)
+        self.assertEqual(len(found), 1)
+        self.assertNotIn("<", found[0])
+        data = json.loads(found[0])
+        self.assertEqual(data["repo"], self.repo.name)
+        self.assertEqual(data["sourcery"], ace.VERSION)
+        thawed = [ace.thaw(f, given.source) for f in data["exchanges"]]
+        self.assertEqual(thawed, [given])
+        self.assertNotIn("<script>alert(1)", page)
+        self.assertEqual(count_scripts(page), 2)
+
+    def test_snapshot_one_exchange_per_line_last_in_body(self):
+        first = maximal_exchange()
+        second = maximal_exchange(timestamp=utc(T1), prompt="second")
+        page = ace.render(self.repo, [first, second], "")
+        lines = ace.SNAPSHOT.search(page).group(1).split("\n")
+        self.assertEqual(len(lines), 4)
+        self.assertTrue(lines[0].endswith("["))
+        self.assertEqual(json.loads(lines[1].rstrip(","))["prompt"], first.prompt)
+        self.assertEqual(json.loads(lines[2])["prompt"], "second")
+        self.assertEqual(lines[3], "]}")
+        opener = page.index(ace.SNAPSHOT_OPEN)
+        self.assertGreater(opener, page.rindex("</article>"))
+        self.assertGreater(opener, page.index("<script>"))
+        self.assertLess(opener, page.index("</body>"))
+
+    def test_parsers_report_holdings_for_records_they_drop(self):
+        # A record the store still holds is reported even when the parser
+        # drops it as machine text, so a page's stale copy of it gets purged.
+        claude = write_jsonl(
+            self.tmp / "claude" / "p" / "s.jsonl",
+            [
+                cu(
+                    "<task-notification>done</task-notification>",
+                    ts=T0,
+                    cwd=str(self.repo),
+                    origin={"kind": "task-notification"},
+                )
+            ],
+        )
+        self.assertEqual(ace.claude_exchanges(claude, self.repo), ([], {("Claude Code", utc(T0))}))
+        codex = write_jsonl(
+            self.tmp / "codex" / "r.jsonl",
+            [
+                cxmeta(str(self.repo)),
+                cxuser("The following is the Codex agent history added since your last message.", ts=T1),
+            ],
+        )
+        self.assertEqual(ace.codex_exchanges(codex, self.repo), ([], {("Codex", utc(T1))}))
+        vscode = self.tmp / "chatSessions" / "s.json"
+        vscode.parent.mkdir(parents=True)
+        click = vsreq("@agent Try Again", [], confirmation="Try Again", ts=int(utc(T2).timestamp() * 1000))
+        vscode.write_text(json.dumps(vssession([click])), encoding="utf-8")
+        self.assertEqual(
+            ace.vscode_exchanges(vscode, (self.repo,), self.repo), ([], {("Copilot Chat", utc(T2))})
+        )
+
+    def test_parsers_hold_only_prompt_records_inside_the_repo(self):
+        elsewhere = str(self.tmp / "elsewhere")
+        claude = write_jsonl(
+            self.tmp / "claude" / "p" / "s.jsonl",
+            [
+                cu("outside", ts=T0, cwd=elsewhere),
+                cu("inside", ts=T1, cwd=str(self.repo)),
+                ca([{"type": "text", "text": "reply"}], ts=T2, cwd=str(self.repo)),
+            ],
+        )
+        exchanges, holdings = ace.claude_exchanges(claude, self.repo)
+        self.assertEqual([e.prompt for e in exchanges], ["inside"])
+        self.assertEqual(holdings, {("Claude Code", utc(T1))})
+        codex = write_jsonl(
+            self.tmp / "codex" / "r.jsonl", [cxmeta(elsewhere), cxuser("outside", ts=T0)]
+        )
+        self.assertEqual(ace.codex_exchanges(codex, self.repo), ([], set()))
+        vscode = self.tmp / "chatSessions" / "s.json"
+        vscode.parent.mkdir(parents=True)
+        vscode.write_text(json.dumps(vssession([vsreq("outside", [])])), encoding="utf-8")
+        self.assertEqual(ace.vscode_exchanges(vscode, (Path(elsewhere),), self.repo), ([], set()))
+
+
 class ParseTimeQuals(unittest.TestCase):
     def test_formats(self):
         self.assertEqual(ace.parse_time(T0), utc(T0))
@@ -2008,6 +2734,342 @@ class ParseTimeQuals(unittest.TestCase):
         for bad in (None, "yesterday", [], {}):
             with self.assertRaises(ace.UserError):
                 ace.parse_time(bad)
+
+
+# ------------------------------------------------------------------ unrender
+
+SNAPSHOT_BLOCK = re.compile(re.escape(ace.SNAPSHOT_OPEN) + r"\n.*?\n</script>\n", re.DOTALL)
+
+
+def legacy(page: str) -> str:
+    """The page as sourcery wrote it before snapshots: the block removed."""
+    assert page.count(ace.SNAPSHOT_OPEN) == 1, page[-400:]
+    return SNAPSHOT_BLOCK.sub("", page)
+
+
+# A reply in the canonical form unrender writes back, exercising every
+# construct markdown_html emits: a heading per level it distinguishes,
+# paragraphs with hard line breaks, strong, code spans, links, bullets,
+# numbered items, blockquotes, fenced code with and without a language,
+# a fence holding a fence line, a code span holding backticks, raw HTML
+# in prose, and the quoting characters html.escape rewrites.
+REPLY_EVERYTHING = "\n\n".join(
+    [
+        "# Caput primum",
+        'Paragraphus **fortis** et `codex` et [nexus](https://example.com/?a=1&b=2) et <b>non-tag</b>.'
+        "\nLinea secunda \"citata\" 'apostrophus' & signum.",
+        "## Caput secundum",
+        "### Tertium",
+        "#### Quartum",
+        "##### Quintum",
+        "- primum\n- `secundum` cum **forti**\n- [nexus **fortis**](mailto:x@y.z)",
+        "1. unum\n2. duo\n3. tres",
+        "> citatum\n> alterum citatum",
+        '```python\nprint("salve")\nx = 1 < 2 & 3\n```',
+        "```\nsine lingua\n```",
+        "````\n```\nsaeptum intus\n````",
+        "`` `intus` `` et ``` `` ``` finis.",
+    ]
+)
+
+# The same constructs spelled the ways markdown_html also accepts; the page
+# is identical, so unrender can only give back the canonical spelling.
+REPLY_VARIANT = "\n\n".join(
+    [
+        "__sublineatum__ et `x`",
+        "* stella\n+ plus",
+        "3) tres\n7. septem",
+        "~~~js\nx\n~~~",
+        "## cauda ##",
+        "###### sextum",
+    ]
+)
+REPLY_VARIANT_CANONICAL = "\n\n".join(
+    [
+        "**sublineatum** et `x`",
+        "- stella\n- plus",
+        "1. tres\n2. septem",
+        "```js\nx\n```",
+        "## cauda",
+        "##### sextum",
+    ]
+)
+
+
+def maximal() -> list:
+    """Four exchanges covering every field the page shows, on three days,
+    from all three providers."""
+    return [
+        exchange(
+            timestamp=utc("2026-03-01T10:00:00.123456Z"),
+            effort="xhigh",
+            prompt="a<b>&c\n  indented\ttab\n\n",
+            reply=REPLY_EVERYTHING,
+            images=("data:image/png;base64,AA==", "data:image/jpeg;base64,/9j/\"q"),
+            elapsed=327.0,
+            wall=3600.0,
+            ballots=(
+                ace.Ballot("Quid & quo?", ("A & B", "C"), ("A & B",)),
+                ace.Ballot("Plura?", ("X", "Y", "Z"), ("X", "Z")),
+                ace.Ballot("Scriptum?", ("P", "Q"), ()),
+            ),
+            added=1234,
+            deleted=5678,
+        ),
+        exchange(
+            timestamp=utc("2026-03-01T10:05:00.000001Z"),
+            provider="Codex",
+            model="gpt-5.6",
+            prompt="secunda",
+            reply="planum",
+            elapsed=12.6,
+            wall=12.9,
+            deleted=3,
+        ),
+        exchange(
+            timestamp=utc("2026-03-02T12:00:00Z"),
+            provider="Copilot Chat",
+            model="",
+            prompt="",
+            reply="",
+            ballots=(ace.Ballot("Solum scriptum?", ("P",), ()),),
+            elapsed=0.3,
+        ),
+        exchange(
+            timestamp=utc("2026-03-03T23:59:59.999999Z"),
+            model="m",
+            prompt="ultima",
+            reply="",
+            elapsed=5.0,
+            wall=5.0,
+        ),
+    ]
+
+
+class UnrenderQuals(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.page = self.repo / "sourcery.html"
+
+    def render(self, exchanges) -> str:
+        """The page as a legacy sourcery rendered it: no snapshot block."""
+        return legacy(ace.render(self.repo, exchanges, ace.repo_remote(self.repo)))
+
+    def write(self, page: str) -> None:
+        self.page.write_bytes(page.encode("utf-8"))
+
+    def run_cli(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = unrender.run(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def refuse(self, page: str, repo=None) -> str:
+        """Run the CLI on page, expect refusal, prove nothing was written,
+        and return the error text."""
+        self.write(page)
+        before = sorted(p.name for p in self.page.parent.iterdir())
+        code, out, err = self.run_cli([str(repo or self.repo), str(self.page)])
+        self.assertEqual((code, out), (2, ""), err)
+        self.assertTrue(err.startswith("Error:\n"), err)
+        self.assertEqual(self.page.read_bytes(), page.encode("utf-8"))
+        self.assertEqual(sorted(p.name for p in self.page.parent.iterdir()), before)
+        return err
+
+    def expected(self, originals) -> list:
+        """What unrender can recover: session and source replaced, elapsed
+        at display precision, wall only when the page showed it."""
+        recovered = dict(session="unrendered", source=self.page)
+        e1, e2, e3, e4 = originals
+        return [
+            dataclasses.replace(e1, **recovered),
+            dataclasses.replace(e2, **recovered, elapsed=13.0, wall=0.0),
+            dataclasses.replace(e3, **recovered, elapsed=0.0),
+            dataclasses.replace(e4, **recovered, wall=0.0),
+        ]
+
+    def test_maximal_page_recovers_every_shown_field(self):
+        originals = maximal()
+        page = self.render(originals)
+        self.write(page)
+        got, rendered = unrender.recover(self.repo, self.page)
+        self.assertEqual(got, self.expected(originals))
+        self.assertEqual(legacy(rendered), page)
+        self.assertEqual(self.render(got), page)
+
+    def test_cli_rewrites_page_through_render_and_reports_count(self):
+        originals = maximal()
+        self.write(self.render(originals))
+        code, out, err = self.run_cli([str(self.repo), str(self.page)])
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("4", out)
+        self.assertIn(str(self.page), out)
+        rewritten = self.page.read_text(encoding="utf-8")
+        self.assertIn(ace.SNAPSHOT_OPEN, rewritten)
+        self.assertEqual(
+            rewritten, ace.render(self.repo, self.expected(originals), ace.repo_remote(self.repo))
+        )
+        # What gets written is exactly the rendering the proof passed on.
+        self.assertEqual(ace.inherit(self.page, self.repo), self.expected(originals))
+
+    def test_variant_markdown_spellings_canonicalize_page_identically(self):
+        original = exchange(reply=REPLY_VARIANT)
+        page = self.render([original])
+        self.write(page)
+        got, _ = unrender.recover(self.repo, self.page)
+        self.assertEqual(got[0].reply, REPLY_VARIANT_CANONICAL)
+        self.assertEqual(self.render(got), page)
+
+    def test_carriage_return_in_legacy_prompt_survives_unrender(self):
+        # Replicata: a legacy page whose prompt holds a lone CR and a CRLF, as
+        # one real page does (a reply's line breaks are canonical already).
+        # Expectata: the prompt is recovered byte-exact and the rewritten
+        # page's snapshot gives the same bytes back. Resultata before the fix:
+        # every CR silently became LF, through universal-newlines reading.
+        original = exchange(prompt="one\r\ntwo\rthree", reply="a\r\nb")
+        page = self.render([original])
+        self.assertIn("\r", page)
+        self.write(page)
+        got, _ = unrender.recover(self.repo, self.page)
+        self.assertEqual(got[0].prompt, original.prompt)
+        self.assertEqual(ace.markdown_html(got[0].reply), ace.markdown_html(original.reply))
+        code, _, err = self.run_cli([str(self.repo), str(self.page)])
+        self.assertEqual(code, 0, err)
+        self.assertEqual([e.prompt for e in ace.inherit(self.page, self.repo)], [original.prompt])
+
+    def test_non_utf8_page_refused(self):
+        page = self.render([exchange()]).encode("utf-8") + b"\xff\xfe"
+        self.page.write_bytes(page)
+        code, out, err = self.run_cli([str(self.repo), str(self.page)])
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn(str(self.page), err)
+        self.assertEqual(self.page.read_bytes(), page)
+
+    def test_newer_stylesheet_outside_main_tolerated(self):
+        # Only the <main> region must round-trip: head, styles and the header
+        # comment may legitimately differ between sourcery versions.
+        page = self.render([exchange()])
+        stale = page.replace("<style>", "<style>/* older stylesheet */ body{color:red}", 1)
+        self.assertNotEqual(stale, page)
+        self.write(stale)
+        code, out, err = self.run_cli([str(self.repo), str(self.page)])
+        self.assertEqual((code, err), (0, ""), out)
+        expected = dataclasses.replace(exchange(), session="unrendered", source=self.page)
+        self.assertEqual(
+            self.page.read_text(encoding="utf-8"),
+            ace.render(self.repo, [expected], ace.repo_remote(self.repo)),
+        )
+
+    def test_page_whose_subtitle_differs_from_repo_today_refused(self):
+        # The masthead's where-line sits inside <main>: a page rendered when
+        # the repo had a remote it no longer has is refused, nothing written.
+        page = ace.render(self.repo, [exchange()], "https://github.com/x/y")
+        err = self.refuse(legacy(page))
+        self.assertIn("<main>", err)
+
+    def test_rewrite_then_sourcery_with_empty_stores_byte_identical(self):
+        self.write(self.render(maximal()))
+        code, _, err = self.run_cli([str(self.repo), str(self.page)])
+        self.assertEqual(code, 0, err)
+        first = self.page.read_bytes()
+        env = {
+            "AI_CHAT_CLAUDE_ROOTS": str(self.tmp / "nc"),
+            "AI_CHAT_CODEX_ROOTS": str(self.tmp / "nx"),
+            "AI_CHAT_VSCODE_USER_ROOTS": str(self.tmp / "nv"),
+        }
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ace.run([str(self.repo), str(self.page)], env)
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertIn("Prompts: 4", out.getvalue())
+        self.assertEqual(self.page.read_bytes(), first)
+
+    def test_snapshot_page_refused(self):
+        page = ace.render(self.repo, [exchange()], ace.repo_remote(self.repo))
+        self.assertIn(ace.SNAPSHOT_OPEN, page)
+        err = self.refuse(page)
+        self.assertIn("snapshot", err)
+
+    def test_title_basename_mismatch_refused(self):
+        other = self.tmp / "alius"
+        other.mkdir()
+        err = self.refuse(self.render([exchange()]), repo=other)
+        self.assertIn("repo", err)
+        self.assertIn("alius", err)
+
+    def test_tampered_deck_count_refused(self):
+        page = self.render([exchange(), exchange(timestamp=utc("2026-03-01T11:00:00Z"))])
+        self.assertIn("2 prompts", page)
+        self.refuse(page.replace("2 prompts", "3 prompts"))
+
+    def test_tampered_deck_totals_refused(self):
+        page = self.render([exchange(added=10, deleted=2)])
+        self.assertIn("+10 −2", page)
+        self.refuse(page.replace("+10 −2</p>", "+11 −2</p>"))
+
+    def test_unknown_span_class_refused(self):
+        page = self.render([exchange()])
+        err = self.refuse(
+            page.replace('<span class="chip"></span>', '<span class="chip"></span> <span class="arcanum">x</span>')
+        )
+        self.assertIn("arcanum", err)
+
+    def test_unexpected_element_in_reply_refused(self):
+        page = self.render([exchange(reply="r")])
+        err = self.refuse(page.replace("<p>r</p>", "<table><tr><td>r</td></tr></table>"))
+        self.assertIn("<table>", err)
+
+    def test_unknown_inline_tag_in_reply_refused(self):
+        page = self.render([exchange(reply="r")])
+        err = self.refuse(page.replace("<p>r</p>", "<p><em>r</em></p>"))
+        self.assertIn("<em>", err)
+
+    def test_non_sourcery_html_refused(self):
+        self.refuse("<!doctype html>\n<html><head><title>repo</title></head><body>salve</body></html>\n")
+
+    def test_markup_without_provider_class_refused(self):
+        # The article shape sourcery wrote before provider classes existed.
+        page = self.render([exchange()])
+        err = self.refuse(page.replace('<article class="exchange claude" id="p1">', '<article class="exchange" id="p1">'))
+        self.assertIn('<article class="exchange" id="p1">', err)
+
+    def test_day_header_without_id_refused(self):
+        page = self.render([exchange()])
+        day = utc(T0).astimezone().date().isoformat()
+        self.assertIn(f'<h2 class="day" id="d{day}">', page)
+        self.refuse(page.replace(f'<h2 class="day" id="d{day}">', '<h2 class="day">'))
+
+    def test_inexact_round_trip_refused(self):
+        # Every span is well-formed but the displayed clock time is wrong.
+        page = self.render([exchange()])
+        local = utc(T0).astimezone().strftime("%H:%M")
+        wrong = "23:59" if local != "23:59" else "00:00"
+        self.refuse(page.replace(f">{local}</time>", f">{wrong}</time>"))
+
+    def test_unrecognized_duration_refused(self):
+        page = self.render([exchange(elapsed=30.0)])
+        self.assertIn("thought for 30s", page)
+        self.refuse(page.replace("thought for 30s", "thought for 90s"))
+
+    def test_missing_page_refused(self):
+        code, out, err = self.run_cli([str(self.repo), str(self.page)])
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn(str(self.page), err)
+
+    def test_missing_repo_refused(self):
+        self.write(self.render([exchange()]))
+        code, out, err = self.run_cli([str(self.tmp / "nusquam"), str(self.page)])
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("nusquam", err)
+
+    def test_wrong_argument_count_refused(self):
+        self.write(self.render([exchange()]))
+        for argv in ([], [str(self.repo)], [str(self.repo), str(self.page), "--open"]):
+            code, out, err = self.run_cli(argv)
+            self.assertEqual((code, out), (2, ""), argv)
+            self.assertIn("unrender.py", err)
+        self.assertEqual(self.page.read_bytes(), self.render([exchange()]).encode("utf-8"))
+
 
 
 if __name__ == "__main__":

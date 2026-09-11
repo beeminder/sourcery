@@ -14,6 +14,12 @@ and time. Supported stores:
 Usage:
     python3 sourcery.py REPODIR OUTPUT.html [--open]
 
+OUTPUT.html is read before it is written: the page carries a snapshot of
+every exchange it shows, and a run merges what the stores still hold with
+what only the page remembers, so nothing once rendered is lost when stores
+are pruned or machines change. A page from before snapshots is refused
+until unrender.py has imported it.
+
 Nonstandard store locations can be supplied with path-separated environment
 variables: AI_CHAT_CLAUDE_ROOTS, AI_CHAT_CODEX_ROOTS, AI_CHAT_VSCODE_USER_ROOTS.
 
@@ -42,7 +48,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "5.3.0"
+VERSION = "5.4.0"
 UTC = dt.timezone.utc
 
 
@@ -87,6 +93,21 @@ class Exchange:
     # leave no record, so these are floors; Copilot records none at all).
     added: int = 0
     deleted: int = 0
+
+
+# A "holding" names a prompt record the store still holds: its provider and
+# timestamp. Every parser reports one for each record it attributes to the
+# repo that carries typing, or that it deliberately drops as machine text
+# (a canned prompt, a button click, a notification), so run() can tell a
+# record the store lost (keep the page's copy) from one the store still has
+# (the store's reading wins, purging stale page copies). Tool plumbing that
+# carries no typing is never a holding: it was never rendered, so it must
+# never purge a page copy that merely shares its millisecond.
+Holding = tuple[str, dt.datetime]
+
+
+def holding(exchange: Exchange) -> Holding:
+    return (exchange.provider, exchange.timestamp)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -638,8 +659,9 @@ def claude_tool_seconds(record: Mapping[str, Any]) -> float:
     return 0.0
 
 
-def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
+def claude_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holding]]:
     threads: dict[str, list[Message]] = {}
+    holdings: set[Holding] = set()
     # Agent working time, distinguished from waiting-for-human time by where
     # a timestamp gap ends: a gap ending at an assistant record is generation;
     # a gap ending at a tool_result hides both tool runtime and permission
@@ -741,8 +763,10 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
                 added, deleted = tallies.get(session, (0, 0))
                 tallies[session] = (added + unsent.added, deleted + unsent.deleted)
                 command_prompt.pop(session, None)
+                holdings.add(("Claude Code", timestamp))
                 continue
             if claude_origin_is_machine(typed_source, path, line_number):
+                holdings.add(("Claude Code", timestamp))
                 continue
             text = claude_prompt(content, path, line_number)
             # These two prefixes are harness-serialized or claude_prompt has
@@ -756,10 +780,12 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
                 text, ballots = claude_recovered(record, path, line_number)
                 denial_key = claude_denial_key(record, text)
             if CLAUDE_CANNED.fullmatch(text):
+                holdings.add(("Claude Code", timestamp))
                 continue
             images = claude_images(content, path, line_number)
             if text == "" and images == () and not any(b.picked for b in ballots):
-                continue
+                continue  # tool plumbing with no typing: never rendered, so no holding
+            holdings.add(("Claude Code", timestamp))
             # One typed act can fan out across several records (a denial
             # reason stamped onto each rejected parallel tool call), so a
             # repeat of the pending unanswered prompt is not a new prompt.
@@ -794,7 +820,7 @@ def claude_exchanges(path: Path, repo: Path) -> list[Exchange]:
             path,
             (pending.get(session, 0.0), *tallies.get(session, (0, 0))),
         )
-    ]
+    ], holdings
 
 
 # ---------------------------------------------------------------------- Codex
@@ -903,8 +929,9 @@ CODEX_WORKING = frozenset({
 })
 
 
-def codex_exchanges(path: Path, repo: Path) -> list[Exchange]:
+def codex_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holding]]:
     session = path.stem
+    holdings: set[Holding] = set()
     cwd: Any = ""
     model = ""
     effort = ""
@@ -929,7 +956,7 @@ def codex_exchanges(path: Path, repo: Path) -> list[Exchange]:
         match record_type:
             case "session_meta":
                 if not codex_include_session(payload, path):
-                    return []
+                    return [], set()  # nothing in an excluded thread is held for the repo
                 session = str(payload.get("id") or session)
                 cwd = payload.get("cwd") or cwd
             case "turn_context":
@@ -958,6 +985,7 @@ def codex_exchanges(path: Path, repo: Path) -> list[Exchange]:
                     raise UserError(f"Tempus deest in recordo: {path}:{line_number}")
                 timestamp = parse_time(record["timestamp"])
                 if kind == "user_message":
+                    holdings.add(("Codex", timestamp))
                     prompt = cut_canned_tail(codex_prompt(text, path))
                     images = codex_images(payload, path, line_number)
                     if (prompt == "" and images == ()) or prompt.startswith(CODEX_CANNED_PREFIX):
@@ -975,7 +1003,7 @@ def codex_exchanges(path: Path, repo: Path) -> list[Exchange]:
                     tally = (0, 0)
             case _:
                 continue
-    return paired("Codex", session, messages, path, (pending, *tally))
+    return paired("Codex", session, messages, path, (pending, *tally)), holdings
 
 
 # ------------------------------------------------------- VS Code Copilot Chat
@@ -1117,10 +1145,12 @@ def vscode_state(path: Path) -> dict[str, Any]:
     return state
 
 
-def vscode_exchanges(path: Path, workspace: tuple[Path, ...], repo: Path) -> list[Exchange]:
+def vscode_exchanges(
+    path: Path, workspace: tuple[Path, ...], repo: Path
+) -> tuple[list[Exchange], set[Holding]]:
     inside = tuple(root for root in workspace if under_dir(str(root), repo))
     if inside == ():
-        return []
+        return [], set()
     if len(inside) != len(workspace):
         # TODO: Says a multi-root workspace straddles the project boundary,
         # and to open the project as a plain folder or export this dialog
@@ -1143,6 +1173,7 @@ def vscode_exchanges(path: Path, workspace: tuple[Path, ...], repo: Path) -> lis
         raise UserError(f"Sessio VS Code indicem requests non habet: {path}")
     session = str(state.get("sessionId") or path.stem)
     exchanges: list[Exchange] = []
+    holdings: set[Holding] = set()
     for request in requests:
         if not isinstance(request, dict):
             # TODO: Says a requests entry is not a JSON object.
@@ -1152,12 +1183,33 @@ def vscode_exchanges(path: Path, workspace: tuple[Path, ...], repo: Path) -> lis
         if not isinstance(prompt, str):
             # TODO: Says a request has no text in message.text.
             raise UserError(f"Rogatio VS Code textum in message.text non habet: {path}")
-        prompt = cut_canned_tail(prompt)
-        if prompt == "" or request.get("confirmation") is not None or COPILOT_CANNED.match(prompt):
-            continue
         if "timestamp" not in request:
             # TODO: Says a request has no timestamp.
             raise UserError(f"Tempus deest in rogatione: {path}")
+        timestamp = parse_time(request["timestamp"])
+        holdings.add(("Copilot Chat", timestamp))
+        # VS Code starts a request by itself when a terminal command the
+        # agent launched exits, handing the model its completion notice plus
+        # the captured output in the user role. Nobody typed it. Such a
+        # request is marked isSystemInitiated (a systemInitiatedLabel and
+        # terminalExecutionId ride alongside), and the whole exchange goes,
+        # like the button clicks marked by "confirmation".
+        match request.get("isSystemInitiated"):
+            case True:
+                continue
+            case None | False:
+                pass
+            case marker:
+                # TODO: Says the system-initiated marker on a request holds
+                # an unrecognized value — the storage format seems to have
+                # changed and the script needs updating.
+                raise UserError(
+                    f"Signum isSystemInitiated ignotum: {marker!r} in {path}\n"
+                    "Forma repositi mutata videtur; scriptum renovandum est."
+                )
+        prompt = cut_canned_tail(prompt)
+        if prompt == "" or request.get("confirmation") is not None or COPILOT_CANNED.match(prompt):
+            continue
         model = request.get("modelId")
         result = request.get("result")
         timings = result.get("timings") if isinstance(result, dict) else None
@@ -1177,7 +1229,7 @@ def vscode_exchanges(path: Path, workspace: tuple[Path, ...], repo: Path) -> lis
         variables = variables if isinstance(variables, list) else []
         exchanges.append(
             Exchange(
-                timestamp=parse_time(request["timestamp"]),
+                timestamp=timestamp,
                 provider="Copilot Chat",
                 model=resolved_model or (model if isinstance(model, str) else ""),
                 session=session,
@@ -1196,7 +1248,7 @@ def vscode_exchanges(path: Path, workspace: tuple[Path, ...], repo: Path) -> lis
                 ),
             )
         )
-    return exchanges
+    return exchanges, holdings
 
 
 def strip_jsonc(text: str) -> str:
@@ -1440,18 +1492,26 @@ def codex_session_dirs(root: Path) -> tuple[Path, ...]:
     return tuple(root / name for name in ("sessions", "archived_sessions"))
 
 
-def collect(repo: Path, roots: Roots) -> list[Exchange]:
+def collect(repo: Path, roots: Roots) -> tuple[list[Exchange], set[Holding]]:
+    """Every exchange the stores hold for the repo, unwoven, with the
+    holdings: every prompt record they still hold, kept or dropped."""
     exchanges: list[Exchange] = []
+    holdings: set[Holding] = set()
+
+    def gather(parsed: tuple[list[Exchange], set[Holding]]) -> None:
+        exchanges.extend(parsed[0])
+        holdings.update(parsed[1])
+
     for root in roots.claude:
         if require_dir(root):
             for path in sorted(p for p in root.rglob("*.jsonl") if p.is_file()):
-                exchanges.extend(claude_exchanges(path, repo))
+                gather(claude_exchanges(path, repo))
     for root in roots.codex:
         if require_dir(root):
             for directory in codex_session_dirs(root):
                 if directory.is_dir():
                     for path in sorted(p for p in directory.rglob("*.jsonl") if p.is_file()):
-                        exchanges.extend(codex_exchanges(path, repo))
+                        gather(codex_exchanges(path, repo))
     for root in roots.vscode:
         storage_root = root / "workspaceStorage"
         if not require_dir(root) or not storage_root.is_dir():
@@ -1462,8 +1522,8 @@ def collect(repo: Path, roots: Roots) -> list[Exchange]:
                 continue
             workspace = workspace_roots(storage)
             for path in sorted((*session_dir.glob("*.json"), *session_dir.glob("*.jsonl"))):
-                exchanges.extend(vscode_exchanges(path, workspace, repo))
-    return weave(exchanges)
+                gather(vscode_exchanges(path, workspace, repo))
+    return exchanges, holdings
 
 
 # ------------------------------------------------------------------ rendering
@@ -2156,10 +2216,13 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
     # The warning comment must follow the doctype — a comment before it
     # would throw browsers into quirks mode.
     # TODO: Says this file is generated by sourcery and never hand-edited;
-    # the next generation overwrites it, so don't edit it in place.
+    # it carries its own memory of the dialog (the snapshot at its end),
+    # which the next generation reads back and then overwrites, so don't
+    # edit it in place.
     return f"""<!doctype html>
 <!-- Fasciculus hic a sourcery generatus est, numquam manu scriptus.
-     Noli emendare: generatio proxima omnia superscribet. -->
+     Memoriam dialogi ipse fert, quam generatio proxima legit atque
+     superscribit. Noli emendare. -->
 <html lang="und">
 <head>
 <meta charset="utf-8">
@@ -2186,17 +2249,145 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
 {body}
 </main>
 <script>{JS}</script>
+{SNAPSHOT_OPEN}
+{snapshot(repo, exchanges)}
+</script>
 </body>
 </html>
 """
 
 
+# ------------------------------------------------------------------ snapshot
+
+
+# The page's own memory: every exchange it renders, embedded as JSON so the
+# next generation can read it back. Stores get pruned and machines change;
+# the page is then the only copy, and nothing it once rendered is lost.
+SNAPSHOT_OPEN = '<script type="application/json" id="snapshot">'
+SNAPSHOT = re.compile(re.escape(SNAPSHOT_OPEN) + r"\n(.*?)\n</script>", re.DOTALL)
+
+
+def freeze(exchange: Exchange) -> dict[str, Any]:
+    """The exchange as JSON-ready fields, minus the store path: private to
+    this machine and irrelevant to the merge, so it never reaches the page."""
+    frozen = dataclasses.asdict(exchange)
+    del frozen["source"]
+    frozen["timestamp"] = exchange.timestamp.isoformat()
+    return frozen
+
+
+# What a frozen exchange must look like, field by field: the JSON type of
+# every Exchange field but the omitted source. A missing or extra field, or
+# a value of another type, means a snapshot another schema wrote or a hand
+# edit — never thawed into a guess.
+SHAPE: dict[str, type | tuple[type, ...]] = {
+    "timestamp": str, "provider": str, "model": str, "session": str, "prompt": str,
+    "reply": str, "effort": str, "images": list, "elapsed": (int, float), "wall": (int, float),
+    "ballots": list, "added": int, "deleted": int,
+}
+assert set(SHAPE) == {field.name for field in dataclasses.fields(Exchange)} - {"source"}
+
+
+def shaped(value: Any, kind: type | tuple[type, ...]) -> bool:
+    return isinstance(value, kind) and not isinstance(value, bool)
+
+
+def thaw(frozen: Mapping[str, Any], source: Path) -> Exchange:
+    """Inverse of freeze; the page is the source. The field set and every
+    field's type and range are checked, so a snapshot another schema wrote,
+    or one edited by hand, fails loudly instead of thawing into nonsense."""
+    fields = dict(frozen)
+    sound = (
+        set(fields) == set(SHAPE)
+        and all(shaped(fields[name], kind) for name, kind in SHAPE.items())
+        and fields["provider"] in PROVIDER_SLUGS
+        and all(0 <= fields[name] < float("inf") for name in ("elapsed", "wall", "added", "deleted"))
+        and all(isinstance(uri, str) for uri in fields["images"])
+        and all(
+            isinstance(ballot, dict)
+            and set(ballot) == {"question", "options", "picked"}
+            and isinstance(ballot["question"], str)
+            and all(
+                isinstance(ballot[key], list) and all(isinstance(label, str) for label in ballot[key])
+                for key in ("options", "picked")
+            )
+            for ballot in fields["ballots"]
+        )
+    )
+    if not sound:
+        raise ValueError(f"exchange fields {sorted(fields)}")
+    fields["timestamp"] = parse_time(fields["timestamp"])
+    fields["images"] = tuple(fields["images"])
+    fields["ballots"] = tuple(
+        Ballot(ballot["question"], tuple(ballot["options"]), tuple(ballot["picked"]))
+        for ballot in fields["ballots"]
+    )
+    return Exchange(source=source, **fields)
+
+
+def snapshot(repo: Path, exchanges: Sequence[Exchange]) -> str:
+    """One exchange per line, so a refresh diffs as appended lines. Every "<"
+    is escaped: the block can then neither end its script element early nor
+    open a comment inside it, whatever a prompt or reply contains."""
+    rows = ",\n".join(json.dumps(freeze(exchange), ensure_ascii=False) for exchange in exchanges)
+    # The version is provenance for a human reading the page; thaw checks the
+    # schema itself, so no version is ever refused or trusted on its own.
+    text = f'{{"sourcery": {json.dumps(VERSION)}, "repo": {json.dumps(repo.name)}, "exchanges": [\n{rows}\n]}}'
+    return text.replace("<", "\\u003c")
+
+
+def inherit(output: Path, repo: Path) -> list[Exchange]:
+    """Everything a previous generation of this page rendered, read back from
+    its snapshot; nothing when there is no page yet."""
+    if not output.exists():
+        return []
+    try:
+        # Bytes, not text: universal newlines would rewrite a carriage return
+        # someone typed, and the page must give back exactly what it holds.
+        page = output.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # TODO: Says the existing output could not be read as a UTF-8 file
+        # (it may be a directory, unreadable, or not text), gives the reason,
+        # and that nothing was written.
+        raise UserError(
+            f"Pagina exsistens legi non potest: {output}\n{exc}\nNihil scriptum est."
+        ) from exc
+    found = SNAPSHOT.findall(page)
+    if len(found) != 1:
+        # TODO: Says the existing output carries no snapshot (or several), so
+        # nothing can be merged into it: either it predates snapshots — run
+        # unrender.py on it first — or it is not a sourcery page — choose
+        # another output path. Nothing was written.
+        raise UserError(
+            f"Pagina exsistens memoriam (snapshot) non fert: {output}\n"
+            "Aut pagina vetus est — curre prius unrender.py — aut pagina sourcery non est: "
+            "elige aliam viam output.\nNihil scriptum est."
+        )
+    try:
+        data = json.loads(found[0])
+        name = data["repo"]
+        exchanges = [thaw(frozen, output) for frozen in data["exchanges"]]
+    except (ValueError, KeyError, TypeError) as exc:
+        # TODO: Says the page's snapshot is malformed and nothing was written.
+        raise UserError(f"Memoria paginae corrupta est: {output}\nNihil scriptum est.") from exc
+    if name != repo.name:
+        # TODO: Says the page's snapshot belongs to another project, naming
+        # both, and nothing was written.
+        raise UserError(
+            f"Memoria paginae ad aliud inceptum pertinet: {name!r}, non {repo.name!r}: {output}\n"
+            "Nihil scriptum est."
+        )
+    return exchanges
+
+
 # ----------------------------------------------------------------------- exit
 
 
-# Output is written atomically so a partial document is never left behind;
-# an existing document is simply replaced — it is always generated, never
-# hand-edited (the page itself opens with a warning comment saying so).
+# Output is written atomically so a partial document is never left behind.
+# An existing document has already been read back by inherit() by the time
+# this runs — its snapshot is merged into the new page — and is then
+# replaced whole: it is always generated, never hand-edited (the page itself
+# opens with a warning comment saying so).
 def write_output(path: Path, page: str) -> None:
     target = path.resolve()
     if not target.parent.is_dir():
@@ -2241,7 +2432,15 @@ def run(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None)
         options = parse_args(args)
         repo = canonical_repo(options.repo)
         roots = discover_roots(environment)
-        exchanges = collect(repo, roots)
+        fresh, holdings = collect(repo, roots)
+        inherited = inherit(options.output, repo)
+        # The store is the truth for every record it still holds and the page
+        # for the rest: a page copy of a record the store still has is
+        # dropped (the store's reading wins, so parser fixes purge stale
+        # copies), a page copy of a record the store lost is kept (nothing
+        # rendered is ever lost). Fresh first, so weave keeps the store's copy.
+        kept = [exchange for exchange in inherited if holding(exchange) not in holdings]
+        exchanges = weave(fresh + kept)
         if exchanges == []:
             raise no_exchanges_error(repo, roots)
         write_output(options.output, render(repo, exchanges, repo_remote(repo)))
