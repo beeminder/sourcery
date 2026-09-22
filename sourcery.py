@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export the human side of a repo's AI coding dialogue to one HTML page.
 
-Reads the local transcript stores of three coding agents and produces a
+Reads the local transcript stores of four coding agents and produces a
 single self-contained HTML document, ordered by timestamp. The human's
 prompts are the only text visible by default; everything machine-generated
 is collapsed behind a quiet disclosure line that names the agent, model,
@@ -10,6 +10,8 @@ and time. Supported stores:
 - Claude Code:  ~/.claude/projects/**/*.jsonl
 - Codex:        ~/.codex/{sessions,archived_sessions}/**/*.jsonl
 - Copilot Chat: VS Code User/workspaceStorage/*/chatSessions/*.{json,jsonl}
+- Antigravity:  ~/.gemini/antigravity/conversations/*.pb (sealed protobuf;
+                opened through the system cipher, macOS only)
 
 Usage:
     python3 sourcery.py REPODIR OUTPUT.html [--open]
@@ -21,7 +23,8 @@ are pruned or machines change. A page from before snapshots is refused
 until unrender.py has imported it.
 
 Nonstandard store locations can be supplied with path-separated environment
-variables: AI_CHAT_CLAUDE_ROOTS, AI_CHAT_CODEX_ROOTS, AI_CHAT_VSCODE_USER_ROOTS.
+variables: AI_CHAT_CLAUDE_ROOTS, AI_CHAT_CODEX_ROOTS, AI_CHAT_VSCODE_USER_ROOTS,
+AI_CHAT_ANTIGRAVITY_ROOTS.
 
 Jargon: an "exchange" is one human prompt plus everything the agent said
 back before the next human prompt; "weaving" merges every store's exchanges
@@ -35,8 +38,12 @@ and both are dropped.
 from __future__ import annotations
 
 import base64
+import ctypes
+import ctypes.util
 import dataclasses
 import datetime as dt
+import functools
+import hashlib
 import html
 import json
 import os
@@ -48,7 +55,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "5.4.1"
+VERSION = "5.5.0"
 UTC = dt.timezone.utc
 
 
@@ -134,9 +141,10 @@ class Roots:
     claude: tuple[Path, ...]
     codex: tuple[Path, ...]
     vscode: tuple[Path, ...]
+    antigravity: tuple[Path, ...]
 
     def all(self) -> tuple[Path, ...]:
-        return self.claude + self.codex + self.vscode
+        return self.claude + self.codex + self.vscode + self.antigravity
 
 
 @dataclasses.dataclass(frozen=True)
@@ -164,6 +172,7 @@ Environment variables (separated by {os.pathsep!r}) for nonstandard transcript l
   AI_CHAT_CLAUDE_ROOTS
   AI_CHAT_CODEX_ROOTS
   AI_CHAT_VSCODE_USER_ROOTS
+  AI_CHAT_ANTIGRAVITY_ROOTS
 """
 
 
@@ -314,6 +323,7 @@ def discover_roots(env: Mapping[str, str]) -> Roots:
         claude=env_paths(env, "AI_CHAT_CLAUDE_ROOTS", (claude_default,)),
         codex=env_paths(env, "AI_CHAT_CODEX_ROOTS", (codex_default,)),
         vscode=env_paths(env, "AI_CHAT_VSCODE_USER_ROOTS", default_vscode_roots(home)),
+        antigravity=env_paths(env, "AI_CHAT_ANTIGRAVITY_ROOTS", (home / ".gemini" / "antigravity",)),
     )
 
 
@@ -1501,6 +1511,264 @@ def paired(
     return exchanges
 
 
+# ---------------------------------------------------------------- Antigravity
+
+# Antigravity (Google's agentic IDE) keeps each conversation as one protobuf
+# message sealed with AES-256-GCM — twelve bytes of nonce, the ciphertext,
+# sixteen bytes of tag — under a key the application ships verbatim inside
+# its own language-server binary, the same for every install. It hides
+# nothing from the person whose machine it is. The key is not written here:
+# each run reads it out of the installed binary, recognizing it by the
+# digest below, so this file never states it.
+ANTIGRAVITY_KEY_DIGEST = "2516d3eccb18071460c54f73addcc3893c8d49a44c56b49b506b37a03c1e2d9f"
+ANTIGRAVITY_BIN = Path("/Applications/Antigravity.app/Contents/Resources/app/extensions/antigravity/bin")
+# Model enums the store stamps on each step, paired with the ids the
+# application's own configuration blocks give them. An enum missing here
+# is shown on the page as an unknown model with its number, never hidden.
+ANTIGRAVITY_MODELS = {1007: "gemini-3-pro-low", 1008: "gemini-3-pro-high", 1018: "gemini-3-flash"}
+# Step types: the human's message (payload field 19), the planner's response
+# (20: visible text, thinking, tool call), the agent's notify-user message
+# (94), and machine plumbing read only for its timestamps — code actions,
+# file views, directory listings, grep and file-name searches, terminal
+# runs, task artifacts, progress summaries, browser subtasks, ephemeral and
+# history injections, image generation, and a few small bookkeeping kinds.
+# An unlisted type is a format change.
+ANTIGRAVITY_USER, ANTIGRAVITY_PLANNER, ANTIGRAVITY_NOTIFY = 14, 15, 82
+ANTIGRAVITY_MACHINE = frozenset({4, 5, 7, 8, 9, 17, 21, 23, 25, 81, 83, 85, 90, 91, 98})
+# A step's status: 3 complete; 5 emptied of content by the application while
+# compacting a long conversation — its words are gone; 6 cancelled and 7
+# failed, both seen only on the agent's own steps, whose words and spans
+# still count. Any other status is a shape this tool has not seen.
+ANTIGRAVITY_EMPTIED = 5
+ANTIGRAVITY_STATUSES = frozenset({3, ANTIGRAVITY_EMPTIED, 6, 7})
+# The fields each payload may carry; anything else is a shape this tool has
+# not seen (an attachment, say) and must not pass quietly.
+ANTIGRAVITY_USER_FIELDS = frozenset({2, 3, 4, 6, 7, 8, 12, 13})
+ANTIGRAVITY_CLICK_FIELDS = frozenset({1, 5, 7})
+ANTIGRAVITY_PLANNER_FIELDS = frozenset({1, 3, 4, 6, 7, 8, 11, 12})
+ANTIGRAVITY_NOTIFY_FIELDS = frozenset({1, 2, 3, 4, 5, 7, 8})
+
+
+def wire(data: bytes) -> list[tuple[int, int | bytes]]:
+    """Protobuf wire fields as (number, value): varints as ints, everything
+    else as bytes. Malformed encoding fails loudly."""
+    fields: list[tuple[int, int | bytes]] = []
+    at = 0
+
+    def varint() -> int:
+        nonlocal at
+        result = shift = 0
+        while True:
+            if at >= len(data):
+                raise ValueError("truncated varint")
+            byte = data[at]
+            at += 1
+            result |= (byte & 0x7F) << shift
+            shift += 7
+            if byte < 0x80:
+                return result
+
+    while at < len(data):
+        tag = varint()
+        number, kind = tag >> 3, tag & 7
+        if kind == 0:
+            fields.append((number, varint()))
+            continue
+        length = {1: 8, 5: 4}.get(kind)
+        if length is None:
+            if kind != 2:
+                raise ValueError(f"wire type {kind}")
+            length = varint()
+        if at + length > len(data):
+            raise ValueError("truncated field")
+        fields.append((number, data[at:at + length]))
+        at += length
+    return fields
+
+
+def pb_get(fields: list[tuple[int, int | bytes]], number: int) -> int | bytes | None:
+    """The one value of a field, None when absent; a repeated field would be
+    a shape this tool has not seen."""
+    values = [value for n, value in fields if n == number]
+    if len(values) > 1:
+        raise ValueError(f"field {number} repeated")
+    return values[0] if values else None
+
+
+def pb_text(fields: list[tuple[int, int | bytes]], number: int) -> str | None:
+    value = pb_get(fields, number)
+    if value is None:
+        return None
+    if not isinstance(value, bytes):
+        raise ValueError(f"field {number} is not text")
+    return value.decode("utf-8")
+
+
+def pb_message(fields: list[tuple[int, int | bytes]], number: int) -> list[tuple[int, int | bytes]]:
+    value = pb_get(fields, number)
+    if value is None:
+        return []
+    if not isinstance(value, bytes):
+        raise ValueError(f"field {number} is not a message")
+    return wire(value)
+
+
+@functools.cache
+def antigravity_key() -> bytes:
+    """The application's own store key, read out of its installed binary:
+    the one 32-letter window whose digest matches."""
+    for binary in sorted(ANTIGRAVITY_BIN.glob("language_server_*")):
+        data = binary.read_bytes()
+        for run in re.finditer(rb"[A-Za-z]{32,}", data):
+            letters = run.group()
+            for at in range(len(letters) - 31):
+                if hashlib.sha256(letters[at:at + 32]).hexdigest() == ANTIGRAVITY_KEY_DIGEST:
+                    return letters[at:at + 32]
+    # TODO: Says Antigravity transcripts exist but the application that can
+    # open them is not installed here (or this version of it no longer holds
+    # the key this tool recognizes), naming where it looked; nothing is
+    # exported until they can be read.
+    raise UserError(
+        f"Transcripta Antigravity adsunt, sed applicatio quae ea aperit hic non invenitur "
+        f"(aut clavem notam non iam fert): {ANTIGRAVITY_BIN}\nNihil exportatur dum legi possint."
+    )
+
+
+def antigravity_open(path: Path, key: bytes) -> bytes:
+    """The conversation's plaintext, through the system cipher."""
+    blob = path.read_bytes()
+    try:
+        cipher = ctypes.CDLL(ctypes.util.find_library("System")).CCCryptorGCMOneshotDecrypt
+    except (OSError, AttributeError, TypeError) as exc:
+        # TODO: Says an Antigravity transcript exists but this platform lacks
+        # the system cipher (CommonCrypto, macOS) that opens it, naming the
+        # file; nothing is exported until it can be read.
+        raise UserError(
+            f"Transcriptum Antigravity adest, sed huic systemati cifra deest "
+            f"(CommonCrypto in macOS): {path}\nNihil exportatur dum legi possit."
+        ) from exc
+    cipher.restype = ctypes.c_int32
+    cipher.argtypes = [
+        ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t,
+        ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p,
+        ctypes.c_char_p, ctypes.c_size_t,
+    ]
+    nonce, body, tag = blob[:12], blob[12:-16], blob[-16:]
+    plain = ctypes.create_string_buffer(len(body))
+    status = cipher(0, key, len(key), nonce, len(nonce), None, 0, body, len(body), plain, tag, len(tag))
+    if status != 0:
+        # TODO: Says an Antigravity transcript would not open (with the
+        # cipher's status code): the file is damaged or sealed with another
+        # key, and nothing is exported until every transcript can be read.
+        raise UserError(
+            f"Transcriptum Antigravity aperiri non potuit (status {status}): {path}\n"
+            "Fasciculus corruptus est aut alia clave signatus; nihil exportatur "
+            "dum omnia transcripta legi possint."
+        )
+    return plain.raw
+
+
+def antigravity_time(stamp: int | bytes | None) -> dt.datetime:
+    """A {seconds, nanos} stamp as a datetime; anything else fails loudly."""
+    if not isinstance(stamp, bytes):
+        raise ValueError("stamp missing")
+    fields = wire(stamp)
+    seconds, nanos = pb_get(fields, 1), pb_get(fields, 2) or 0
+    if not isinstance(seconds, int) or not isinstance(nanos, int):
+        raise ValueError("stamp without seconds")
+    return dt.datetime.fromtimestamp(seconds, tz=UTC) + dt.timedelta(microseconds=nanos // 1000)
+
+
+def antigravity_exchanges(path: Path, repo: Path, key: bytes) -> tuple[list[Exchange], set[Holding]]:
+    try:
+        return antigravity_parse(path, repo, key)
+    except ValueError as exc:
+        # TODO: Says an Antigravity transcript has a shape this tool does not
+        # understand (what and where) — the store format seems to have
+        # changed — and that nothing is exported until it can be read.
+        raise UserError(
+            f"Forma transcripti Antigravity ignota ({exc}): {path}\n"
+            "Forma repositi mutata videtur; nihil exportatur dum legi possit."
+        ) from exc
+
+
+def antigravity_parse(path: Path, repo: Path, key: bytes) -> tuple[list[Exchange], set[Holding]]:
+    top = wire(antigravity_open(path, key))
+    session = pb_text(top, 6) or path.stem
+    steps = [wire(step) for number, step in top if number == 2 and isinstance(step, bytes)]
+    # Attribution is by conversation: the workspace its prompts name. A
+    # prompt carries that context only sometimes, so every prompt inherits
+    # the one workspace the conversation names; a second one is a shape
+    # this tool has not seen.
+    workspaces: set[str] = set()
+    for step in steps:
+        if pb_get(step, 1) == ANTIGRAVITY_USER:
+            for number, item in pb_message(pb_message(step, 19), 4):
+                uri = pb_text(wire(item), 13) if isinstance(item, bytes) else None
+                if uri is not None:
+                    workspaces.add(uri)
+    if len(workspaces) > 1:
+        raise ValueError(f"workspaces {sorted(workspaces)}")
+    folder = decode_file_uri(next(iter(workspaces))) if workspaces else None
+    if folder is None or not under_dir(folder, repo):
+        return [], set()
+    messages: list[Message] = []
+    holdings: set[Holding] = set()
+    pending = 0.0  # seconds the agent spent in steps since the last emitted message
+    for step in steps:
+        kind, status = pb_get(step, 1), pb_get(step, 4)
+        if status not in ANTIGRAVITY_STATUSES:
+            raise ValueError(f"step status {status}")
+        meta = pb_message(step, 5)
+        created = antigravity_time(pb_get(meta, 1))
+        if kind == ANTIGRAVITY_USER:
+            payload = pb_message(step, 19)
+            click = pb_message(payload, 7)
+            unknown = ({n for n, _ in payload} - ANTIGRAVITY_USER_FIELDS) | (
+                {n for n, _ in click} - ANTIGRAVITY_CLICK_FIELDS
+            )
+            if unknown:
+                raise ValueError(f"prompt fields {sorted(unknown)}")
+            text = pb_text(payload, 2)
+            if text is None and click:
+                # An action on an artifact (approving a plan, say) types
+                # nothing unless a comment rides along.
+                text = pb_text(click, 5) or ""
+            if text is None:
+                if status != ANTIGRAVITY_EMPTIED:
+                    raise ValueError("prompt without words")
+                continue  # emptied by the application: no words left, so no holding
+            holdings.add(("Antigravity", created))
+            if text != "":
+                messages.append(Message("user", created, text, active=pending))
+                pending = 0.0
+            continue
+        if kind not in (ANTIGRAVITY_PLANNER, ANTIGRAVITY_NOTIFY) and kind not in ANTIGRAVITY_MACHINE:
+            raise ValueError(f"step type {kind}")
+        start, end = pb_get(meta, 6), pb_get(meta, 7)
+        if isinstance(start, bytes) and isinstance(end, bytes):
+            pending += (antigravity_time(end) - antigravity_time(start)).total_seconds()
+        if kind in ANTIGRAVITY_MACHINE:
+            continue
+        enum = pb_get(meta, 11)
+        # The model label when the store's enum is not in the table:
+        model = "" if enum is None else ANTIGRAVITY_MODELS.get(enum, f"unknown model {enum}")
+        if kind == ANTIGRAVITY_PLANNER:
+            payload, number, allowed = pb_message(step, 20), 1, ANTIGRAVITY_PLANNER_FIELDS
+        else:
+            payload, number, allowed = pb_message(step, 94), 2, ANTIGRAVITY_NOTIFY_FIELDS
+        unknown = {n for n, _ in payload} - allowed
+        if unknown:
+            raise ValueError(f"step {kind} fields {sorted(unknown)}")
+        text = pb_text(payload, number)
+        if not text:
+            continue  # thinking or tool calls only, or a step the application emptied
+        when = antigravity_time(end) if isinstance(end, bytes) else created
+        messages.append(Message("assistant", when, text, model, active=pending))
+        pending = 0.0
+    return paired("Antigravity", session, messages, path, (pending, 0, 0)), holdings
+
+
 def weave(exchanges: Iterable[Exchange]) -> list[Exchange]:
     """Merge all providers into one chronology, collapsing exact duplicates
     (resumed or forked sessions replay identical records into new files)."""
@@ -1558,6 +1826,12 @@ def collect(repo: Path, roots: Roots) -> tuple[list[Exchange], set[Holding]]:
             workspace = workspace_roots(storage)
             for path in sorted((*session_dir.glob("*.json"), *session_dir.glob("*.jsonl"))):
                 gather(vscode_exchanges(path, workspace, repo))
+    for root in roots.antigravity:
+        conversations = root / "conversations"
+        if not require_dir(root) or not conversations.is_dir():
+            continue
+        for path in sorted(p for p in conversations.glob("*.pb") if p.is_file()):
+            gather(antigravity_exchanges(path, repo, antigravity_key()))
     return exchanges, holdings
 
 
@@ -1677,14 +1951,19 @@ CSS = r"""
      a plain green fails deutan/protan separation against these reds). */
   --diff-add: #00785a;
   --diff-del: #cf222e;
-  /* Provider identity trio for the exchange edge stripe and meta-line chip,
-     validated per mode against its page surface (within-trio CVD-simulated
-     ΔE >= 8.7, contrast >= 3:1) and against the diffstat pair and accent.
-     Identity never rides on color alone: the agent's name sits beside the
-     chip in every meta line. */
+  /* Provider identity quartet for the exchange edge stripe and meta-line
+     chip, validated per mode against its page surface: within the quartet
+     the worst CVD-simulated pair is 8.7 light / 7.2 dark (both inside the
+     original trio; the olive's own worst pair is 11.7 / 13.6), normal-vision
+     ΔE >= 16.9, contrast >= 3:1. Against the diffstat pair the olive sits
+     6.3 / 6.5 under simulation — the 6–8 band that is legal only with
+     secondary encoding, which these marks have: a different mark class, and
+     the agent's name beside every chip. Identity never rides on color
+     alone. */
   --claude: #b02777;
   --codex: #076f9e;
   --copilot: #6a2fc2;
+  --antigravity: #656902;
   --measure: 44rem;
   --serif: "Iowan Old Style", Charter, Georgia, "Times New Roman", serif;
   --sans: ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
@@ -1706,6 +1985,7 @@ CSS = r"""
     --claude: #d84f97;
     --codex: #1a94b4;
     --copilot: #8a75f0;
+    --antigravity: #8b8806;
   }
 }
 * { box-sizing: border-box; }
@@ -1851,6 +2131,7 @@ summary a.anchor:hover { text-decoration: underline; }
 .exchange.claude { --provider: var(--claude); }
 .exchange.codex { --provider: var(--codex); }
 .exchange.copilot { --provider: var(--copilot); }
+.exchange.antigravity { --provider: var(--antigravity); }
 /* The prompt's diffstat floats right of the prompt's first lines. Numbers
    wear the metadata ink; polarity lives in the blocks (and in the signs and
    the fixed added-first order). */
@@ -2131,7 +2412,9 @@ def minimap(exchanges: Sequence[Exchange], locals_: Sequence[dt.datetime]) -> st
 # CSS class per provider, keying the exchange's edge stripe and meta-line
 # chip to its agent. A provider missing here crashes render() (KeyError)
 # rather than shipping an unmarked exchange.
-PROVIDER_SLUGS = {"Claude Code": "claude", "Codex": "codex", "Copilot Chat": "copilot"}
+PROVIDER_SLUGS = {
+    "Claude Code": "claude", "Codex": "codex", "Copilot Chat": "copilot", "Antigravity": "antigravity",
+}
 
 
 def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
@@ -2455,7 +2738,7 @@ def no_exchanges_error(repo: Path, roots: Roots) -> UserError:
         f"No prompts found: {repo}\n\n"
         f"Radices inspectae:\n{sought}\n\n"
         "Si transcripta alibi sunt, variabiles AI_CHAT_CLAUDE_ROOTS, "
-        "AI_CHAT_CODEX_ROOTS, vel AI_CHAT_VSCODE_USER_ROOTS constitue.\n"
+        "AI_CHAT_CODEX_ROOTS, AI_CHAT_VSCODE_USER_ROOTS, vel AI_CHAT_ANTIGRAVITY_ROOTS constitue.\n"
         "VS Code: inceptum ipsum ut folder aperi, non workspace multiplex."
     )
 

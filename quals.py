@@ -11,6 +11,7 @@ import binascii
 import contextlib
 import dataclasses
 import datetime as dt
+import hashlib
 import io
 import json
 import os
@@ -1922,13 +1923,22 @@ class CliQuals(Fixture):
         self.claude_root = self.tmp / "claude"
         self.codex_root = self.tmp / "codex"
         self.vscode_root = self.tmp / "vscode"
-        for root in (self.claude_root, self.codex_root, self.vscode_root):
+        self.antigravity_root = self.tmp / "antigravity"
+        for root in (self.claude_root, self.codex_root, self.vscode_root, self.antigravity_root):
             root.mkdir()
         self.env = {
             "AI_CHAT_CLAUDE_ROOTS": str(self.claude_root),
             "AI_CHAT_CODEX_ROOTS": str(self.codex_root),
             "AI_CHAT_VSCODE_USER_ROOTS": str(self.vscode_root),
+            "AI_CHAT_ANTIGRAVITY_ROOTS": str(self.antigravity_root),
         }
+        # Fixtures are sealed with the test key; the real finder would look
+        # for the application's key in the installed binary.
+        self.finder = ace.antigravity_key
+        ace.antigravity_key = lambda: AG_TEST_KEY
+
+    def tearDown(self):
+        ace.antigravity_key = self.finder
 
     def run_cli(self, argv):
         out, err = io.StringIO(), io.StringIO()
@@ -2507,9 +2517,50 @@ class CliQuals(Fixture):
         _, again = self.generate(out_path)
         self.assertEqual(again, page)
 
+    def test_antigravity_exchanges_reach_the_page(self):
+        self.populate()
+        ws = self.repo.as_uri()
+        write_ag(
+            self.antigravity_root,
+            "conv-1",
+            agconv([
+                aguser("antigravity prompt", T3, workspace=ws),
+                agnotify(T3, "2026-03-01T10:15:01.000Z", "2026-03-01T10:15:02.000Z", "antigravity reply"),
+            ]),
+        )
+        out_path = self.tmp / "out.html"
+        out, page = self.generate(out_path)
+        self.assertIn("Prompts: 4", out)
+        for text in ("antigravity prompt", "antigravity reply", 'class="exchange antigravity"', "gemini-3-pro-high"):
+            self.assertIn(text, page)
+        order = [page.index(t) for t in ("claude prompt", "codex prompt", "copilot prompt", "antigravity prompt")]
+        self.assertEqual(order, sorted(order))
+
+    def test_prompt_the_application_later_emptied_survives_on_the_page(self):
+        # Replicata: a run while the conversation was intact; then the
+        # application compacts it, emptying that prompt's step but keeping the
+        # file. Expectata: the page keeps the prompt and its reply — the store
+        # no longer holds their words, so the emptied steps are no holdings.
+        ws = self.repo.as_uri()
+        write_ag(self.antigravity_root, "conv-1", agconv([
+            aguser("early prompt", T0, workspace=ws),
+            agnotify(T0, T1, T2, "early reply"),
+        ]))
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        write_ag(self.antigravity_root, "conv-1", agconv([
+            aguser(None, T0, status=5),
+            agstep(82, T0, None, None, model=None, status=5),
+            aguser("later prompt", T3, workspace=ws),
+        ]))
+        out, page = self.generate(out_path)
+        for text in ("early prompt", "early reply", "later prompt"):
+            self.assertIn(text, page)
+        self.assertIn("Prompts: 2", out)
+
     def test_version_and_help_exit_zero(self):
         code, out, err = self.run_cli(["--version"])
-        self.assertEqual((code, out, err), (0, "5.4.1\n", ""))
+        self.assertEqual((code, out, err), (0, "5.5.0\n", ""))
         code, out, _ = self.run_cli(["--help"])
         self.assertEqual(code, 0)
         self.assertIn("REPODIR", out)
@@ -2641,6 +2692,307 @@ class RemoteQuals(Fixture):
 
     def test_no_git_directory_means_no_link(self):
         self.assertEqual(ace.repo_remote(self.repo), "")
+
+
+# ---------------------------------------------------------------- Antigravity
+
+def varint(value):
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def pbv(number, value):
+    """A protobuf varint field."""
+    return varint(number << 3) + varint(value)
+
+
+def pbb(number, value):
+    """A protobuf length-delimited field holding bytes or UTF-8 text."""
+    data = value.encode("utf-8") if isinstance(value, str) else value
+    return varint(number << 3 | 2) + varint(len(data)) + data
+
+
+def pbm(number, *parts):
+    """A protobuf length-delimited field holding a nested message."""
+    return pbb(number, b"".join(parts))
+
+
+def agstamp(number, iso):
+    when = utc(iso)
+    return pbm(number, pbv(1, int(when.timestamp())), pbv(2, when.microsecond * 1000))
+
+
+def agmeta(created, start=None, end=None, model=1008, turn="turn-1"):
+    parts = [agstamp(1, created)]
+    if start is not None:
+        parts += [agstamp(6, start), agstamp(7, end)]
+    if model is not None:
+        parts.append(pbv(11, model))
+    parts.append(pbb(12, turn))
+    return pbm(5, *parts)
+
+
+AG_ARTIFACT = "file:///Users/someone/.gemini/antigravity/brain/conv-1/implementation_plan.md"
+
+
+def aguser(text, created, workspace=None, status=3, click=None, extra=b""):
+    """A type-14 step as the store writes it: text is the typed prompt (None
+    for none), workspace the context URI, click an artifact action carrying
+    a comment (an empty comment is a bare click), extra raw payload bytes."""
+    payload = []
+    if text is not None:
+        payload += [pbb(2, text), pbm(3, pbb(1, text))]
+    if workspace is not None:
+        payload.append(pbm(4, pbm(2, pbb(4, "javascript"), pbv(5, 17), pbb(13, workspace))))
+    if click is not None:
+        payload.append(pbm(7, pbb(1, AG_ARTIFACT), pbb(5, click), pbv(7, 1)))
+    payload.append(pbv(8, 1))
+    return pbm(2, pbv(1, 14), pbv(4, status), agmeta(created, model=None), pbm(19, *payload, extra))
+
+
+def agplanner(created, start, end, text=None, thinking=None, tool=False, model=1008, turn="turn-1"):
+    payload = []
+    if text is not None:
+        payload += [pbb(1, text), pbb(8, text)]
+    if thinking is not None:
+        payload.append(pbb(3, thinking))
+    if tool:
+        payload.append(pbm(7, pbb(1, "call-1"), pbb(2, "list_dir"), pbb(3, "{}")))
+    return pbm(2, pbv(1, 15), pbv(4, 3), agmeta(created, start, end, model, turn), pbm(20, *payload))
+
+
+def agnotify(created, start, end, text, model=1008, turn="turn-1"):
+    payload = [pbb(1, AG_ARTIFACT), pbb(2, text), pbv(3, 1), pbb(5, "confidence justification")]
+    return pbm(2, pbv(1, 82), pbv(4, 3), agmeta(created, start, end, model, turn), pbm(94, *payload))
+
+
+def agstep(kind, created, start, end, model=1008, payload=b"", status=3, turn="turn-1"):
+    """A machine step of the given type with an opaque payload."""
+    return pbm(2, pbv(1, kind), pbv(4, status), agmeta(created, start, end, model, turn), payload)
+
+
+def agconv(steps, cid="conv-1", created=T0):
+    return b"".join([pbb(1, "owner-1"), *steps, pbb(6, cid), pbm(7, agstamp(2, created), pbb(3, "x"))])
+
+
+# The quals never touch the application's real key: fixtures are sealed with
+# this one, and the CLI quals hand it to sourcery in place of the finder.
+AG_TEST_KEY = b"q" * 32
+
+
+def agseal(plain, key=AG_TEST_KEY):
+    """Seal bytes the way the store does — nonce, ciphertext, tag — through
+    the same system cipher sourcery opens them with."""
+    import ctypes
+    import ctypes.util
+
+    seal = ctypes.CDLL(ctypes.util.find_library("System")).CCCryptorGCMOneshotEncrypt
+    seal.restype = ctypes.c_int32
+    seal.argtypes = [
+        ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t,
+        ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p,
+        ctypes.c_char_p, ctypes.c_size_t,
+    ]
+    nonce = os.urandom(12)
+    out = ctypes.create_string_buffer(len(plain))
+    tag = ctypes.create_string_buffer(16)
+    assert seal(0, key, 32, nonce, 12, None, 0, plain, len(plain), out, tag, 16) == 0
+    return nonce + out.raw + tag.raw
+
+
+def write_ag(root, cid, plain):
+    path = root / "conversations" / f"{cid}.pb"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(agseal(plain))
+    return path
+
+
+class AntigravityQuals(Fixture):
+    def parse(self, plain, repo=None):
+        path = write_ag(self.tmp / "ag", "conv-1", plain)
+        return ace.antigravity_exchanges(path, repo or self.repo, AG_TEST_KEY)
+
+    def test_key_is_read_from_the_installed_binary_by_digest(self):
+        # Replicata: a binary holding many letter runs, one of them the key.
+        # Expectata: the finder returns exactly that window; with a digest
+        # matching nothing, or no binary at all, it refuses loudly.
+        key = b"ThirtyTwoLettersOfLocalStoreKeyx"
+        assert len(key) == 32
+        binary = self.tmp / "bin" / "language_server_fake"
+        binary.parent.mkdir()
+        binary.write_bytes(b"\x00\x01" * 500 + b"prefixLetters" + key + b"MoreLettersAfterwards\x00" + b"z" * 40 + b"\x7f")
+        finder = ace.antigravity_key.__wrapped__
+        original = ace.ANTIGRAVITY_BIN, ace.ANTIGRAVITY_KEY_DIGEST
+        try:
+            ace.ANTIGRAVITY_BIN, ace.ANTIGRAVITY_KEY_DIGEST = binary.parent, hashlib.sha256(key).hexdigest()
+            self.assertEqual(finder(), key)
+            ace.ANTIGRAVITY_KEY_DIGEST = hashlib.sha256(b"another").hexdigest()
+            with self.assertRaises(ace.UserError):
+                finder()
+            ace.ANTIGRAVITY_BIN = self.tmp / "absent"
+            with self.assertRaises(ace.UserError):
+                finder()
+        finally:
+            ace.ANTIGRAVITY_BIN, ace.ANTIGRAVITY_KEY_DIGEST = original
+
+    def test_key_literal_appears_nowhere_in_the_sources(self):
+        # The key belongs to the application; only its digest is recorded.
+        for name in ("sourcery.py", "quals.py", "unrender.py", "README.md"):
+            source = (Path(ace.__file__).parent / name).read_bytes()
+            for run in re.finditer(rb"[A-Za-z]{32,}", source):
+                letters = run.group()
+                for at in range(len(letters) - 31):
+                    self.assertNotEqual(hashlib.sha256(letters[at:at + 32]).hexdigest(), ace.ANTIGRAVITY_KEY_DIGEST, name)
+
+    def test_unknown_model_enum_is_shown_not_hidden(self):
+        # Replicata: a reply stamped with a model enum the table does not
+        # name. Expectata: the exchange still renders, its model reading as
+        # an unknown model with the number — the gap is visible, the page
+        # is not refused.
+        steps = [aguser("p", T0, workspace=self.repo.as_uri()), agnotify(T0, T1, T2, "r", model=1012)]
+        exchanges, _ = self.parse(agconv(steps))
+        self.assertEqual(exchanges[0].model, "unknown model 1012")
+
+    def test_typed_prompts_and_visible_replies_extracted(self):
+        # Replicata: a typed prompt; a planner step with thinking and a tool
+        # call; a planner step with visible text; a notify-user message; a
+        # second prompt. Expectata: two exchanges; the first's reply is the
+        # visible planner text and the notify message joined, its model named
+        # from the enum, elapsed the sum of the agent steps' spans, wall from
+        # the prompt to the last reply; the thinking and tool call absent.
+        ws = self.repo.as_uri()
+        steps = [
+            aguser("first prompt", T0, workspace=ws),
+            agplanner(T0, "2026-03-01T10:00:01.000Z", "2026-03-01T10:00:04.000Z", thinking="**Thinking**\nhidden", tool=True),
+            agplanner(T0, "2026-03-01T10:00:05.000Z", "2026-03-01T10:00:07.000Z", text="Visible **answer**."),
+            agnotify(T0, "2026-03-01T10:00:08.000Z", "2026-03-01T10:00:09.000Z", "Done; please review."),
+            aguser("second prompt", T1, workspace=ws),
+        ]
+        exchanges, holdings = self.parse(agconv(steps))
+        self.assertEqual([e.prompt for e in exchanges], ["first prompt", "second prompt"])
+        first = exchanges[0]
+        self.assertEqual(first.reply, "Visible **answer**.\n\nDone; please review.")
+        self.assertNotIn("hidden", first.reply)
+        self.assertEqual((first.provider, first.model, first.session), ("Antigravity", "gemini-3-pro-high", "conv-1"))
+        self.assertEqual(first.timestamp, utc(T0))
+        self.assertEqual((first.elapsed, first.wall), (6.0, 9.0))
+        self.assertEqual(exchanges[1].reply, "")
+        self.assertEqual(holdings, {("Antigravity", utc(T0)), ("Antigravity", utc(T1))})
+
+    def test_machine_steps_carry_time_but_never_words(self):
+        # Replicata: between a prompt and its reply, an ephemeral injection, a
+        # history injection, a code action, a file view, a terminal run, a
+        # progress summary and a browser subtask, each spanning two seconds.
+        # Expectata: none contributes reply text; every span counts as work.
+        ws = self.repo.as_uri()
+        steps = [aguser("p", T0, workspace=ws)]
+        second = 1
+        for kind in (90, 98, 5, 8, 21, 81, 85):
+            start, end = f"2026-03-01T10:00:{second:02d}.000Z", f"2026-03-01T10:00:{second + 2:02d}.000Z"
+            steps.append(agstep(kind, T0, start, end, payload=pbm(103, pbb(1, "The following is an <EPHEMERAL_MESSAGE>"))))
+            second += 3
+        steps.append(agnotify(T0, "2026-03-01T10:00:30.000Z", "2026-03-01T10:00:31.000Z", "reply"))
+        exchanges, _ = self.parse(agconv(steps))
+        self.assertEqual(exchanges[0].reply, "reply")
+        self.assertEqual(exchanges[0].elapsed, 15.0)
+
+    def test_cancelled_and_failed_agent_steps_still_speak_and_take_time(self):
+        # The real store marks agent steps 6 (cancelled) and 7 (failed) with
+        # their payloads intact; their words reached the human and their
+        # spans were spent.
+        ws = self.repo.as_uri()
+        steps = [
+            aguser("p", T0, workspace=ws),
+            agstep(5, T0, "2026-03-01T10:00:01.000Z", "2026-03-01T10:00:03.000Z", status=7),
+            agnotify(T0, "2026-03-01T10:00:04.000Z", "2026-03-01T10:00:05.000Z", "stopped midway"),
+        ]
+        steps[2] = steps[2].replace(pbv(4, 3), pbv(4, 6), 1)
+        exchanges, _ = self.parse(agconv(steps))
+        self.assertEqual((exchanges[0].reply, exchanges[0].elapsed), ("stopped midway", 3.0))
+
+    def test_conversation_attributed_by_the_one_workspace_its_prompts_name(self):
+        ws = self.repo.as_uri()
+        exchanges, holdings = self.parse(agconv([aguser("a", T0, workspace=ws), aguser("b", T1), aguser("c", T2, workspace=ws)]))
+        self.assertEqual([e.prompt for e in exchanges], ["a", "b", "c"])
+        self.assertEqual(len(holdings), 3)
+        elsewhere = (self.tmp / "elsewhere").as_uri()
+        self.assertEqual(self.parse(agconv([aguser("x", T0, workspace=elsewhere), aguser("y", T1)])), ([], set()))
+        self.assertEqual(self.parse(agconv([aguser("x", T0)])), ([], set()))
+
+    def test_two_workspaces_in_one_conversation_fail_loudly(self):
+        steps = [aguser("a", T0, workspace=self.repo.as_uri()), aguser("b", T1, workspace=(self.tmp / "other").as_uri())]
+        with self.assertRaises(ace.UserError):
+            self.parse(agconv(steps))
+
+    def test_trimmed_steps_are_neither_prompts_nor_holdings(self):
+        # Replicata: the application compacted the conversation, leaving its
+        # early steps with status 5 and no content, then a live prompt.
+        # Expectata: the live prompt alone, and a holding for it alone — a
+        # page copy of the emptied prompt must survive the merge, since the
+        # store no longer holds its words.
+        ws = self.repo.as_uri()
+        steps = [
+            aguser(None, T0, status=5),
+            agstep(15, T0, None, None, model=None, status=5),
+            aguser("live", T1, workspace=ws),
+        ]
+        exchanges, holdings = self.parse(agconv(steps))
+        self.assertEqual([e.prompt for e in exchanges], ["live"])
+        self.assertEqual(holdings, {("Antigravity", utc(T1))})
+
+    def test_artifact_click_is_a_holding_but_a_comment_is_a_prompt(self):
+        ws = self.repo.as_uri()
+        steps = [
+            aguser("typed", T0, workspace=ws),
+            aguser(None, T1, workspace=ws, click=""),
+            aguser(None, T2, workspace=ws, click="please also handle mobile"),
+        ]
+        exchanges, holdings = self.parse(agconv(steps))
+        self.assertEqual([e.prompt for e in exchanges], ["typed", "please also handle mobile"])
+        self.assertEqual(holdings, {("Antigravity", utc(T0)), ("Antigravity", utc(T1)), ("Antigravity", utc(T2))})
+
+    def test_unknown_shapes_fail_loudly(self):
+        ws = self.repo.as_uri()
+        cases = {
+            "step type": [aguser("p", T0, workspace=ws), agstep(999, T0, T1, T2)],
+            "prompt field": [aguser("p", T0, workspace=ws, extra=pbb(99, "an attachment?"))],
+            "empty live prompt": [aguser(None, T0, workspace=ws)],
+            "step status": [aguser("p", T0, workspace=ws, status=9)],
+        }
+        for label, steps in cases.items():
+            with self.assertRaises(ace.UserError, msg=label) as caught:
+                self.parse(agconv(steps))
+            self.assertIn("conv-1", str(caught.exception), label)
+            self.assertIn(label.split()[-1] if label == "step type" else "", str(caught.exception))
+
+    def test_unopenable_transcript_fails_loudly(self):
+        path = write_ag(self.tmp / "ag", "conv-1", agconv([aguser("p", T0, workspace=self.repo.as_uri())]))
+        blob = bytearray(path.read_bytes())
+        blob[-1] ^= 1
+        path.write_bytes(bytes(blob))
+        with self.assertRaises(ace.UserError) as caught:
+            ace.antigravity_exchanges(path, self.repo, AG_TEST_KEY)
+        self.assertIn("conv-1.pb", str(caught.exception))
+        path.write_bytes(agseal(b"\xff\xff\xff"))
+        with self.assertRaises(ace.UserError):
+            ace.antigravity_exchanges(path, self.repo, AG_TEST_KEY)
+        # A different key than the one the file was sealed with is the same
+        # refusal: the file is unreadable as far as this tool can tell.
+        path.write_bytes(agseal(agconv([aguser("p", T0, workspace=self.repo.as_uri())]), key=b"k" * 32))
+        with self.assertRaises(ace.UserError):
+            ace.antigravity_exchanges(path, self.repo, AG_TEST_KEY)
+
+    def test_provider_color_defined_in_both_modes(self):
+        self.assertEqual(ace.CSS.count("--antigravity:"), 2)
+        self.assertIn(".exchange.antigravity { --provider: var(--antigravity); }", ace.CSS)
+        self.assertEqual(ace.PROVIDER_SLUGS["Antigravity"], "antigravity")
 
 
 # ------------------------------------------------------------------ snapshot
@@ -3067,6 +3419,13 @@ class UnrenderQuals(Fixture):
         self.assertIn("elsewhere (https://github.com/beeminder/efme)", err)
         self.assertEqual(self.page.read_bytes(), page.encode("utf-8"))
 
+    def test_antigravity_exchange_round_trips(self):
+        original = exchange(provider="Antigravity", model="gemini-3-pro-high", reply="Visible **answer**.")
+        page = self.render([original])
+        self.write(page)
+        got, _ = unrender.recover(self.repo, self.page)
+        self.assertEqual(got, [dataclasses.replace(original, session="unrendered", source=self.page)])
+
     def test_non_utf8_page_refused(self):
         page = self.render([exchange()]).encode("utf-8") + b"\xff\xfe"
         self.page.write_bytes(page)
@@ -3106,6 +3465,7 @@ class UnrenderQuals(Fixture):
             "AI_CHAT_CLAUDE_ROOTS": str(self.tmp / "nc"),
             "AI_CHAT_CODEX_ROOTS": str(self.tmp / "nx"),
             "AI_CHAT_VSCODE_USER_ROOTS": str(self.tmp / "nv"),
+            "AI_CHAT_ANTIGRAVITY_ROOTS": str(self.tmp / "na"),
         }
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
