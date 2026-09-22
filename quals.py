@@ -2099,6 +2099,34 @@ class CliQuals(Fixture):
         self.assertNotIn("copilot prompt", page)
         self.assertIn("Prompts: 2", out)
 
+    def test_run_names_prompts_the_store_now_reads_as_nothing(self):
+        # Replicata: a run; then the store's Copilot request is reclassified
+        # as machine text (system-initiated) while a Claude prompt's text is
+        # merely revised in place. Expectata: the rerun drops the Copilot
+        # page copy and NAMES it on stdout by agent and time; the revised
+        # Claude prompt, replaced rather than dropped, is not named; a run
+        # with nothing dropped says so with a count of zero. Resultata
+        # before: the drop happened silently, so a parser change that
+        # dropped typed prompts by mistake would have passed unseen.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        out, _ = self.generate(out_path)
+        self.assertIn("Rogationes deletae: 0", out)
+        request = vsreq("copilot prompt", [md("copilot reply")], ts=int(utc(T2).timestamp() * 1000))
+        request["isSystemInitiated"] = True
+        (self.vscode_root / "workspaceStorage" / "h1" / "chatSessions" / "a.json").write_text(
+            json.dumps(vssession([request])), encoding="utf-8"
+        )
+        write_jsonl(
+            self.claude_root / "p" / "s.jsonl",
+            [cu("revised claude prompt", ts=T0, cwd=str(self.repo)), ca([{"type": "text", "text": "r"}], cwd=str(self.repo))],
+        )
+        out, page = self.generate(out_path)
+        self.assertIn("Rogationes deletae: 1", out)
+        self.assertIn(f"Copilot Chat {utc(T2).isoformat()}", out)
+        self.assertNotIn("Claude Code", out.split("Rogationes deletae")[1])
+        self.assertNotIn("copilot prompt", page)
+
     def test_shrunk_live_session_keeps_typed_prompt(self):
         # Replicata: a store restored from an older backup still holds the
         # session file but not its later records. Expectata: the page's copies
@@ -2492,7 +2520,7 @@ class CliQuals(Fixture):
             [cxmeta(str(self.repo)), cxuser("codex prompt", ts=T1), cxagent("codex reply", ts=T2), cxuser("later", ts=T3)],
         )
         out, page = self.generate(out_path)
-        count = int(out.split("Prompts: ")[1])
+        count = int(out.split("Prompts: ")[1].split()[0])
         self.assertEqual(count, 4)
         self.assertEqual(page.count("<article "), count)
         self.assertIn(f'<p class="deck">{count} prompts', page)

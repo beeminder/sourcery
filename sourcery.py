@@ -2766,9 +2766,22 @@ def run(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None)
         # TODO: Reports success with the output path and the number of
         # exported prompts.
         print(f"Written: {output}\nPrompts: {len(exchanges)}")
+        # A page prompt whose record the store still holds but no longer
+        # reads as a prompt was dropped by the merge above. It is named here,
+        # every run, so a parser change that dropped typed words by mistake
+        # cannot pass unseen: the diff of the page shows the loss, this line
+        # says why.
+        yielded = {holding(exchange) for exchange in fresh}
+        dropped = sorted(
+            (exchange for exchange in inherited if holding(exchange) in holdings and holding(exchange) not in yielded),
+            key=holding,
+        )
+        # Reports how many prompts the page showed that the store now
+        # reads as machine text, each named by agent and time.
+        print(f"Prompts deleted: {len(dropped)}" + "".join(f"\n  {e.provider} {e.timestamp.isoformat()}" for e in dropped))
         if options.open_after and not webbrowser.open(output.as_uri()):
-            # TODO: Says the browser refused to open the file.
-            raise UserError(f"Navigatrum fasciculum aperire recusavit: {output}")
+            # Says the browser refused to open the file.
+            raise UserError(f"Browser failed to open: {output}")
         return 0
     except ExitMessage as exc:
         print(exc)
