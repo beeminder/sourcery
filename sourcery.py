@@ -48,7 +48,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "5.4.0"
+VERSION = "5.4.1"
 UTC = dt.timezone.utc
 
 
@@ -211,30 +211,65 @@ def canonical_repo(path: Path) -> Path:
 
 
 def https_remote(url: str) -> str:
-    """Normalize a git remote URL (https, ssh, or scp-style) to https, or ""."""
-    for prefix in ("https://", "http://"):
-        if url.startswith(prefix):
-            return url.removesuffix(".git")
+    """Normalize a git remote URL (https, ssh, or scp-style) to https, or "".
+
+    The home is host plus path. Whatever precedes the host — a username, or
+    a hosting service's token — is how this machine authenticates, not where
+    the project lives, and must never reach a published page.
+    """
+    web = re.fullmatch(r"https?://(?:[^/@]*@)?(.+?)(?:\.git)?/?", url)
+    if web:
+        return f"https://{web.group(1)}"
     scp = re.fullmatch(r"(?:ssh://)?git@([^:/]+)[:/](.+?)(?:\.git)?/?", url)
     return f"https://{scp.group(1)}/{scp.group(2)}" if scp else ""
 
 
+REMOTE_SECTION = re.compile(r'\[remote "(.+)"\]')
+
+
 def repo_remote(repo: Path) -> str:
-    """Return the repo's origin remote as an https URL, or "" when absent."""
+    """Return the repo's origin remote as an https URL, or "" when absent.
+
+    A project with no remote lives only here, and so does one whose remote
+    names no browsable page (a git:// mirror, an ssh host serving no web
+    page); for both, "" is the honest answer and the page falls back to the
+    local directory. A project whose public home sits under some other
+    remote name is the one case that must not pass quietly: the home is
+    plainly there, and only the name hides it.
+    """
     config = repo / ".git" / "config"
     if not config.is_file():
         return ""
-    url = ""
-    section = ""
+    remotes: dict[str, str] = {}
+    name = ""
     for line in config.read_text(encoding="utf-8", errors="replace").splitlines():
         stripped = line.strip()
         if stripped.startswith("["):
-            section = stripped
-        elif section == '[remote "origin"]':
+            found = REMOTE_SECTION.fullmatch(stripped)
+            name = found.group(1) if found else ""
+        elif name:
             key, _, value = stripped.partition("=")
             if key.strip() == "url":
-                url = value.strip()
-    return https_remote(url)
+                # The first URL wins, as it does for the version-control tool
+                # itself when a remote carries several.
+                remotes.setdefault(name, value.strip())
+    home = https_remote(remotes.pop("origin", ""))
+    hidden = {other: link for other, url in remotes.items() if (link := https_remote(url))}
+    if not home and hidden:
+        homes = ", ".join(f"{other} ({link})" for other, link in sorted(hidden.items()))
+        # TODO: Says that no remote named origin points at a public home,
+        # lists the remotes that do, and asks the user to make origin point
+        # at the same home — by renaming that remote, or by setting origin's
+        # own URL — then rerun. Sourcery will not guess which home to show.
+        # (It says nothing about whether an origin exists: one may, pointing
+        # somewhere that has no web page of its own.)
+        raise UserError(
+            f"Nullum remotum nomine 'origin' sedem publicam monstrat: {repo}\n"
+            f"Sedem publicam habent: {homes}\n"
+            "Fac ut 'origin' eandem sedem monstret (aut nomen illius remoti muta, "
+            "aut URL ipsius 'origin' constitue), deinde iterum curre."
+        )
+    return home
 
 
 def env_paths(env: Mapping[str, str], key: str, defaults: Iterable[Path]) -> tuple[Path, ...]:

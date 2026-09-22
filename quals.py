@@ -2400,6 +2400,22 @@ class CliQuals(Fixture):
         self.assertIn("Tempus deest", err)
         self.assertFalse((self.tmp / "o.html").exists())
 
+    def test_repo_whose_public_home_is_not_named_origin_rejected(self):
+        # The refusal reaches the CLI: nothing is written, and the message
+        # says which remote holds the home and what to rename.
+        self.populate()
+        git = self.repo / ".git"
+        git.mkdir()
+        (git / "config").write_text(
+            '[remote "efme"]\n\turl = git@github.com:beeminder/efme.git\n', encoding="utf-8"
+        )
+        out_path = self.tmp / "out.html"
+        code, _, err = self.run_cli([str(self.repo), str(out_path)])
+        self.assertEqual(code, 2)
+        self.assertIn("efme", err)
+        self.assertIn("origin", err)
+        self.assertFalse(out_path.exists())
+
     def test_open_flag_opens_the_written_page(self):
         self.populate()
         out_path = self.tmp / "out.html"
@@ -2493,7 +2509,7 @@ class CliQuals(Fixture):
 
     def test_version_and_help_exit_zero(self):
         code, out, err = self.run_cli(["--version"])
-        self.assertEqual((code, out, err), (0, "5.4.0\n", ""))
+        self.assertEqual((code, out, err), (0, "5.4.1\n", ""))
         code, out, _ = self.run_cli(["--help"])
         self.assertEqual(code, 0)
         self.assertIn("REPODIR", out)
@@ -2512,6 +2528,28 @@ class CliQuals(Fixture):
 
 
 class RemoteQuals(Fixture):
+    def test_web_url_userinfo_is_not_part_of_the_home(self):
+        # Replicata: a remote URL carrying a username, or a hosting token, in
+        # front of the host, as several real configs do. Expectata: the home
+        # is host plus path, exactly as the scp form already yields it, and
+        # any http scheme is upgraded. Resultata before: the username, or the
+        # token, was rendered into the published masthead link.
+        cases = [
+            ("https://dreeves@github.com/dreeves/yardsign.git", "https://github.com/dreeves/yardsign"),
+            ("https://2b7aeb35-385a@api.glitch.com/iwill/git", "https://api.glitch.com/iwill/git"),
+            ("http://github.com/bsoule/namer.git", "https://github.com/bsoule/namer"),
+            ("https://github.com/a/b/", "https://github.com/a/b"),
+            ("https://github.com/a/b@2.git", "https://github.com/a/b@2"),  # "@" in the path is not userinfo
+            ("https://github.com/dreeves/crashla", "https://github.com/dreeves/crashla"),
+            ("git@github.com:dreeves/crashla.git", "https://github.com/dreeves/crashla"),
+            ("ssh://git@github.com/dreeves/bid.git", "https://github.com/dreeves/bid"),
+            ("git://github.com/facebook/codemod.git", ""),
+            ("ssh://dreeves@mpdev.mooo.com/var/dev/mp", ""),
+            ("", ""),
+        ]
+        for url, expected in cases:
+            self.assertEqual(ace.https_remote(url), expected, url)
+
     def test_origin_url_forms_normalized(self):
         git = self.repo / ".git"
         git.mkdir()
@@ -2519,11 +2557,87 @@ class RemoteQuals(Fixture):
             ('[remote "origin"]\n\turl = git@github.com:dreeves/crashla.git\n', "https://github.com/dreeves/crashla"),
             ('[core]\n\tbare = false\n[remote "origin"]\n\turl = https://github.com/dreeves/road.git\n', "https://github.com/dreeves/road"),
             ('[remote "origin"]\n\turl = ssh://git@github.com/dreeves/bid.git\n', "https://github.com/dreeves/bid"),
-            ('[remote "upstream"]\n\turl = git@github.com:other/x.git\n', ""),
+            # Extra remotes beside origin are ordinary: origin is the home.
+            (
+                '[remote "origin"]\n\turl = git@github.com:dreeves/tagtime.git\n'
+                '[remote "slycoder"]\n\turl = git@github.com:slycoder/tagtime.git\n',
+                "https://github.com/dreeves/tagtime",
+            ),
         ]
         for config, expected in cases:
             (git / "config").write_text(config, encoding="utf-8")
             self.assertEqual(ace.repo_remote(self.repo), expected)
+
+    def test_public_home_under_another_name_fails_loudly(self):
+        # Replicata: the project's only remote is named something other than
+        # origin (one repo here was, until it was renamed), so its GitHub home
+        # is plainly there under another name. Expectata: a loud refusal
+        # naming the remote and its home. Resultata before: the masthead
+        # quietly showed the local directory, as though the project had no
+        # public home at all.
+        git = self.repo / ".git"
+        git.mkdir()
+        (git / "config").write_text(
+            '[remote "efme"]\n\turl = https://github.com/beeminder/efme.git\n'
+            '[branch "main"]\n\tremote = efme\n',
+            encoding="utf-8",
+        )
+        with self.assertRaises(ace.UserError) as caught:
+            ace.repo_remote(self.repo)
+        message = str(caught.exception)
+        self.assertIn("nullum remotum nomine 'origin'".lower(), message.lower())
+        self.assertIn("efme (https://github.com/beeminder/efme)", message)
+
+    def test_refusal_never_claims_an_origin_is_absent(self):
+        # Replicata: origin exists but points where no web page lives (a git
+        # protocol mirror, or a push-only entry), while another remote does
+        # hold the public home. Expectata: still a refusal, since the home is
+        # visible and the masthead would otherwise print a local path — but a
+        # message that is true, and advice that works when origin exists.
+        # Resultata before: it announced that no remote was named origin, and
+        # advised a rename that the version-control tool would reject.
+        git = self.repo / ".git"
+        git.mkdir()
+        for config in (
+            '[remote "origin"]\n\turl = git://github.com/facebook/codemod.git\n'
+            '[remote "gh"]\n\turl = https://github.com/facebook/codemod.git\n',
+            '[remote "origin"]\n\tpushurl = git@github.com:facebook/codemod.git\n'
+            '[remote "gh"]\n\turl = https://github.com/facebook/codemod.git\n',
+        ):
+            (git / "config").write_text(config, encoding="utf-8")
+            with self.assertRaises(ace.UserError) as caught:
+                ace.repo_remote(self.repo)
+            message = str(caught.exception)
+            self.assertIn("gh (https://github.com/facebook/codemod)", message)
+            for lie in ("sed nullum remotum", "muta (git"):
+                self.assertNotIn(lie, message)
+
+    def test_first_url_of_a_remote_wins(self):
+        # A remote may carry several URLs; the version-control tool reports
+        # the first, so the masthead must name the same one.
+        git = self.repo / ".git"
+        git.mkdir()
+        (git / "config").write_text(
+            '[remote "origin"]\n\turl = https://github.com/a/first.git\n'
+            "\turl = https://github.com/a/second.git\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(ace.repo_remote(self.repo), "https://github.com/a/first")
+
+    def test_remote_without_a_public_home_keeps_the_local_path(self):
+        # Remotes whose URL names no browsable https home (a git:// mirror, an
+        # ssh host that serves no web page) are not a hidden home: nothing is
+        # being concealed, so the local path stands and nothing is raised.
+        git = self.repo / ".git"
+        git.mkdir()
+        for config in (
+            '[remote "origin"]\n\turl = git://github.com/facebook/codemod.git\n',
+            '[remote "origin"]\n\turl = ssh://dreeves@mpdev.mooo.com/var/dev/mp\n',
+            '[remote "backup"]\n\turl = ssh://kibotzer.com/home/dyang/plweb.git\n',
+            "[core]\n\tbare = false\n",
+        ):
+            (git / "config").write_text(config, encoding="utf-8")
+            self.assertEqual(ace.repo_remote(self.repo), "", config)
 
     def test_no_git_directory_means_no_link(self):
         self.assertEqual(ace.repo_remote(self.repo), "")
@@ -2936,6 +3050,22 @@ class UnrenderQuals(Fixture):
         code, _, err = self.run_cli([str(self.repo), str(self.page)])
         self.assertEqual(code, 0, err)
         self.assertEqual([e.prompt for e in ace.inherit(self.page, self.repo)], [original.prompt])
+
+    def test_page_whose_public_home_is_hidden_refused(self):
+        # unrender renders through the same masthead, so a project whose
+        # public home hides under another remote name is refused here too,
+        # before the page it was asked to import is touched.
+        page = self.render([exchange()])
+        self.write(page)
+        git = self.repo / ".git"
+        git.mkdir()
+        (git / "config").write_text(
+            '[remote "elsewhere"]\n\turl = git@github.com:beeminder/efme.git\n', encoding="utf-8"
+        )
+        code, out, err = self.run_cli([str(self.repo), str(self.page)])
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("elsewhere (https://github.com/beeminder/efme)", err)
+        self.assertEqual(self.page.read_bytes(), page.encode("utf-8"))
 
     def test_non_utf8_page_refused(self):
         page = self.render([exchange()]).encode("utf-8") + b"\xff\xfe"
