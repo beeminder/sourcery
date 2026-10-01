@@ -530,6 +530,45 @@ class ClaudeQuals(Fixture):
                 self.path([cu("x", cwd=cwd, origin={"kind": "hologram"})]), self.repo
             )[0]
 
+    def test_peer_agent_handback_queued_midturn_is_machine_not_prompt(self):
+        # Replicata: a background agent hands its result back mid-turn; Claude
+        # Code records it as a queued_command attachment in prompt mode whose
+        # origin kind is "peer" (isMeta sits inside the attachment, not on the
+        # record). Expectata: no prompt, no error. Resultata (v5.5.0): UserError
+        # "Origo recordi ignota: 'peer'".
+        cwd = str(self.repo)
+        body = "Findings: all green."
+        handback = {
+            "type": "attachment",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": f'<agent-message from="a7k2m9q4x1c8v5b3n">\n{body}\n</agent-message>',
+                "source_uuid": "u9",
+                "commandMode": "prompt",
+                "origin": {
+                    "kind": "peer",
+                    "from": "a7k2m9q4x1c8v5b3n",
+                    "senderTaskId": "a7k2m9q4x1c8v5b3n",
+                    "body": body,
+                    "handback": True,
+                },
+                "timestamp": T2,
+                "isMeta": True,
+            },
+            "timestamp": T2,
+            "cwd": cwd,
+            "sessionId": "cs1",
+            "uuid": "q1",
+        }
+        records = [
+            cu("start the work", ts=T0, cwd=cwd),
+            ca([{"type": "text", "text": "Working."}], ts=T1, cwd=cwd),
+            handback,
+            ca([{"type": "text", "text": "Done."}], ts="2026-03-01T10:15:00.000Z", cwd=cwd, mid="m8"),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual([e.prompt for e in got], ["start the work"])
+
     def test_interrupt_markers_dropped_but_typed_text_around_them_kept(self):
         cwd = str(self.repo)
         records = [
@@ -2111,7 +2150,7 @@ class CliQuals(Fixture):
         self.populate()
         out_path = self.tmp / "out.html"
         out, _ = self.generate(out_path)
-        self.assertIn("Rogationes deletae: 0", out)
+        self.assertIn("Prompts deleted: 0", out)
         request = vsreq("copilot prompt", [md("copilot reply")], ts=int(utc(T2).timestamp() * 1000))
         request["isSystemInitiated"] = True
         (self.vscode_root / "workspaceStorage" / "h1" / "chatSessions" / "a.json").write_text(
@@ -2122,9 +2161,9 @@ class CliQuals(Fixture):
             [cu("revised claude prompt", ts=T0, cwd=str(self.repo)), ca([{"type": "text", "text": "r"}], cwd=str(self.repo))],
         )
         out, page = self.generate(out_path)
-        self.assertIn("Rogationes deletae: 1", out)
+        self.assertIn("Prompts deleted: 1", out)
         self.assertIn(f"Copilot Chat {utc(T2).isoformat()}", out)
-        self.assertNotIn("Claude Code", out.split("Rogationes deletae")[1])
+        self.assertNotIn("Claude Code", out.split("Prompts deleted")[1])
         self.assertNotIn("copilot prompt", page)
 
     def test_shrunk_live_session_keeps_typed_prompt(self):

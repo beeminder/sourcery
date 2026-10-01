@@ -484,12 +484,13 @@ CLAUDE_SKIP_FLAGS = ("isSidechain", "isMeta", "isCompactSummary", "isVisibleInTr
 CLAUDE_CANNED = re.compile(r"\[Request interrupted by user[^\]]*\]")
 
 # Newer Claude Code stamps user records with an origin kind. Machine origins
-# (background-task notifications, so far) are never typing; an origin kind
+# (background-task notifications, and "peer": another agent's message, e.g.
+# a background agent handing its result back) are never typing; an origin kind
 # that is neither human nor known-machine means the harness grew a new
 # record source that must be classified deliberately. Records without an
 # origin predate the field and are classified by content instead.
 CLAUDE_HUMAN_ORIGINS = frozenset({"human"})
-CLAUDE_MACHINE_ORIGINS = frozenset({"task-notification"})
+CLAUDE_MACHINE_ORIGINS = frozenset({"task-notification", "peer"})
 
 
 def claude_origin_is_machine(record: Mapping[str, Any], path: Path, line_number: int) -> bool:
