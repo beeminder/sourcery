@@ -55,7 +55,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "5.5.0"
+VERSION = "5.5.1"
 UTC = dt.timezone.utc
 
 
@@ -606,6 +606,26 @@ def claude_denial_key(record: Mapping[str, Any], text: str) -> tuple[Any, str] |
             return None
 
 
+def claude_delivery_key(attachment: Mapping[str, Any] | None, path: Path, line_number: int) -> str | int:
+    """The prompt record's "delivery key": a queued prompt's source_uuid,
+    which every delivery of it shares, or else the record's own line number,
+    which no other record shares (a user record, or a queued prompt that
+    carries no source_uuid)."""
+    match attachment:
+        case {"source_uuid": str() as source_uuid} if source_uuid != "":
+            return source_uuid
+        case {"source_uuid": _}:
+            # TODO: Says a queued prompt's source_uuid is in an unrecognized
+            # form (not text, or empty) — the format seems to have changed
+            # and claude_delivery_key needs updating.
+            raise UserError(
+                f"source_uuid in forma ignota: {path}:{line_number}\n"
+                "Forma mutata videtur; claude_delivery_key renovandum est."
+            )
+        case _:
+            return line_number
+
+
 def claude_prompt(content: Any, path: Path, line_number: int) -> str:
     """Return the human-typed text of a user record, or "" if none survives."""
     match content:
@@ -637,17 +657,40 @@ def claude_prompt(content: Any, path: Path, line_number: int) -> str:
             return ""
 
 
-def claude_reply_blocks(content: Any) -> list[str]:
+def claude_reply_blocks(content: Any, path: Path, line_number: int) -> list[str]:
+    """The words of an assistant record that make up its reply, in content
+    order: its text blocks, and the message of each SendUserMessage tool
+    call, Brief being that tool's legacy name (an agent in a Claude-desktop
+    cloud workspace can speak to the human through that tool alone, writing
+    no text block). Every other block stays out of the reply, even one the
+    harness also shows the human, such as ExitPlanMode's plan or
+    AskUserQuestion's questions. Empty words are no words."""
     if not isinstance(content, list):
         return []
-    return [
-        item["text"]
-        for item in content
-        if isinstance(item, dict)
-        and item.get("type") == "text"
-        and isinstance(item.get("text"), str)
-        and item["text"] != ""
-    ]
+    words: list[str] = []
+    for item in content:
+        match item:
+            case {"type": "text", "text": str() as text}:
+                words.append(text)
+            case {
+                "type": "tool_use",
+                "name": "SendUserMessage" | "Brief",
+                "input": {"message": str() as text, **rest},
+            } if rest == {}:
+                words.append(text)
+            case {"type": "tool_use", "name": "SendUserMessage" | "Brief" as name}:
+                # TODO: Says a SendUserMessage tool call (named as the record
+                # names it: SendUserMessage, or its legacy name Brief) is in
+                # an unrecognized form (its input is not exactly one message
+                # text) — the format seems to have changed and
+                # claude_reply_blocks needs updating.
+                raise UserError(
+                    f"Vocatio {name} in forma ignota: {path}:{line_number}\n"
+                    "Forma mutata videtur; claude_reply_blocks renovandum est."
+                )
+            case _:
+                pass  # every other block: no words for the human
+    return [text for text in words if text != ""]
 
 
 def claude_images(content: Any, path: Path, line_number: int) -> tuple[str, ...]:
@@ -722,6 +765,18 @@ def claude_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holdin
     # that prompt and credited to the exchange it closes.
     tallies: dict[str, tuple[int, int]] = {}
     last_denial: dict[str, tuple[Any, str] | None] = {}
+    # A "re-delivery" is a typed prompt record whose session and delivery
+    # key (see claude_delivery_key) an earlier typed prompt record in this
+    # file already carried. Only a queued prompt's source_uuid can repeat: a
+    # Claude-desktop cloud workspace that restarted delivered its
+    # already-delivered queued prompts again under the same source_uuids.
+    # The human typed each once, so only the first delivery is a prompt, and
+    # a re-delivery carrying other text or images than the first is refused.
+    # `delivered` maps each (session, delivery key) seen so far to the text
+    # and images of its first delivery. Only records attributed to this repo
+    # (by cwd) are seen, so a re-delivery whose first delivery had its cwd
+    # outside the repo counts as a first delivery.
+    delivered: dict[tuple[str, str | int], tuple[str, tuple[str, ...]]] = {}
     # Sessions whose most recently emitted message is a recovered slash
     # command, mapped to that record's promptId, so a local-command-stdout
     # record can find and unsend its paired command.
@@ -832,6 +887,22 @@ def claude_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holdin
             if text == "" and images == () and not any(b.picked for b in ballots):
                 continue  # tool plumbing with no typing: never rendered, so no holding
             holdings.add(("Claude Code", timestamp))
+            # A re-delivery stays held, so a page's stale copy of it gets
+            # purged, but is no new prompt: the work pending around it rides
+            # the exchange in flight.
+            delivery = (session, claude_delivery_key(attachment, path, line_number))
+            if delivery in delivered:
+                if delivered[delivery] != (text, images):
+                    # TODO: Says a queued prompt delivered again carries other
+                    # words or images than its first delivery under the same
+                    # source_uuid — the format seems to have changed and
+                    # claude_exchanges needs updating.
+                    raise UserError(
+                        f"Rogatio iterum tradita aliud fert quam prima: {path}:{line_number}\n"
+                        "Forma mutata videtur; claude_exchanges renovandum est."
+                    )
+                continue
+            delivered[delivery] = (text, images)
             # One typed act can fan out across several records (a denial
             # reason stamped onto each rejected parallel tool call), so a
             # repeat of the pending unanswered prompt is not a new prompt.
@@ -842,7 +913,7 @@ def claude_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holdin
             item = Message(role, timestamp, text, images=images, ballots=ballots,
                            active=pending.pop(session, 0.0), added=added, deleted=deleted)
         else:
-            text = "\n\n".join(claude_reply_blocks(message.get("content")))
+            text = "\n\n".join(claude_reply_blocks(message.get("content"), path, line_number))
             if text == "":
                 continue
             effort = record.get("effort") if isinstance(record.get("effort"), str) else ""
@@ -2133,6 +2204,7 @@ summary a.anchor:hover { text-decoration: underline; }
 .exchange.codex { --provider: var(--codex); }
 .exchange.copilot { --provider: var(--copilot); }
 .exchange.antigravity { --provider: var(--antigravity); }
+.exchange.claudeai { --provider: var(--claude); }
 /* The prompt's diffstat floats right of the prompt's first lines. Numbers
    wear the metadata ink; polarity lives in the blocks (and in the signs and
    the fixed added-first order). */
@@ -2415,7 +2487,14 @@ def minimap(exchanges: Sequence[Exchange], locals_: Sequence[dt.datetime]) -> st
 # rather than shipping an unmarked exchange.
 PROVIDER_SLUGS = {
     "Claude Code": "claude", "Codex": "codex", "Copilot Chat": "copilot", "Antigravity": "antigravity",
+    # claude.ai chats have no store parser: their exchanges enter a page only
+    # by being seeded into its snapshot from outside sourcery, and every run
+    # keeps them, since no store holds them. They wear Claude Code's color.
+    "claude.ai": "claudeai",
 }
+# unrender.py reads a page's provider back from its slug, so no two
+# providers may share one.
+assert len(set(PROVIDER_SLUGS.values())) == len(PROVIDER_SLUGS)
 
 
 def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:

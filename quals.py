@@ -93,6 +93,34 @@ def ca(blocks, ts=T1, cwd=None, session="cs1", mid="m1", model="claude-opus-4-8"
     return record
 
 
+def send_user_message(message, tid="tu1"):
+    """A SendUserMessage tool call: how an agent in a Claude-desktop cloud
+    workspace can speak to the human without writing a text block."""
+    return {"type": "tool_use", "id": tid, "name": "SendUserMessage", "input": {"message": message}}
+
+
+def cq(text, ts, cwd, session="cs1", **attachment):
+    """A queued_command attachment in prompt mode: words the human typed
+    while the agent was mid-turn. `attachment` adds fields to the attachment
+    itself, such as source_uuid and delivery_id."""
+    return {
+        "type": "attachment",
+        "attachment": {
+            "type": "queued_command",
+            "commandMode": "prompt",
+            "prompt": [{"type": "text", "text": text}],
+            "origin": {"kind": "human"},
+            "humanTurn": True,
+            "timestamp": ts,
+            **attachment,
+        },
+        "timestamp": ts,
+        "cwd": cwd,
+        "sessionId": session,
+        "uuid": "q1",
+    }
+
+
 class ClaudeQuals(Fixture):
     def path(self, records):
         return write_jsonl(self.tmp / "claude" / "p1" / "sess.jsonl", records)
@@ -147,6 +175,197 @@ class ClaudeQuals(Fixture):
         self.assertEqual(got[0].model, "claude-opus-4-8")
         self.assertEqual(got[0].effort, "xhigh")
         self.assertEqual(got[0].elapsed, 600.0)  # prompt at T0, last reply block at T2
+
+    def test_send_user_message_alone_is_the_reply(self):
+        # Replicata: an agent in a Claude-desktop cloud workspace answers
+        # only through a SendUserMessage tool call, writing no text block.
+        # Expectata: the call's message is the reply, under the record's
+        # model. Resultata (v5.5.0): "No response." and no model, because
+        # only text blocks were read.
+        cwd = str(self.repo)
+        records = [
+            cu("go", cwd=cwd),
+            ca([send_user_message("Here is what I found.")], cwd=cwd, model="claude-opus-5-5"),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual(
+            [(e.prompt, e.reply, e.model) for e in got],
+            [("go", "Here is what I found.", "claude-opus-5-5")],
+        )
+
+    def test_text_and_send_user_message_join_in_content_order(self):
+        # Replicata: one assistant record interleaves text blocks with a
+        # SendUserMessage call and a SendMessage call (agent to agent, with
+        # a message field of its own); the next two records carry one
+        # SendUserMessage call and one text block. Expectata: every text
+        # block and SendUserMessage message, joined in content order across
+        # the records; SendMessage, like every other tool call, says nothing
+        # to the human. Resultata (v5.5.0): both SendUserMessage messages
+        # were missing.
+        cwd = str(self.repo)
+        records = [
+            cu("go", cwd=cwd),
+            ca(
+                [
+                    {"type": "text", "text": "One."},
+                    send_user_message("Two."),
+                    {"type": "tool_use", "id": "t2", "name": "SendMessage",
+                     "input": {"to": "helper", "message": "between agents"}},
+                    {"type": "text", "text": "Three."},
+                ],
+                cwd=cwd,
+                mid="mA",
+            ),
+            ca([send_user_message("Four.", tid="t3")], ts=T2, cwd=cwd, mid="mB"),
+            ca([{"type": "text", "text": "Five."}], ts=T3, cwd=cwd, mid="mC"),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual(
+            [(e.prompt, e.reply) for e in got],
+            [("go", "One.\n\nTwo.\n\nThree.\n\nFour.\n\nFive.")],
+        )
+
+    def test_workspace_reply_after_handoff_names_the_exchange_model(self):
+        # Replicata: a conversation begun in claude.ai chat moves into a
+        # cloud workspace. The transcript opens with the chat part copied in
+        # (handedOff, every record stamped with one shared timestamp), its
+        # one text reply stamped claude-sonnet-4-6; a system marker sits
+        # between prompt and reply; the workspace model then answers only
+        # through SendUserMessage. Expectata: one exchange whose reply is the
+        # chat text and then the workspace message, under the model of the
+        # last reply-bearing record, claude-opus-5-5. Resultata (v5.5.0):
+        # the chat text alone, labeled claude-sonnet-4-6.
+        cwd = str(self.repo)
+        records = [
+            cu("pick up where we left off", ts=T0, cwd=cwd, handedOff=True),
+            {"type": "system", "subtype": "upgrade_relay_marker", "content": "moved",
+             "timestamp": T0, "cwd": cwd, "sessionId": "cs1"},
+            {
+                **ca(
+                    [
+                        {"type": "text", "text": "From the chat."},
+                        {"type": "tool_use", "id": "t1", "name": "WebSearch", "input": {"query": "q"}},
+                    ],
+                    ts=T0,
+                    cwd=cwd,
+                    mid="m-chat",
+                    model="claude-sonnet-4-6",
+                ),
+                "handedOff": True,
+            },
+            ca([send_user_message("From the workspace.")], ts=T1, cwd=cwd, mid="m-work",
+               model="claude-opus-5-5"),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual(
+            [(e.prompt, e.reply, e.model) for e in got],
+            [("pick up where we left off", "From the chat.\n\nFrom the workspace.", "claude-opus-5-5")],
+        )
+
+    def test_malformed_send_user_message_fails_loudly(self):
+        # Replicata: a SendUserMessage call whose input is not exactly
+        # {"message": <text>}: no message, an extra field, a message that is
+        # not text, an input that is not an object, no input at all.
+        # Expectata: a loud error citing the record, never a guessed reply.
+        # Resultata (v5.5.0): silently ignored like every tool call.
+        cwd = str(self.repo)
+        call = {"type": "tool_use", "id": "t1", "name": "SendUserMessage"}
+        for block in (
+            {**call, "input": {}},
+            {**call, "input": {"message": "hi", "attachments": []}},
+            {**call, "input": {"message": 7}},
+            {**call, "input": {"message": None}},
+            {**call, "input": "hi"},
+            {**call, "input": None},
+            call,
+        ):
+            path = self.path([cu("go", cwd=cwd), ca([block], cwd=cwd)])
+            with self.subTest(block=block):
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.claude_exchanges(path, self.repo)
+                self.assertIn(f"{path}:2", str(ctx.exception))
+
+    def test_empty_send_user_message_skipped_like_empty_text(self):
+        # Replicata: SendUserMessage calls with an empty message, one beside
+        # an empty text block and a nonempty message, one alone in the next
+        # exchange. Expectata: an empty message adds no paragraph, and an
+        # exchange whose only words are empty has no reply and so no model,
+        # exactly as with an empty text block. Resultata (v5.5.0): the
+        # nonempty message was lost too.
+        cwd = str(self.repo)
+        records = [
+            cu("go", ts=T0, cwd=cwd),
+            ca(
+                [{"type": "text", "text": ""}, send_user_message(""), send_user_message("Only this.", tid="t2")],
+                ts=T1,
+                cwd=cwd,
+                model="claude-opus-5-5",
+            ),
+            cu("again", ts=T2, cwd=cwd),
+            ca([send_user_message("", tid="t3")], ts=T3, cwd=cwd, mid="m2", model="claude-opus-5-5"),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual(
+            [(e.prompt, e.reply, e.model) for e in got],
+            [("go", "Only this.", "claude-opus-5-5"), ("again", "", "")],
+        )
+
+    def test_lone_brief_call_is_the_reply(self):
+        # Replicata: an agent answers only through a tool call named Brief,
+        # the legacy name of SendUserMessage in Claude Code's tool-name map,
+        # writing no text block. Expectata: the call's message is the reply,
+        # under the record's model, exactly as for SendUserMessage.
+        # Resultata (v5.5.0): no reply and no model, because Brief was read
+        # like any other tool call.
+        cwd = str(self.repo)
+        brief = {"type": "tool_use", "id": "tu1", "name": "Brief", "input": {"message": "Here is what I found."}}
+        records = [cu("go", cwd=cwd), ca([brief], cwd=cwd, model="claude-opus-5-5")]
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual(
+            [(e.prompt, e.reply, e.model) for e in got],
+            [("go", "Here is what I found.", "claude-opus-5-5")],
+        )
+
+    def test_malformed_brief_call_fails_loudly(self):
+        # Replicata: a Brief call (SendUserMessage under its legacy name)
+        # whose input is not exactly {"message": <text>}: no message, an
+        # extra field, a message that is not text, an input that is not an
+        # object, no input at all. Expectata: the loud error SendUserMessage
+        # gets, citing the record and naming the call as the record names
+        # it. Resultata (v5.5.0): silently ignored like every tool call.
+        cwd = str(self.repo)
+        call = {"type": "tool_use", "id": "t1", "name": "Brief"}
+        for block in (
+            {**call, "input": {}},
+            {**call, "input": {"message": "hi", "attachments": []}},
+            {**call, "input": {"message": 7}},
+            {**call, "input": {"message": None}},
+            {**call, "input": "hi"},
+            {**call, "input": None},
+            call,
+        ):
+            path = self.path([cu("go", cwd=cwd), ca([block], cwd=cwd)])
+            with self.subTest(block=block):
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.claude_exchanges(path, self.repo)
+                self.assertIn(f"{path}:2", str(ctx.exception))
+                self.assertIn("Brief", str(ctx.exception))
+
+    def test_brief_mode_status_fails_loudly_under_either_name(self):
+        # Replicata: in brief mode, Claude Code's SendUserMessage schema
+        # requires a status ("normal" or "proactive") beside the message,
+        # and the call can arrive under either name. Expectata: a loud error
+        # citing the record, until a real transcript of that shape shows
+        # what the status means for the page. Resultata (v5.5.0): silently
+        # ignored like every tool call.
+        cwd = str(self.repo)
+        for name in ("SendUserMessage", "Brief"):
+            block = {"type": "tool_use", "id": "t1", "name": name, "input": {"message": "hi", "status": "normal"}}
+            path = self.path([cu("go", cwd=cwd), ca([block], cwd=cwd)])
+            with self.subTest(name=name):
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.claude_exchanges(path, self.repo)
+                self.assertIn(f"{path}:2", str(ctx.exception))
 
     def test_pasted_images_recovered_as_data_uris(self):
         cwd = str(self.repo)
@@ -568,6 +787,264 @@ class ClaudeQuals(Fixture):
         ]
         got = ace.claude_exchanges(self.path(records), self.repo)[0]
         self.assertEqual([e.prompt for e in got], ["start the work"])
+
+    def test_queued_prompts_redelivered_after_restart_are_not_new_prompts(self):
+        # Replicata: two prompts are queued mid-turn, each delivered with a
+        # source_uuid and a delivery_id; after the last reply, an edit (with
+        # recorded tool time) is still unclaimed when the cloud workspace
+        # restarts and delivers both prompts again: same source_uuid, new
+        # delivery_id, new timestamp. Then another edit and a reply.
+        # Expectata: each prompt once, at its first delivery; the work
+        # around the re-deliveries, before and after, credited to the
+        # exchange in flight (the second prompt's); both re-deliveries still
+        # held, so a page's stale copies of them get purged. Resultata
+        # (v5.5.0): each prompt shown twice, the work split between the
+        # second prompt and the second re-delivery.
+        cwd = str(self.repo)
+        before = {
+            "filePath": str(self.repo / "a.py"),
+            "structuredPatch": [{"lines": ["-old", "+new"]}],
+            "durationMs": 20000,
+        }
+        after = {
+            "filePath": str(self.repo / "a.py"),
+            "structuredPatch": [{"lines": ["+newer"]}],
+            "durationMs": 30000,
+        }
+        first, second = "2026-03-01T10:06:00.000Z", "2026-03-01T10:08:00.000Z"
+        again, again2 = "2026-03-01T10:30:00.000Z", "2026-03-01T10:30:00.002Z"
+        records = [
+            cu("start the work", ts=T0, cwd=cwd),
+            ca([{"type": "text", "text": "Working."}], ts=T1, cwd=cwd),
+            cq("first aside", first, cwd, source_uuid="src-1", delivery_id="dlv-1"),
+            ca([{"type": "text", "text": "Noted the first."}], ts="2026-03-01T10:07:00.000Z", cwd=cwd, mid="m2"),
+            cq("second aside", second, cwd, source_uuid="src-2", delivery_id="dlv-2"),
+            ca([{"type": "text", "text": "Noted the second."}], ts="2026-03-01T10:09:00.000Z", cwd=cwd, mid="m3"),
+            cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+               ts=T2, cwd=cwd, toolUseResult=before),
+            cq("first aside", again, cwd, source_uuid="src-1", delivery_id="dlv-3"),
+            cq("second aside", again2, cwd, source_uuid="src-2", delivery_id="dlv-4"),
+            cu([{"type": "tool_result", "tool_use_id": "t2", "content": "ok"}],
+               ts="2026-03-01T10:31:00.000Z", cwd=cwd, toolUseResult=after),
+            ca([{"type": "text", "text": "Did both."}], ts="2026-03-01T10:32:00.000Z", cwd=cwd, mid="m4"),
+        ]
+        exchanges, holdings = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.reply, e.elapsed, e.wall, e.added, e.deleted) for e in exchanges],
+            [
+                ("start the work", "Working.", 300.0, 300.0, 0, 0),
+                ("first aside", "Noted the first.", 60.0, 60.0, 0, 0),
+                # 60s to its first reply, then 20s and 30s of recorded tool
+                # time on either side of the restart and 60s to the last
+                # reply; both edits' lines.
+                ("second aside", "Noted the second.\n\nDid both.", 170.0, 1440.0, 2, 1),
+            ],
+        )
+        self.assertEqual(
+            holdings,
+            {("Claude Code", utc(ts)) for ts in (T0, first, second, again, again2)},
+        )
+
+    def test_queued_prompts_with_distinct_or_no_source_uuid_are_each_kept(self):
+        # Replicata: the human queues the same words twice mid-turn, either
+        # under two different source_uuids or with no source_uuid at all.
+        # Expectata: two prompts each time; only a repeated source_uuid marks
+        # a re-delivery. Resultata (v5.5.0): as expected; this guards the
+        # re-delivery fix against keying on the words, or treating a missing
+        # source_uuid as one.
+        cwd = str(self.repo)
+        for fields in (({"source_uuid": "src-1"}, {"source_uuid": "src-2"}), ({}, {})):
+            records = [
+                cu("start the work", ts=T0, cwd=cwd),
+                ca([{"type": "text", "text": "Working."}], ts=T1, cwd=cwd),
+                cq("check again", "2026-03-01T10:06:00.000Z", cwd, **fields[0]),
+                ca([{"type": "text", "text": "Checked once."}], ts="2026-03-01T10:07:00.000Z", cwd=cwd, mid="m2"),
+                cq("check again", "2026-03-01T10:08:00.000Z", cwd, **fields[1]),
+                ca([{"type": "text", "text": "Checked twice."}], ts="2026-03-01T10:09:00.000Z", cwd=cwd, mid="m3"),
+            ]
+            with self.subTest(fields=fields):
+                got = ace.claude_exchanges(self.path(records), self.repo)[0]
+                self.assertEqual(
+                    [(e.prompt, e.reply) for e in got],
+                    [
+                        ("start the work", "Working."),
+                        ("check again", "Checked once."),
+                        ("check again", "Checked twice."),
+                    ],
+                )
+
+    def test_queued_prompt_with_non_text_source_uuid_fails_loudly(self):
+        # Replicata: a queued prompt whose source_uuid is present but not
+        # text. Expectata: a loud error citing the record, never a guess at
+        # whether it repeats an earlier delivery. Resultata (v5.5.0): the
+        # field was never read.
+        cwd = str(self.repo)
+        for source in (7, None, ["src-1"], {"id": "src-1"}):
+            path = self.path([cu("start the work", cwd=cwd), cq("aside", T1, cwd, source_uuid=source)])
+            with self.subTest(source=source):
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.claude_exchanges(path, self.repo)
+                self.assertIn(f"{path}:2", str(ctx.exception))
+
+    def test_source_uuid_repeated_in_another_session_is_that_sessions_own(self):
+        # Replicata: one file holds two sessions, each delivering a queued
+        # prompt under the same source_uuid. Expectata: both prompts kept;
+        # deliveries are tracked per session, like all of claude_exchanges'
+        # bookkeeping. Resultata (v5.5.0): as expected; this guards the
+        # re-delivery fix against tracking deliveries across sessions.
+        cwd = str(self.repo)
+        records = [
+            cu("start one", ts=T0, cwd=cwd, session="cs1"),
+            cu("start two", ts=T0, cwd=cwd, session="cs2"),
+            cq("aside", T1, cwd, session="cs1", source_uuid="src-1"),
+            cq("aside", T2, cwd, session="cs2", source_uuid="src-1"),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual(
+            [(e.session, e.prompt) for e in got],
+            [("cs1", "start one"), ("cs1", "aside"), ("cs2", "start two"), ("cs2", "aside")],
+        )
+
+    def test_redelivery_carrying_other_words_or_images_fails_loudly(self):
+        # Replicata: a queued prompt of words and an image is delivered, then
+        # delivered again under the same source_uuid carrying other words,
+        # another image, no image, or an extra image. Expectata: a loud error
+        # citing the second delivery, never a silent drop of what it
+        # carries. Resultata (v5.5.0): no error; the second delivery became a
+        # prompt of its own.
+        cwd = str(self.repo)
+
+        def image(data):
+            return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}
+
+        aside = {"type": "text", "text": "aside"}
+        for prompt in (
+            [{"type": "text", "text": "other words"}, image("AA")],
+            [aside, image("BB")],
+            [aside],
+            [aside, image("AA"), image("BB")],
+        ):
+            path = self.path([
+                cu("start the work", ts=T0, cwd=cwd),
+                cq("unused", T1, cwd, source_uuid="src-1", prompt=[aside, image("AA")]),
+                cq("unused", T2, cwd, source_uuid="src-1", prompt=prompt),
+            ])
+            with self.subTest(prompt=prompt):
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.claude_exchanges(path, self.repo)
+                self.assertIn(f"{path}:3", str(ctx.exception))
+
+    def test_identical_redelivery_with_image_held_not_refused(self):
+        # Replicata: a queued prompt of words and an image is delivered twice
+        # under one source_uuid, the deliveries differing only in timestamp
+        # and delivery_id. Expectata: no error; one prompt, with its image, at
+        # the first delivery; both deliveries held. Resultata (v5.5.0): the
+        # prompt shown twice. This guards the refusal of differing
+        # re-deliveries against comparing more than words and images.
+        cwd = str(self.repo)
+        png = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA"}}
+        prompt = [{"type": "text", "text": "aside"}, png]
+        records = [
+            cu("start the work", ts=T0, cwd=cwd),
+            cq("unused", T1, cwd, source_uuid="src-1", delivery_id="dlv-1", prompt=prompt),
+            cq("unused", T2, cwd, source_uuid="src-1", delivery_id="dlv-2", prompt=prompt),
+        ]
+        exchanges, holdings = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.timestamp, e.prompt, e.images) for e in exchanges],
+            [(utc(T0), "start the work", ()), (utc(T1), "aside", ("data:image/png;base64,AA",))],
+        )
+        self.assertEqual(holdings, {("Claude Code", utc(ts)) for ts in (T0, T1, T2)})
+
+    def test_queued_prompt_with_empty_source_uuid_fails_loudly(self):
+        # Replicata: a queued prompt whose source_uuid is the empty string.
+        # Expectata: exactly the loud error a source_uuid that is not text
+        # gets, citing the record. Resultata (v5.5.0): the field was never
+        # read.
+        cwd = str(self.repo)
+        errors = []
+        for source in ("", 7):
+            path = self.path([cu("start the work", cwd=cwd), cq("aside", T1, cwd, source_uuid=source)])
+            with self.assertRaises(ace.UserError, msg=source) as ctx:
+                ace.claude_exchanges(path, self.repo)
+            errors.append(str(ctx.exception))
+        self.assertIn(f"{path}:2", errors[0])
+        self.assertEqual(errors[0], errors[1])
+
+    def test_redelivery_between_local_command_and_its_stdout_leaves_it_unsendable(self):
+        # Replicata: after a queued prompt's first delivery, the human runs a
+        # local slash command, and the prompt's re-delivery lands between the
+        # command and the record of the command's captured output.
+        # Expectata: no error; the output still finds and unsends its
+        # command, so neither the command nor the re-delivery is a prompt.
+        # Resultata (v5.5.0): a loud error, the re-delivery having become a
+        # prompt that left the output no command to unsend.
+        cwd = str(self.repo)
+        wrapped = (
+            "<command-name>/remit</command-name>\n            "
+            "<command-message>remit</command-message>\n            "
+            "<command-args>everything owed</command-args>"
+        )
+        records = [
+            cu("start the work", ts=T0, cwd=cwd),
+            ca([{"type": "text", "text": "Working."}], ts=T1, cwd=cwd),
+            cq("aside", "2026-03-01T10:06:00.000Z", cwd, source_uuid="src-1"),
+            ca([{"type": "text", "text": "Noted."}], ts="2026-03-01T10:07:00.000Z", cwd=cwd, mid="m2"),
+            cu(wrapped, ts="2026-03-01T10:08:00.000Z", cwd=cwd, promptId="pq1"),
+            cq("aside", "2026-03-01T10:08:00.001Z", cwd, source_uuid="src-1"),
+            cu("<local-command-stdout>Remitted.</local-command-stdout>",
+               ts="2026-03-01T10:08:00.002Z", cwd=cwd, promptId="pq1"),
+            cu("carry on", ts=T2, cwd=cwd),
+            ca([{"type": "text", "text": "Done."}], ts=T3, cwd=cwd, mid="m3"),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual(
+            [(e.prompt, e.reply) for e in got],
+            [("start the work", "Working."), ("aside", "Noted."), ("carry on", "Done.")],
+        )
+
+    def test_redelivery_inside_denial_fanout_still_renders_the_denial_once(self):
+        # Replicata: after a queued prompt's first delivery, the human denies
+        # two parallel tool calls with one typed reason, which Claude Code
+        # stamps onto both tool results, and the prompt's re-delivery lands
+        # between the two. Expectata: the reason is one prompt and the
+        # re-delivery none. Resultata (v5.5.0): the re-delivery became a
+        # prompt that split the fan-out, so the reason showed twice.
+        cwd = str(self.repo)
+        denial = (
+            "Error: The user doesn't want to proceed with this tool use. "
+            "The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). "
+            "The user provided the following reason for the rejection:  hold tight"
+        )
+
+        def denial_record(ts, tid):
+            return cu([{"type": "tool_result", "tool_use_id": tid, "content": denial[7:]}],
+                      ts=ts, cwd=cwd, toolUseResult=denial, promptId="act-1")
+
+        records = [
+            cu("start the work", ts=T0, cwd=cwd),
+            ca([{"type": "text", "text": "Working."}], ts=T1, cwd=cwd),
+            cq("aside", "2026-03-01T10:06:00.000Z", cwd, source_uuid="src-1"),
+            ca(
+                [
+                    {"type": "text", "text": "Noted."},
+                    {"type": "tool_use", "id": "t1", "name": "Edit", "input": {}},
+                    {"type": "tool_use", "id": "t2", "name": "Edit", "input": {}},
+                ],
+                ts="2026-03-01T10:07:00.000Z",
+                cwd=cwd,
+                mid="m2",
+            ),
+            denial_record("2026-03-01T10:08:00.000Z", "t1"),
+            cq("aside", "2026-03-01T10:08:00.001Z", cwd, source_uuid="src-1"),
+            denial_record("2026-03-01T10:08:00.002Z", "t2"),
+            ca([{"type": "text", "text": "Standing by."}], ts=T2, cwd=cwd, mid="m3"),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual(
+            [(e.prompt, e.reply) for e in got],
+            [("start the work", "Working."), ("aside", "Noted."), ("hold tight", "Standing by.")],
+        )
 
     def test_interrupt_markers_dropped_but_typed_text_around_them_kept(self):
         cwd = str(self.repo)
@@ -1703,6 +2180,26 @@ class RenderQuals(Fixture):
         with self.assertRaises(KeyError):
             ace.render(self.repo, [exchange(provider="Quantum")])
 
+    def test_claude_ai_exchange_wears_claude_codes_color(self):
+        # Replicata: an exchange from a claude.ai chat, which reaches a page
+        # only through its snapshot (no store parser reads claude.ai).
+        # Expectata: its article carries the class claudeai, whose stripe
+        # and chip take Claude Code's color, defined for both color schemes,
+        # and its meta line names claude.ai. Resultata (v5.5.0): KeyError,
+        # claude.ai being no known provider.
+        page = ace.render(self.repo, [exchange(provider="claude.ai", model="claude-opus-5-5")])
+        self.assertIn('<article class="exchange claudeai"', page)
+        self.assertIn('<span class="agent">claude.ai</span>', page)
+        self.assertIn(".exchange.claudeai { --provider: var(--claude); }", ace.CSS)
+        self.assertEqual(ace.CSS.count("--claude:"), 2)
+
+    def test_provider_slugs_are_unique(self):
+        # Replicata: invert PROVIDER_SLUGS, as unrender.py does to read a
+        # page's provider back from its article class. Expectata: no slug
+        # lost, so every slug names one provider. Resultata (v5.5.0): as
+        # expected; this guards each new provider's slug.
+        self.assertEqual(len(set(ace.PROVIDER_SLUGS.values())), len(ace.PROVIDER_SLUGS))
+
     def test_autogenerated_warning_comment_after_doctype(self):
         # The warning must follow the doctype: a comment before it would
         # throw browsers into quirks mode.
@@ -2166,6 +2663,76 @@ class CliQuals(Fixture):
         self.assertNotIn("Claude Code", out.split("Prompts deleted")[1])
         self.assertNotIn("copilot prompt", page)
 
+    def test_rerun_purges_redelivered_copy_and_relabels_handed_off_exchange(self):
+        # Replicata: a page written by v5.5.0 from a cloud-workspace session
+        # whose chat part was handed off and whose queued prompt was
+        # re-delivered after a restart: the first exchange labeled with the
+        # chat model, the queued prompt shown twice. Expectata: a rerun
+        # shows the queued prompt once, names the re-delivery's page copy on
+        # stdout as deleted, and labels the first exchange with the
+        # workspace model. Resultata (v5.5.0): the rerun changed nothing.
+        cwd = str(self.repo)
+        redelivered = "2026-03-01T10:30:00.000Z"
+        write_jsonl(
+            self.claude_root / "p" / "s.jsonl",
+            [
+                cu("pick up where we left off", ts=T0, cwd=cwd, handedOff=True),
+                {
+                    **ca([{"type": "text", "text": "From the chat."}], ts=T0, cwd=cwd,
+                         model="claude-sonnet-4-6"),
+                    "handedOff": True,
+                },
+                ca([send_user_message("From the workspace.")], ts=T1, cwd=cwd, mid="m2",
+                   model="claude-opus-5-5"),
+                cq("also this", T2, cwd, source_uuid="src-1", delivery_id="dlv-1"),
+                cq("also this", redelivered, cwd, source_uuid="src-1", delivery_id="dlv-2"),
+                ca([send_user_message("Done.", tid="t2")], ts="2026-03-01T10:31:00.000Z", cwd=cwd,
+                   mid="m3", model="claude-opus-5-5"),
+            ],
+        )
+        stale = [
+            exchange(timestamp=utc(T0), model="claude-sonnet-4-6", session="cs1",
+                     prompt="pick up where we left off", reply="From the chat."),
+            exchange(timestamp=utc(T2), model="", session="cs1", prompt="also this", reply=""),
+            exchange(timestamp=utc(redelivered), model="", session="cs1", prompt="also this", reply=""),
+        ]
+        out_path = self.tmp / "out.html"
+        out_path.write_text(ace.render(self.repo, stale, ""), encoding="utf-8")
+        out, page = self.generate(out_path)
+        self.assertIn("Prompts: 2", out)
+        self.assertIn(f"Prompts deleted: 1\n  Claude Code {utc(redelivered).isoformat()}", out)
+        self.assertEqual(page.count('<pre class="prompt">also this</pre>'), 1)
+        self.assertNotIn("claude-sonnet-4-6", page)
+        self.assertIn("From the workspace.", page)
+
+    def test_seeded_claude_ai_exchange_survives_rerun(self):
+        # Replicata: a page whose snapshot was seeded with a claude.ai chat
+        # exchange (no store parser reads claude.ai) is rerun beside a Claude
+        # Code session. Expectata: the claude.ai exchange is kept from the
+        # snapshot, since no store holds it, and rendered in time order
+        # beside the store's exchange; nothing is reported deleted.
+        # Resultata (v5.5.0): the page was refused as corrupt, claude.ai
+        # being no known provider.
+        cwd = str(self.repo)
+        write_jsonl(
+            self.claude_root / "p" / "s.jsonl",
+            [
+                cu("claude prompt", ts=T1, cwd=cwd),
+                ca([{"type": "text", "text": "claude reply"}], ts=T2, cwd=cwd),
+            ],
+        )
+        seed = exchange(provider="claude.ai", model="claude-opus-5-5", effort="max", session="chat-1",
+                        prompt="chat prompt", reply="chat reply")
+        out_path = self.tmp / "out.html"
+        out_path.write_text(f"{ace.SNAPSHOT_OPEN}\n{ace.snapshot(self.repo, [seed])}\n</script>\n", encoding="utf-8")
+        out, page = self.generate(out_path)
+        self.assertIn("Prompts: 2\nPrompts deleted: 0\n", out)
+        self.assertLess(page.index('<article class="exchange claudeai"'), page.index('<article class="exchange claude"'))
+        self.assertEqual(
+            [(e.provider, e.prompt) for e in ace.inherit(out_path, self.repo)],
+            [("claude.ai", "chat prompt"), ("Claude Code", "claude prompt")],
+        )
+
     def test_shrunk_live_session_keeps_typed_prompt(self):
         # Replicata: a store restored from an older backup still holds the
         # session file but not its later records. Expectata: the page's copies
@@ -2627,7 +3194,7 @@ class CliQuals(Fixture):
 
     def test_version_and_help_exit_zero(self):
         code, out, err = self.run_cli(["--version"])
-        self.assertEqual((code, out, err), (0, "5.5.0\n", ""))
+        self.assertEqual((code, out, err), (0, "5.5.1\n", ""))
         code, out, _ = self.run_cli(["--help"])
         self.assertEqual(code, 0)
         self.assertIn("REPODIR", out)
@@ -3112,6 +3679,15 @@ class SnapshotQuals(Fixture):
     def test_freeze_omits_the_store_path(self):
         self.assertNotIn("source", ace.freeze(maximal_exchange()))
 
+    def test_claude_ai_exchange_thaws(self):
+        # Replicata: a snapshot seeded with a claude.ai chat exchange, the
+        # only way such an exchange enters a page. Expectata: it thaws back
+        # exactly. Resultata (v5.5.0): ValueError, claude.ai being no known
+        # provider.
+        given = maximal_exchange(provider="claude.ai", model="claude-opus-5-5", effort="max")
+        thawed = ace.thaw(json.loads(json.dumps(ace.freeze(given))), given.source)
+        self.assertEqual(thawed, given)
+
     def test_thaw_rejects_unknown_and_missing_fields(self):
         frozen = ace.freeze(maximal_exchange())
         page = self.tmp / "page.html"
@@ -3492,6 +4068,21 @@ class UnrenderQuals(Fixture):
         self.write(page)
         got, _ = unrender.recover(self.repo, self.page)
         self.assertEqual(got, [dataclasses.replace(original, session="unrendered", source=self.page)])
+
+    def test_claude_ai_exchange_round_trips_beside_claude_code(self):
+        # Replicata: a page holding a claude.ai exchange and a Claude Code
+        # one, whose slugs are claudeai and its prefix, claude. Expectata:
+        # each comes back as its own provider. Resultata (v5.5.0): KeyError
+        # rendering the page, claude.ai being no known provider.
+        originals = [
+            exchange(provider="claude.ai", model="claude-opus-5-5", reply="Visible **answer**."),
+            exchange(timestamp=utc(T1), prompt="q"),
+        ]
+        self.write(self.render(originals))
+        got, _ = unrender.recover(self.repo, self.page)
+        self.assertEqual(
+            got, [dataclasses.replace(e, session="unrendered", source=self.page) for e in originals]
+        )
 
     def test_non_utf8_page_refused(self):
         page = self.render([exchange()]).encode("utf-8") + b"\xff\xfe"

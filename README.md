@@ -24,6 +24,9 @@ sooner: speaking of JSON files, if you switch computers or something, you don't 
 
 request: better favicon.
 
+
+It's time to generalize this to multiple users. check out tallybee where we currently just have two separate html files. so we need to merge those and then make sure merging happens correctly in the future automatically. note that we'll need the html file to indicate which human wrote which prompt. an overhaul of the design/css is probably worthwhile
+
 ---
 
 ## Other name ideas and scratch notes
