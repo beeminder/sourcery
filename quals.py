@@ -99,16 +99,18 @@ def send_user_message(message, tid="tu1"):
     return {"type": "tool_use", "id": tid, "name": "SendUserMessage", "input": {"message": message}}
 
 
-def cq(text, ts, cwd, session="cs1", **attachment):
+def cq(text, ts, cwd, session="cs1", images=(), **attachment):
     """A queued_command attachment in prompt mode: words the human typed
-    while the agent was mid-turn. `attachment` adds fields to the attachment
-    itself, such as source_uuid and delivery_id."""
+    while the agent was mid-turn, then `images`, its image items. `attachment`
+    adds fields to the attachment itself, such as source_uuid and
+    delivery_id."""
+    assert "prompt" not in attachment
     return {
         "type": "attachment",
         "attachment": {
             "type": "queued_command",
             "commandMode": "prompt",
-            "prompt": [{"type": "text", "text": text}],
+            "prompt": [{"type": "text", "text": text}, *images],
             "origin": {"kind": "human"},
             "humanTurn": True,
             "timestamp": ts,
@@ -366,6 +368,50 @@ class ClaudeQuals(Fixture):
                 with self.assertRaises(ace.UserError) as ctx:
                     ace.claude_exchanges(path, self.repo)
                 self.assertIn(f"{path}:2", str(ctx.exception))
+
+    def test_reply_content_not_a_list_fails_loudly(self):
+        # Replicata: an assistant record whose message content is not a
+        # list of blocks: a string, an object, a number, null, or no content
+        # at all. Expectata: a loud error citing the record, never a reply
+        # read as empty. Resultata (v5.5.1): no error; the record was read
+        # as saying nothing, and its words, if any, were lost.
+        cwd = str(self.repo)
+        absent = ca([], cwd=cwd)
+        del absent["message"]["content"]
+        for record in (
+            ca("Done.", cwd=cwd),
+            ca({"type": "text", "text": "Done."}, cwd=cwd),
+            ca(7, cwd=cwd),
+            ca(None, cwd=cwd),
+            absent,
+        ):
+            path = self.path([cu("go", cwd=cwd), record])
+            with self.subTest(message=record["message"]):
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.claude_exchanges(path, self.repo)
+                self.assertIn(f"{path}:2", str(ctx.exception))
+
+    def test_text_block_whose_text_is_not_a_string_fails_loudly(self):
+        # Replicata: an assistant record holding a text block whose text is
+        # a number, null, a list, or an object, or is missing, either alone
+        # or after a well-formed text block. Expectata: a loud error citing
+        # the record. Resultata (v5.5.1): no error; the block was skipped
+        # like a tool call, and its words, if any, were lost.
+        cwd = str(self.repo)
+        sound = {"type": "text", "text": "Fine."}
+        for block in (
+            {"type": "text", "text": 7},
+            {"type": "text", "text": None},
+            {"type": "text", "text": ["Done."]},
+            {"type": "text", "text": {"value": "Done."}},
+            {"type": "text"},
+        ):
+            for blocks in ([block], [sound, block]):
+                path = self.path([cu("go", cwd=cwd), ca(blocks, cwd=cwd)])
+                with self.subTest(blocks=blocks):
+                    with self.assertRaises(ace.UserError) as ctx:
+                        ace.claude_exchanges(path, self.repo)
+                    self.assertIn(f"{path}:2", str(ctx.exception))
 
     def test_pasted_images_recovered_as_data_uris(self):
         cwd = str(self.repo)
@@ -795,11 +841,11 @@ class ClaudeQuals(Fixture):
         # restarts and delivers both prompts again: same source_uuid, new
         # delivery_id, new timestamp. Then another edit and a reply.
         # Expectata: each prompt once, at its first delivery; the work
-        # around the re-deliveries, before and after, credited to the
-        # exchange in flight (the second prompt's); both re-deliveries still
+        # around the redeliveries, before and after, credited to the
+        # exchange in flight (the second prompt's); both redeliveries still
         # held, so a page's stale copies of them get purged. Resultata
         # (v5.5.0): each prompt shown twice, the work split between the
-        # second prompt and the second re-delivery.
+        # second prompt and the second redelivery.
         cwd = str(self.repo)
         before = {
             "filePath": str(self.repo / "a.py"),
@@ -849,8 +895,8 @@ class ClaudeQuals(Fixture):
         # Replicata: the human queues the same words twice mid-turn, either
         # under two different source_uuids or with no source_uuid at all.
         # Expectata: two prompts each time; only a repeated source_uuid marks
-        # a re-delivery. Resultata (v5.5.0): as expected; this guards the
-        # re-delivery fix against keying on the words, or treating a missing
+        # a redelivery. Resultata (v5.5.0): as expected; this guards the
+        # redelivery fix against keying on the words, or treating a missing
         # source_uuid as one.
         cwd = str(self.repo)
         for fields in (({"source_uuid": "src-1"}, {"source_uuid": "src-2"}), ({}, {})):
@@ -891,7 +937,7 @@ class ClaudeQuals(Fixture):
         # prompt under the same source_uuid. Expectata: both prompts kept;
         # deliveries are tracked per session, like all of claude_exchanges'
         # bookkeeping. Resultata (v5.5.0): as expected; this guards the
-        # re-delivery fix against tracking deliveries across sessions.
+        # redelivery fix against tracking deliveries across sessions.
         cwd = str(self.repo)
         records = [
             cu("start one", ts=T0, cwd=cwd, session="cs1"),
@@ -917,19 +963,18 @@ class ClaudeQuals(Fixture):
         def image(data):
             return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}
 
-        aside = {"type": "text", "text": "aside"}
-        for prompt in (
-            [{"type": "text", "text": "other words"}, image("AA")],
-            [aside, image("BB")],
-            [aside],
-            [aside, image("AA"), image("BB")],
+        for text, images in (
+            ("other words", [image("AA")]),
+            ("aside", [image("BB")]),
+            ("aside", []),
+            ("aside", [image("AA"), image("BB")]),
         ):
             path = self.path([
                 cu("start the work", ts=T0, cwd=cwd),
-                cq("unused", T1, cwd, source_uuid="src-1", prompt=[aside, image("AA")]),
-                cq("unused", T2, cwd, source_uuid="src-1", prompt=prompt),
+                cq("aside", T1, cwd, source_uuid="src-1", images=[image("AA")]),
+                cq(text, T2, cwd, source_uuid="src-1", images=images),
             ])
-            with self.subTest(prompt=prompt):
+            with self.subTest(text=text, images=images):
                 with self.assertRaises(ace.UserError) as ctx:
                     ace.claude_exchanges(path, self.repo)
                 self.assertIn(f"{path}:3", str(ctx.exception))
@@ -940,14 +985,13 @@ class ClaudeQuals(Fixture):
         # and delivery_id. Expectata: no error; one prompt, with its image, at
         # the first delivery; both deliveries held. Resultata (v5.5.0): the
         # prompt shown twice. This guards the refusal of differing
-        # re-deliveries against comparing more than words and images.
+        # redeliveries against comparing more than words and images.
         cwd = str(self.repo)
         png = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA"}}
-        prompt = [{"type": "text", "text": "aside"}, png]
         records = [
             cu("start the work", ts=T0, cwd=cwd),
-            cq("unused", T1, cwd, source_uuid="src-1", delivery_id="dlv-1", prompt=prompt),
-            cq("unused", T2, cwd, source_uuid="src-1", delivery_id="dlv-2", prompt=prompt),
+            cq("aside", T1, cwd, source_uuid="src-1", delivery_id="dlv-1", images=[png]),
+            cq("aside", T2, cwd, source_uuid="src-1", delivery_id="dlv-2", images=[png]),
         ]
         exchanges, holdings = ace.claude_exchanges(self.path(records), self.repo)
         self.assertEqual(
@@ -973,11 +1017,11 @@ class ClaudeQuals(Fixture):
 
     def test_redelivery_between_local_command_and_its_stdout_leaves_it_unsendable(self):
         # Replicata: after a queued prompt's first delivery, the human runs a
-        # local slash command, and the prompt's re-delivery lands between the
+        # local slash command, and the prompt's redelivery lands between the
         # command and the record of the command's captured output.
         # Expectata: no error; the output still finds and unsends its
-        # command, so neither the command nor the re-delivery is a prompt.
-        # Resultata (v5.5.0): a loud error, the re-delivery having become a
+        # command, so neither the command nor the redelivery is a prompt.
+        # Resultata (v5.5.0): a loud error, the redelivery having become a
         # prompt that left the output no command to unsend.
         cwd = str(self.repo)
         wrapped = (
@@ -1006,9 +1050,9 @@ class ClaudeQuals(Fixture):
     def test_redelivery_inside_denial_fanout_still_renders_the_denial_once(self):
         # Replicata: after a queued prompt's first delivery, the human denies
         # two parallel tool calls with one typed reason, which Claude Code
-        # stamps onto both tool results, and the prompt's re-delivery lands
+        # stamps onto both tool results, and the prompt's redelivery lands
         # between the two. Expectata: the reason is one prompt and the
-        # re-delivery none. Resultata (v5.5.0): the re-delivery became a
+        # redelivery none. Resultata (v5.5.0): the redelivery became a
         # prompt that split the fan-out, so the reason showed twice.
         cwd = str(self.repo)
         denial = (
@@ -1045,6 +1089,344 @@ class ClaudeQuals(Fixture):
             [(e.prompt, e.reply) for e in got],
             [("start the work", "Working."), ("aside", "Noted."), ("hold tight", "Standing by.")],
         )
+
+    # Queued prompt contents that make no prompt: a harness wrapper item
+    # alone, nothing at all, and the interrupt marker alone.
+    NO_PROMPT_CONTENTS = (
+        "<system-reminder>recall</system-reminder>",
+        "",
+        "[Request interrupted by user]",
+    )
+
+    def test_malformed_source_uuid_fails_loudly_even_on_a_delivery_that_is_no_prompt(self):
+        # Replicata: a queued prompt whose source_uuid is empty or not text
+        # carries only a harness wrapper item, nothing at all, or only the
+        # interrupt marker. Expectata: the loud error the same source_uuid
+        # gets on a queued prompt of words, citing the record. Resultata
+        # (v5.5.1): no error; such a record was dropped before its
+        # source_uuid was read.
+        cwd = str(self.repo)
+        for source in ("", 7):
+            path = self.path([cu("start the work", cwd=cwd), cq("aside", T1, cwd, source_uuid=source)])
+            with self.assertRaises(ace.UserError) as worded:
+                ace.claude_exchanges(path, self.repo)
+            self.assertIn(f"{path}:2", str(worded.exception))
+            for text in self.NO_PROMPT_CONTENTS:
+                path = self.path([
+                    cu("start the work", cwd=cwd),
+                    cq(text, T1, cwd, source_uuid=source),
+                ])
+                with self.subTest(source=source, text=text):
+                    with self.assertRaises(ace.UserError) as ctx:
+                        ace.claude_exchanges(path, self.repo)
+                    self.assertEqual(str(ctx.exception), str(worded.exception))
+
+    def test_differing_redelivery_fails_loudly_even_if_either_delivery_is_no_prompt(self):
+        # Replicata: a queued prompt is delivered twice under one
+        # source_uuid; one delivery carries words, the other only a harness
+        # wrapper item, nothing at all, or only the interrupt marker, in
+        # either order. Expectata: the loud error a redelivery carrying
+        # other words gets, citing the second delivery. Resultata (v5.5.1):
+        # no error; a redelivery that is no prompt vanished, and words
+        # delivered again after a first delivery that is no prompt became a
+        # prompt of their own.
+        cwd = str(self.repo)
+        aside = "aside"
+
+        def deliveries(first, second):
+            return self.path([
+                cu("start the work", ts=T0, cwd=cwd),
+                cq(first, T1, cwd, source_uuid="src-1"),
+                cq(second, T2, cwd, source_uuid="src-1"),
+            ])
+
+        path = deliveries(aside, "other words")
+        with self.assertRaises(ace.UserError) as worded:
+            ace.claude_exchanges(path, self.repo)
+        self.assertIn(f"{path}:3", str(worded.exception))
+        for other in self.NO_PROMPT_CONTENTS:
+            for first, second in ((aside, other), (other, aside)):
+                path = deliveries(first, second)
+                with self.subTest(first=first, second=second):
+                    with self.assertRaises(ace.UserError) as ctx:
+                        ace.claude_exchanges(path, self.repo)
+                    self.assertEqual(str(ctx.exception), str(worded.exception))
+
+    def test_identical_redelivery_of_a_delivery_that_is_no_prompt_is_held_as_its_first(self):
+        # Replicata: a queued prompt carrying only a harness wrapper item,
+        # nothing at all, or only the interrupt marker is delivered twice
+        # under one source_uuid. Expectata: no error and no prompt; the
+        # redelivery is held exactly when its first delivery is: the
+        # interrupt marker both times, a delivery without typing neither
+        # time. Resultata (v5.5.1): as expected; this guards the comparison
+        # of such deliveries against holding a redelivery differently from
+        # its first, or refusing an identical one.
+        cwd = str(self.repo)
+        wrapper, nothing, marker = self.NO_PROMPT_CONTENTS
+        for text, held in ((wrapper, (T0,)), (nothing, (T0,)), (marker, (T0, T1, T2))):
+            records = [
+                cu("start the work", ts=T0, cwd=cwd),
+                cq(text, T1, cwd, source_uuid="src-1"),
+                cq(text, T2, cwd, source_uuid="src-1"),
+            ]
+            with self.subTest(text=text):
+                exchanges, holdings = ace.claude_exchanges(self.path(records), self.repo)
+                self.assertEqual([e.prompt for e in exchanges], ["start the work"])
+                self.assertEqual(holdings, {("Claude Code", utc(ts)) for ts in held})
+
+    def test_redelivery_first_delivered_outside_the_repo_fails_loudly(self):
+        # Replicata: mid-session the agent's cwd leaves the repo and a
+        # queued prompt is delivered there; the cwd comes back, and after a
+        # restart the prompt is redelivered, identical, with its cwd inside
+        # the repo. Expectata: a loud error citing the file at the first
+        # delivery's line and at the redelivery's, never a guess at which
+        # page the prompt belongs on. Resultata (v5.5.1): no error; the
+        # redelivery became a prompt on this repo's page at its own time,
+        # while the other directory's page would show the first delivery.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        path = self.path([
+            cu("start the work", ts=T0, cwd=cwd),
+            ca([{"type": "text", "text": "Working."}], ts=T1, cwd=elsewhere),
+            cq("aside", "2026-03-01T10:06:00.000Z", elsewhere, source_uuid="src-1", delivery_id="dlv-1"),
+            ca([{"type": "text", "text": "Noted."}], ts="2026-03-01T10:07:00.000Z", cwd=cwd, mid="m2"),
+            cq("aside", "2026-03-01T10:30:00.000Z", cwd, source_uuid="src-1", delivery_id="dlv-2"),
+            ca([{"type": "text", "text": "Done."}], ts="2026-03-01T10:31:00.000Z", cwd=cwd, mid="m3"),
+        ])
+        with self.assertRaises(ace.UserError) as ctx:
+            ace.claude_exchanges(path, self.repo)
+        self.assertIn(f"{path}:3", str(ctx.exception))
+        self.assertIn(f"{path}:5", str(ctx.exception))
+
+    def test_redelivery_after_several_deliveries_outside_the_repo_cites_the_first(self):
+        # Replicata: a queued prompt is delivered with its cwd outside the
+        # repo, delivered there again, then redelivered, identical, with its
+        # cwd inside the repo. Expectata: the loud error citing the file at
+        # the first delivery's line and at the inside redelivery's, and not
+        # at the second delivery outside: the first delivery is the one that
+        # decides. Resultata (v5.5.1): no error; the inside delivery became a
+        # prompt.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        path = self.path([
+            cu("start the work", ts=T0, cwd=cwd),
+            cq("aside", T1, elsewhere, source_uuid="src-1"),
+            cq("aside", T2, elsewhere, source_uuid="src-1"),
+            cq("aside", T3, cwd, source_uuid="src-1"),
+        ])
+        with self.assertRaises(ace.UserError) as ctx:
+            ace.claude_exchanges(path, self.repo)
+        self.assertIn(f"{path}:2", str(ctx.exception))
+        self.assertIn(f"{path}:4", str(ctx.exception))
+        self.assertNotIn(f"{path}:3", str(ctx.exception))
+
+    def test_redelivery_first_delivered_outside_the_repo_fails_loudly_whatever_it_carries(self):
+        # Replicata: a queued prompt carrying only a harness wrapper item,
+        # nothing at all, or only the interrupt marker is delivered with its
+        # cwd outside the repo, then redelivered, identical, with its cwd
+        # inside it. Expectata: the loud error the same two deliveries get
+        # when they carry words, citing both: the refusal comes right after
+        # the cwd check, before what the redelivery carries is read.
+        # Resultata (v5.5.1): no error; the redelivery was taken for a first
+        # delivery (the interrupt marker held, the others dropped).
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+
+        def deliveries(text):
+            return self.path([
+                cu("start the work", ts=T0, cwd=cwd),
+                cq(text, T1, elsewhere, source_uuid="src-1"),
+                cq(text, T2, cwd, source_uuid="src-1"),
+            ])
+
+        path = deliveries("aside")
+        with self.assertRaises(ace.UserError) as worded:
+            ace.claude_exchanges(path, self.repo)
+        self.assertIn(f"{path}:2", str(worded.exception))
+        self.assertIn(f"{path}:3", str(worded.exception))
+        for text in self.NO_PROMPT_CONTENTS:
+            path = deliveries(text)
+            with self.subTest(text=text):
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.claude_exchanges(path, self.repo)
+                self.assertEqual(str(ctx.exception), str(worded.exception))
+
+    def test_redelivery_first_delivered_outside_the_repo_fails_loudly_whatever_its_origin(self):
+        # Replicata: another agent's handback (a queued prompt of origin
+        # "peer"), a background task's notification queued as a prompt
+        # (origin "task-notification"), or a queued prompt with no origin
+        # field (one that predates the field) is delivered with its cwd
+        # outside the repo, then redelivered, identical, with its cwd inside
+        # it. Expectata: the loud error the same two deliveries get when the
+        # human typed them (origin "human"), citing both: the refusal comes
+        # right after the cwd check, before the record's origin is read.
+        # Resultata (v5.5.1): no error; the redelivery was held as machine
+        # text, or, with no origin field, became a prompt.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+
+        def deliveries(fields):
+            # Both deliveries, each attachment's origin field (cq() gives
+            # the kind "human") replaced by `fields`: an origin, or none.
+            records = [
+                cu("start the work", ts=T0, cwd=cwd),
+                cq("Findings: all green.", T1, elsewhere, source_uuid="src-1"),
+                cq("Findings: all green.", T2, cwd, source_uuid="src-1"),
+            ]
+            for queued in records[1:]:
+                del queued["attachment"]["origin"]
+                queued["attachment"].update(fields)
+            return self.path(records)
+
+        path = deliveries({"origin": {"kind": "human"}})
+        with self.assertRaises(ace.UserError) as typed:
+            ace.claude_exchanges(path, self.repo)
+        self.assertIn(f"{path}:2", str(typed.exception))
+        self.assertIn(f"{path}:3", str(typed.exception))
+        for fields in ({"origin": {"kind": "peer"}}, {"origin": {"kind": "task-notification"}}, {}):
+            path = deliveries(fields)
+            with self.subTest(fields=fields):
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.claude_exchanges(path, self.repo)
+                self.assertEqual(str(ctx.exception), str(typed.exception))
+
+    def test_redelivery_first_delivered_outside_the_repo_is_refused_before_its_timestamp_is_read(self):
+        # Replicata: a queued prompt is delivered with its cwd outside the
+        # repo, then redelivered, identical, with its cwd inside it and no
+        # timestamp on its record. Expectata: the loud error the same two
+        # deliveries get when the redelivery's record has its timestamp,
+        # citing both: the refusal comes right after the cwd check, before
+        # the record's timestamp is read. Resultata (v5.5.1): the loud error
+        # for a record with no timestamp, citing only the redelivery.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        records = [
+            cu("start the work", ts=T0, cwd=cwd),
+            cq("aside", T1, elsewhere, source_uuid="src-1"),
+            cq("aside", T2, cwd, source_uuid="src-1"),
+        ]
+        path = self.path(records)
+        with self.assertRaises(ace.UserError) as timed:
+            ace.claude_exchanges(path, self.repo)
+        del records[2]["timestamp"]
+        path = self.path(records)
+        with self.assertRaises(ace.UserError) as untimed:
+            ace.claude_exchanges(path, self.repo)
+        self.assertIn(f"{path}:2", str(untimed.exception))
+        self.assertIn(f"{path}:3", str(untimed.exception))
+        self.assertEqual(str(untimed.exception), str(timed.exception))
+
+    def test_redelivery_outside_the_repo_after_a_first_delivery_inside_changes_nothing(self):
+        # Replicata: a queued prompt is delivered with its cwd inside the
+        # repo; the agent's cwd leaves the repo, and after a restart the
+        # prompt is redelivered with its cwd outside it. Expectata: no error;
+        # one prompt, at its first delivery, and nothing of the redelivery on
+        # this repo's page, that record being another directory's. Resultata
+        # (v5.5.1): as expected; this guards the refusal of a redelivery
+        # first delivered elsewhere against refusing the reverse.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        first = "2026-03-01T10:06:00.000Z"
+        records = [
+            cu("start the work", ts=T0, cwd=cwd),
+            ca([{"type": "text", "text": "Working."}], ts=T1, cwd=cwd),
+            cq("aside", first, cwd, source_uuid="src-1", delivery_id="dlv-1"),
+            ca([{"type": "text", "text": "Noted."}], ts="2026-03-01T10:07:00.000Z", cwd=cwd, mid="m2"),
+            cq("aside", "2026-03-01T10:30:00.000Z", elsewhere, source_uuid="src-1", delivery_id="dlv-2"),
+            ca([{"type": "text", "text": "Done."}], ts="2026-03-01T10:31:00.000Z", cwd=elsewhere, mid="m3"),
+        ]
+        exchanges, holdings = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.reply) for e in exchanges],
+            [("start the work", "Working."), ("aside", "Noted.")],
+        )
+        self.assertEqual(holdings, {("Claude Code", utc(ts)) for ts in (T0, first)})
+
+    def test_redelivery_inside_after_one_outside_is_ordinary_since_the_first_decides(self):
+        # Replicata: a queued prompt is delivered with its cwd inside the
+        # repo, redelivered with its cwd outside it, then redelivered again
+        # inside. Expectata: no error; the first delivery decides, so the
+        # last is an ordinary redelivery: one prompt, at the first delivery,
+        # the reply after the last delivery credited to it, and both
+        # deliveries inside held. Resultata (v5.5.1): as expected; this
+        # guards the refusal of a redelivery first delivered elsewhere
+        # against reading "first" as "previous".
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        first, again = "2026-03-01T10:06:00.000Z", "2026-03-01T10:31:00.000Z"
+        records = [
+            cu("start the work", ts=T0, cwd=cwd),
+            ca([{"type": "text", "text": "Working."}], ts=T1, cwd=cwd),
+            cq("aside", first, cwd, source_uuid="src-1", delivery_id="dlv-1"),
+            ca([{"type": "text", "text": "Noted."}], ts="2026-03-01T10:07:00.000Z", cwd=cwd, mid="m2"),
+            cq("aside", "2026-03-01T10:30:00.000Z", elsewhere, source_uuid="src-1", delivery_id="dlv-2"),
+            cq("aside", again, cwd, source_uuid="src-1", delivery_id="dlv-3"),
+            ca([{"type": "text", "text": "Done."}], ts="2026-03-01T10:32:00.000Z", cwd=cwd, mid="m3"),
+        ]
+        exchanges, holdings = ace.claude_exchanges(self.path(records), self.repo)
+        self.assertEqual(
+            [(e.prompt, e.reply) for e in exchanges],
+            [("start the work", "Working."), ("aside", "Noted.\n\nDone.")],
+        )
+        self.assertEqual(holdings, {("Claude Code", utc(ts)) for ts in (T0, first, again)})
+
+    def test_source_uuid_first_delivered_outside_in_another_session_is_no_redelivery(self):
+        # Replicata: one file holds two sessions: one delivers a queued
+        # prompt with its cwd outside the repo, then the other delivers a
+        # queued prompt under the same source_uuid with its cwd inside it.
+        # Expectata: no error; the inside delivery is its own session's first
+        # and so a prompt, deliveries being tracked per session. Resultata
+        # (v5.5.1): as expected; this guards the refusal of a redelivery
+        # first delivered elsewhere against tracking deliveries across
+        # sessions.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        records = [
+            cu("start one", ts=T0, cwd=cwd, session="cs1"),
+            cq("aside", T1, elsewhere, session="cs2", source_uuid="src-1"),
+            cq("aside", T2, cwd, session="cs1", source_uuid="src-1"),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual([(e.session, e.prompt) for e in got], [("cs1", "start one"), ("cs1", "aside")])
+
+    def test_queued_prompt_outside_the_repo_never_redelivered_inside_changes_nothing(self):
+        # Replicata: a session's transcript, and the same transcript with a
+        # queued prompt carrying a source_uuid delivered mid-session with its
+        # cwd outside the repo, and never delivered again. Expectata: the
+        # same exchanges and holdings from both, that record being another
+        # directory's. Resultata (v5.5.1): as expected; this guards the
+        # bookkeeping of deliveries outside the repo against reaching this
+        # repo's page.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        records = [
+            cu("start the work", ts=T0, cwd=cwd),
+            ca([{"type": "text", "text": "Working."}], ts=T1, cwd=cwd),
+            ca([{"type": "text", "text": "Still working."}], ts=T3, cwd=cwd, mid="m2"),
+        ]
+        without = ace.claude_exchanges(self.path(records), self.repo)
+        outside = cq("aside", T2, elsewhere, source_uuid="src-1")
+        self.assertEqual(ace.claude_exchanges(self.path([*records[:2], outside, records[2]]), self.repo), without)
+
+    def test_malformed_source_uuid_fails_loudly_even_outside_the_repo_or_from_a_peer(self):
+        # Replicata: a queued prompt whose source_uuid is empty or not text
+        # is delivered with its cwd outside the repo, or inside it as
+        # another agent's handback (origin "peer"). Expectata: the loud
+        # error the same source_uuid gets on a queued prompt typed inside
+        # the repo, citing the record: a queued prompt's source_uuid is read
+        # before its cwd or origin is looked at, a redelivery inside the repo
+        # being judged by its first delivery wherever that was. Resultata
+        # (v5.5.1): no error; such a record was dropped before its
+        # source_uuid was read.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+
+        def handback(source):
+            record = cq("Findings: all green.", T1, cwd, source_uuid=source)
+            record["attachment"]["origin"] = {"kind": "peer"}
+            return record
+
+        for source in ("", 7):
+            path = self.path([cu("start the work", cwd=cwd), cq("aside", T1, cwd, source_uuid=source)])
+            with self.assertRaises(ace.UserError) as typed:
+                ace.claude_exchanges(path, self.repo)
+            self.assertIn(f"{path}:2", str(typed.exception))
+            for queued in (cq("aside", T1, elsewhere, source_uuid=source), handback(source)):
+                path = self.path([cu("start the work", cwd=cwd), queued])
+                with self.subTest(source=source, cwd=queued["cwd"], origin=queued["attachment"]["origin"]):
+                    with self.assertRaises(ace.UserError) as ctx:
+                        ace.claude_exchanges(path, self.repo)
+                    self.assertEqual(str(ctx.exception), str(typed.exception))
 
     def test_interrupt_markers_dropped_but_typed_text_around_them_kept(self):
         cwd = str(self.repo)
@@ -2176,6 +2558,22 @@ class RenderQuals(Fixture):
         self.assertEqual(page.count('<span class="chip"></span>'), 3)
         self.assertLess(page.index('class="chip"'), page.index('class="agent"'))
 
+    def test_meta_line_wraps_between_items_and_the_chip_keeps_its_size(self):
+        # Replicata: a page read at phone width (390px), where an exchange's
+        # meta line (time, chip, agent, model, effort, working time) is
+        # wider than the column. Expectata: the chip stays an 8px square,
+        # and the line wraps between its items, never inside one. Resultata
+        # (v5.5.1): the items were squeezed into one row, the chip shrunk to
+        # a sliver and the model name broken at its hyphens.
+        self.assertIn(
+            ".chip { display: inline-block; flex: none; width: 8px; height: 8px;"
+            " border-radius: 2px; background: var(--provider); }",
+            ace.CSS,
+        )
+        rule = ace.CSS[ace.CSS.index("\nsummary {") :]
+        rule = rule[: rule.index("}")]
+        self.assertIn("\n  flex-wrap: wrap;\n", rule)
+
     def test_unknown_provider_fails_loudly(self):
         with self.assertRaises(KeyError):
             ace.render(self.repo, [exchange(provider="Quantum")])
@@ -2666,9 +3064,9 @@ class CliQuals(Fixture):
     def test_rerun_purges_redelivered_copy_and_relabels_handed_off_exchange(self):
         # Replicata: a page written by v5.5.0 from a cloud-workspace session
         # whose chat part was handed off and whose queued prompt was
-        # re-delivered after a restart: the first exchange labeled with the
+        # redelivered after a restart: the first exchange labeled with the
         # chat model, the queued prompt shown twice. Expectata: a rerun
-        # shows the queued prompt once, names the re-delivery's page copy on
+        # shows the queued prompt once, names the redelivery's page copy on
         # stdout as deleted, and labels the first exchange with the
         # workspace model. Resultata (v5.5.0): the rerun changed nothing.
         cwd = str(self.repo)
@@ -2704,6 +3102,33 @@ class CliQuals(Fixture):
         self.assertEqual(page.count('<pre class="prompt">also this</pre>'), 1)
         self.assertNotIn("claude-sonnet-4-6", page)
         self.assertIn("From the workspace.", page)
+
+    def test_redelivery_first_delivered_outside_the_repo_refused_and_page_untouched(self):
+        # Replicata: a page is written from a session whose queued prompt
+        # was delivered while the agent's cwd was outside the repo; then the
+        # workspace restarts and redelivers the prompt with its cwd inside
+        # the repo, and the page is regenerated. Expectata: exit 2, the error
+        # citing the transcript at both deliveries' lines, and the page left
+        # byte-identical. Resultata (v5.5.1): the regenerated page showed the
+        # prompt at the redelivery's time.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        records = [
+            cu("start the work", ts=T0, cwd=cwd),
+            ca([{"type": "text", "text": "Working."}], ts=T1, cwd=elsewhere),
+            cq("aside", "2026-03-01T10:06:00.000Z", elsewhere, source_uuid="src-1", delivery_id="dlv-1"),
+            ca([{"type": "text", "text": "Noted."}], ts="2026-03-01T10:07:00.000Z", cwd=cwd, mid="m2"),
+        ]
+        path = write_jsonl(self.claude_root / "p" / "s.jsonl", records)
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        page = out_path.read_bytes()
+        redelivery = cq("aside", "2026-03-01T10:30:00.000Z", cwd, source_uuid="src-1", delivery_id="dlv-2")
+        write_jsonl(path, [*records, redelivery])
+        code, _, err = self.run_cli([str(self.repo), str(out_path)])
+        self.assertEqual(code, 2)
+        self.assertIn(f"{path}:3", err)
+        self.assertIn(f"{path}:5", err)
+        self.assertEqual(out_path.read_bytes(), page)
 
     def test_seeded_claude_ai_exchange_survives_rerun(self):
         # Replicata: a page whose snapshot was seeded with a claude.ai chat
@@ -2871,6 +3296,319 @@ class CliQuals(Fixture):
         self.assertEqual(
             holdings, {("Claude Code", utc(T0)), ("Codex", utc(T1)), ("Copilot Chat", utc(T2))}
         )
+
+    def split_session(self):
+        """A session Claude Code continued in a second file after a cloud
+        workspace restarted: a file of the same name, carrying the same
+        session id, under another project directory, opening with the reply
+        to the first file's last prompt, then redelivering the prompt queued
+        before the restart. Returns both paths."""
+        cwd = str(self.repo)
+        first = write_jsonl(
+            self.claude_root / "p" / "cs1.jsonl",
+            [
+                cu("start the work", ts=T0, cwd=cwd),
+                ca([{"type": "text", "text": "Working."}], ts=T1, cwd=cwd),
+                cq("aside", "2026-03-01T10:06:00.000Z", cwd, source_uuid="src-1", delivery_id="dlv-1"),
+                ca([{"type": "text", "text": "Noted."}], ts="2026-03-01T10:07:00.000Z", cwd=cwd, mid="m2"),
+            ],
+        )
+        second = write_jsonl(
+            self.claude_root / "q" / "cs1.jsonl",
+            [
+                ca([{"type": "text", "text": "Still on it."}], ts="2026-03-01T10:29:00.000Z", cwd=cwd, mid="m3"),
+                cq("aside", "2026-03-01T10:30:00.000Z", cwd, source_uuid="src-1", delivery_id="dlv-2"),
+                ca([{"type": "text", "text": "Done."}], ts="2026-03-01T10:31:00.000Z", cwd=cwd, mid="m4"),
+            ],
+        )
+        return first, second
+
+    def test_session_split_across_two_files_refused_naming_both(self):
+        # Replicata: a cloud workspace restarts mid-session, and Claude Code
+        # continues the session in a second file (see split_session).
+        # Expectata: a loud error naming both files, each at the session's
+        # first record there, never a reading of either file alone.
+        # Resultata (v5.5.1): no error; read apart, the files showed the
+        # queued prompt twice, the second time at its redelivery, and lost
+        # the reply the second file opens with, which had no prompt there.
+        first, second = self.split_session()
+        with self.assertRaises(ace.UserError) as ctx:
+            ace.collect(self.repo, ace.discover_roots(self.env))
+        self.assertIn(f"{first}:1", str(ctx.exception))
+        self.assertIn(f"{second}:1", str(ctx.exception))
+
+    def test_session_split_refusal_times_each_file_and_says_to_delete_a_copy(self):
+        # Replicata: a session continued in a second file (see
+        # split_session), that file opening with a record whose cwd is
+        # inside the repo or outside it. Expectata: the loud error gives,
+        # beside each file's citation, the timestamp of the session's first
+        # record there, as the record holds it, so the human can tell which
+        # file the session begins in; and it says to delete a file that is a
+        # copy of the other instead of merging the two. Resultata (v5.5.1):
+        # no error. Resultata with the refusal's first message: each file
+        # cited by line alone, with no timestamp and no word about a copy.
+        first, second = self.split_session()
+        opening, *rest = [json.loads(line) for line in second.read_text(encoding="utf-8").splitlines()]
+        for where in (str(self.repo), str(self.tmp / "elsewhere")):
+            write_jsonl(second, [{**opening, "cwd": where}, *rest])
+            with self.subTest(where=where):
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.collect(self.repo, ace.discover_roots(self.env))
+                message = str(ctx.exception)
+                for path, ts in ((first, T0), (second, "2026-03-01T10:29:00.000Z")):
+                    [line] = [line for line in message.splitlines() if f"{path}:1" in line]
+                    self.assertIn(ts, line)
+                self.assertIn("exemplar dele", message)
+
+    def test_session_split_refused_by_run_with_nothing_written(self):
+        # Replicata: a page is written from a session's transcript; then the
+        # session continues in a second file (see split_session), and the
+        # page is regenerated, and a page is generated at a new path too.
+        # Expectata: exit 2 both times, the error naming both files, the
+        # page left byte-identical, and no page at the new path. Resultata
+        # (v5.5.1): exit 0, and both pages showed the queued prompt twice.
+        first, second = self.split_session()
+        continued = second.read_bytes()
+        second.unlink()
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        page = out_path.read_bytes()
+        second.write_bytes(continued)
+        fresh = self.tmp / "fresh.html"
+        for target in (out_path, fresh):
+            code, out, err = self.run_cli([str(self.repo), str(target)])
+            with self.subTest(target=target.name):
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn(str(first), err)
+                self.assertIn(str(second), err)
+        self.assertEqual(out_path.read_bytes(), page)
+        self.assertFalse(fresh.exists())
+
+    def test_every_record_read_into_a_session_registers_its_file_wherever_its_cwd(self):
+        # Replicata: a session's transcript, and a second file under another
+        # project directory holding one record of the same session that
+        # claude_exchanges reads into it: a typed prompt, a tool result, a
+        # reply, a harness notice, a queued prompt, or another agent's
+        # handback, its cwd inside the repo or outside it. Expectata: the
+        # loud error naming both files, whichever record it is and wherever
+        # its cwd: a session split across files is read wrongly for every
+        # repo, so the refusal is the store's, not one page's. Resultata
+        # (v5.5.1): no error.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        first = write_jsonl(
+            self.claude_root / "p" / "cs1.jsonl",
+            [cu("start the work", ts=T0, cwd=cwd), ca([{"type": "text", "text": "Working."}], ts=T1, cwd=cwd)],
+        )
+
+        def handback(where):
+            record = cq("Findings: all green.", T2, where, source_uuid="src-9")
+            record["attachment"]["origin"] = {"kind": "peer"}
+            return record
+
+        for where in (cwd, elsewhere):
+            for record in (
+                cu("more", ts=T2, cwd=where),
+                cu([{"type": "tool_result", "tool_use_id": "t1", "content": "out"}], ts=T2, cwd=where),
+                ca([{"type": "text", "text": "More."}], ts=T2, cwd=where),
+                ca([{"type": "text", "text": "API Error: 401"}], ts=T2, cwd=where, model="<synthetic>"),
+                cq("aside", T2, where, source_uuid="src-1"),
+                handback(where),
+            ):
+                second = write_jsonl(self.claude_root / "q" / "cs1.jsonl", [record])
+                with self.subTest(where=where, record=record):
+                    with self.assertRaises(ace.UserError) as ctx:
+                        ace.collect(self.repo, ace.discover_roots(self.env))
+                    self.assertIn(f"{first}:1", str(ctx.exception))
+                    self.assertIn(f"{second}:1", str(ctx.exception))
+
+    def test_records_never_read_into_a_session_register_no_file(self):
+        # Replicata: a session's transcript, and a second file under another
+        # project directory holding one record of the same session that
+        # claude_exchanges never reads into it: subagent traffic, a meta
+        # record, a compaction summary, a transcript-only note, a system
+        # record, an attachment that is no queued prompt, or a queued
+        # background-task wakeup. Expectata: no error, and the transcript
+        # read exactly as alone. Resultata (v5.5.1): as expected; this guards
+        # the refusal of a split session against records that leave no mark
+        # on a session's reading.
+        cwd = str(self.repo)
+        first = write_jsonl(
+            self.claude_root / "p" / "cs1.jsonl",
+            [cu("start the work", ts=T0, cwd=cwd), ca([{"type": "text", "text": "Working."}], ts=T1, cwd=cwd)],
+        )
+        alone = ace.claude_exchanges(first, self.repo)
+        stamp = {"timestamp": T2, "cwd": cwd, "sessionId": "cs1"}
+        wakeup = {
+            "type": "queued_command",
+            "commandMode": "task-notification",
+            "prompt": "<task-notification>done</task-notification>",
+        }
+        for record in (
+            cu("subagent prompt", ts=T2, cwd=cwd, isSidechain=True),
+            {**ca([{"type": "text", "text": "Subagent reply."}], ts=T2, cwd=cwd), "isSidechain": True},
+            cu("meta", ts=T2, cwd=cwd, isMeta=True),
+            cu("This session is being continued...", ts=T2, cwd=cwd, isCompactSummary=True),
+            cu("transcript-only", ts=T2, cwd=cwd, isVisibleInTranscriptOnly=True),
+            {"type": "system", "subtype": "upgrade_relay_marker", "content": "moved", **stamp},
+            {"type": "attachment", "attachment": {"type": "todo_reminder", "content": []}, **stamp},
+            {"type": "attachment", "attachment": wakeup, **stamp},
+        ):
+            write_jsonl(self.claude_root / "q" / "cs1.jsonl", [record])
+            with self.subTest(record=record):
+                self.assertEqual(ace.collect(self.repo, ace.discover_roots(self.env)), alone)
+
+    def test_subagent_transcript_carrying_its_parents_session_not_refused(self):
+        # Replicata: a session whose subagent's transcript, nested under the
+        # session's directory, carries the parent's session id on every
+        # record, each record marked isSidechain. Expectata: no error, and
+        # the session read exactly as its own file alone. Resultata
+        # (v5.5.1): as expected; this guards the refusal of a split session
+        # against subagent transcripts.
+        cwd = str(self.repo)
+        parent = write_jsonl(
+            self.claude_root / "p" / "cs1.jsonl",
+            [cu("start the work", ts=T0, cwd=cwd), ca([{"type": "text", "text": "Working."}], ts=T1, cwd=cwd)],
+        )
+        write_jsonl(
+            self.claude_root / "p" / "cs1" / "subagents" / "agent-a1.jsonl",
+            [
+                cu("Survey the repo.", ts=T1, cwd=cwd, isSidechain=True, agentId="a1"),
+                {**ca([{"type": "text", "text": "Surveyed."}], ts=T2, cwd=cwd), "isSidechain": True, "agentId": "a1"},
+                {
+                    "type": "attachment",
+                    "attachment": {"type": "date", "content": "today"},
+                    "isSidechain": True,
+                    "timestamp": T2,
+                    "cwd": cwd,
+                    "sessionId": "cs1",
+                },
+            ],
+        )
+        self.assertEqual(
+            ace.collect(self.repo, ace.discover_roots(self.env)), ace.claude_exchanges(parent, self.repo)
+        )
+
+    def test_workflow_journals_sharing_a_name_not_refused(self):
+        # Replicata: two workflow runs under one session, each keeping a
+        # journal.jsonl of agent launches and results: no user or assistant
+        # record and no session id, so a session named for the file would be
+        # "journal" in both. Expectata: no error, and the session read
+        # exactly as its own file alone. Resultata (v5.5.1): as expected;
+        # this guards the refusal of a split session against files that
+        # share a name but hold no session.
+        cwd = str(self.repo)
+        parent = write_jsonl(
+            self.claude_root / "p" / "cs1.jsonl",
+            [cu("start the work", ts=T0, cwd=cwd), ca([{"type": "text", "text": "Working."}], ts=T1, cwd=cwd)],
+        )
+        for run in ("wf_1", "wf_2"):
+            write_jsonl(
+                self.claude_root / "p" / "cs1" / "subagents" / "workflows" / run / "journal.jsonl",
+                [
+                    {"type": "started", "agentId": "a1", "key": "k1"},
+                    {"type": "result", "agentId": "a1", "key": "k1", "result": "done"},
+                ],
+            )
+        self.assertEqual(
+            ace.collect(self.repo, ace.discover_roots(self.env)), ace.claude_exchanges(parent, self.repo)
+        )
+
+    def test_one_file_holding_two_sessions_reads_the_same_through_collect(self):
+        # Replicata: one transcript holding two sessions' records,
+        # interleaved, several records each. Expectata: no error, and
+        # collect reads the file exactly as claude_exchanges reads it alone.
+        # Resultata (v5.5.1): as expected; this guards the refusal of a
+        # split session against a session's records within one file.
+        cwd = str(self.repo)
+        path = write_jsonl(
+            self.claude_root / "p" / "cs1.jsonl",
+            [
+                cu("start one", ts=T0, cwd=cwd, session="cs1"),
+                cu("start two", ts=T0, cwd=cwd, session="cs2"),
+                ca([{"type": "text", "text": "One."}], ts=T1, cwd=cwd, session="cs1"),
+                ca([{"type": "text", "text": "Two."}], ts=T1, cwd=cwd, session="cs2", mid="m2"),
+                cu("again one", ts=T2, cwd=cwd, session="cs1"),
+                ca([{"type": "text", "text": "Again."}], ts=T3, cwd=cwd, session="cs1", mid="m3"),
+            ],
+        )
+        got = ace.collect(self.repo, ace.discover_roots(self.env))
+        self.assertEqual(got, ace.claude_exchanges(path, self.repo))
+        self.assertEqual(
+            [(e.session, e.prompt) for e in got[0]],
+            [("cs1", "start one"), ("cs1", "again one"), ("cs2", "start two")],
+        )
+
+    def test_other_agents_repeating_session_ids_not_refused(self):
+        # Replicata: Codex, Copilot Chat, and Antigravity each hold two files
+        # under one session id, an id a Claude Code session carries too.
+        # Expectata: no error, and every file read. Resultata (v5.5.1): as
+        # expected; this guards the refusal of a split session, a shape of
+        # Claude Code's store, against other agents' stores.
+        cwd = str(self.repo)
+        write_jsonl(self.claude_root / "p" / "cs1.jsonl", [cu("claude prompt", ts=T0, cwd=cwd)])
+        write_jsonl(self.codex_root / "sessions" / "rollout-1.jsonl", [cxmeta(cwd, sid="cs1"), cxuser("codex one", ts=T0)])
+        write_jsonl(
+            self.codex_root / "archived_sessions" / "rollout-2.jsonl", [cxmeta(cwd, sid="cs1"), cxuser("codex two", ts=T1)]
+        )
+        for storage, text, ts in (("h1", "copilot one", T0), ("h2", "copilot two", T1)):
+            folder = self.vscode_root / "workspaceStorage" / storage
+            (folder / "chatSessions").mkdir(parents=True)
+            (folder / "workspace.json").write_text(json.dumps({"folder": self.repo.as_uri()}), encoding="utf-8")
+            (folder / "chatSessions" / "a.json").write_text(
+                json.dumps(vssession([vsreq(text, [md("r")], ts=int(utc(ts).timestamp() * 1000))], sid="cs1")),
+                encoding="utf-8",
+            )
+        for name, text, ts in (("conv-1", "antigravity one", T0), ("conv-2", "antigravity two", T1)):
+            write_ag(self.antigravity_root, name, agconv([aguser(text, ts, workspace=self.repo.as_uri())], cid="cs1"))
+        exchanges, _ = ace.collect(self.repo, ace.discover_roots(self.env))
+        self.assertEqual(
+            sorted((e.provider, e.session, e.prompt) for e in exchanges),
+            [
+                ("Antigravity", "cs1", "antigravity one"),
+                ("Antigravity", "cs1", "antigravity two"),
+                ("Claude Code", "cs1", "claude prompt"),
+                ("Codex", "cs1", "codex one"),
+                ("Codex", "cs1", "codex two"),
+                ("Copilot Chat", "cs1", "copilot one"),
+                ("Copilot Chat", "cs1", "copilot two"),
+            ],
+        )
+
+    def test_one_transcript_reached_by_two_paths_not_refused(self):
+        # Replicata: a session's transcript, reached by a second path too:
+        # AI_CHAT_CLAUDE_ROOTS lists the store beside a symlink to it, or
+        # beside itself spelled through "..", or the store holds a symlink
+        # or a hard link to the transcript under another project directory.
+        # Expectata: no error, and the session read exactly as its own file
+        # alone, the one file being read twice. Resultata (v5.5.1): as
+        # expected. Resultata with files told apart by their paths: the loud
+        # error for a session split across two files, citing the one file
+        # under both paths and asking that it be merged with itself.
+        cwd = str(self.repo)
+        first = write_jsonl(
+            self.claude_root / "p" / "cs1.jsonl",
+            [cu("start the work", ts=T0, cwd=cwd), ca([{"type": "text", "text": "Working."}], ts=T1, cwd=cwd)],
+        )
+        exchanges, holdings = ace.claude_exchanges(first, self.repo)
+        alone = (ace.weave(exchanges), holdings)
+
+        def read(*roots):
+            self.env["AI_CHAT_CLAUDE_ROOTS"] = os.pathsep.join(str(root) for root in roots)
+            exchanges, holdings = ace.collect(self.repo, ace.discover_roots(self.env))
+            return ace.weave(exchanges), holdings
+
+        alias = self.tmp / "alias"
+        alias.symlink_to(self.claude_root)
+        for second in (alias, self.claude_root / "p" / ".."):
+            with self.subTest(second=second):
+                self.assertEqual(read(self.claude_root, second), alone)
+        link = self.claude_root / "q" / "cs1.jsonl"
+        link.parent.mkdir()
+        for make in (link.symlink_to, link.hardlink_to):
+            make(first)
+            with self.subTest(link=make.__name__):
+                self.assertEqual(read(self.claude_root), alone)
+            link.unlink()
 
     def test_flagship_legacy_page_imported_then_merged_with_partial_store(self):
         # Replicata: a page from before snapshots, rendered from all three
@@ -3194,7 +3932,7 @@ class CliQuals(Fixture):
 
     def test_version_and_help_exit_zero(self):
         code, out, err = self.run_cli(["--version"])
-        self.assertEqual((code, out, err), (0, "5.5.1\n", ""))
+        self.assertEqual((code, out, err), (0, f"{ace.VERSION}\n", ""))
         code, out, _ = self.run_cli(["--help"])
         self.assertEqual(code, 0)
         self.assertIn("REPODIR", out)

@@ -53,9 +53,9 @@ import tempfile
 import urllib.parse
 import webbrowser
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "5.5.1"
+VERSION = "5.5.2"
 UTC = dt.timezone.utc
 
 
@@ -607,10 +607,10 @@ def claude_denial_key(record: Mapping[str, Any], text: str) -> tuple[Any, str] |
 
 
 def claude_delivery_key(attachment: Mapping[str, Any] | None, path: Path, line_number: int) -> str | int:
-    """The prompt record's "delivery key": a queued prompt's source_uuid,
+    """A record's "delivery key": a queued prompt's source_uuid,
     which every delivery of it shares, or else the record's own line number,
-    which no other record shares (a user record, or a queued prompt that
-    carries no source_uuid)."""
+    which no other record shares (a user or assistant record, or a queued
+    prompt that carries no source_uuid)."""
     match attachment:
         case {"source_uuid": str() as source_uuid} if source_uuid != "":
             return source_uuid
@@ -664,14 +664,28 @@ def claude_reply_blocks(content: Any, path: Path, line_number: int) -> list[str]
     cloud workspace can speak to the human through that tool alone, writing
     no text block). Every other block stays out of the reply, even one the
     harness also shows the human, such as ExitPlanMode's plan or
-    AskUserQuestion's questions. Empty words are no words."""
+    AskUserQuestion's questions. Empty strings are dropped."""
     if not isinstance(content, list):
-        return []
+        # TODO: Says an assistant record's content is in an unrecognized
+        # form (not a list of blocks) — the format seems to have changed and
+        # claude_reply_blocks needs updating.
+        raise UserError(
+            f"Contentum responsi in forma ignota: {path}:{line_number}\n"
+            "Forma mutata videtur; claude_reply_blocks renovandum est."
+        )
     words: list[str] = []
     for item in content:
         match item:
             case {"type": "text", "text": str() as text}:
                 words.append(text)
+            case {"type": "text"}:
+                # TODO: Says a text block is in an unrecognized form (its
+                # text is missing or not a string) — the format seems to have
+                # changed and claude_reply_blocks needs updating.
+                raise UserError(
+                    f"Membrum text in forma ignota: {path}:{line_number}\n"
+                    "Forma mutata videtur; claude_reply_blocks renovandum est."
+                )
             case {
                 "type": "tool_use",
                 "name": "SendUserMessage" | "Brief",
@@ -748,7 +762,11 @@ def claude_tool_seconds(record: Mapping[str, Any]) -> float:
     return 0.0
 
 
-def claude_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holding]]:
+def claude_exchanges(
+    path: Path,
+    repo: Path,
+    session_file: Callable[[str, Path, int, Any], None] = lambda session, path, line_number, timestamp: None,
+) -> tuple[list[Exchange], set[Holding]]:
     threads: dict[str, list[Message]] = {}
     holdings: set[Holding] = set()
     # Agent working time, distinguished from waiting-for-human time by where
@@ -765,18 +783,27 @@ def claude_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holdin
     # that prompt and credited to the exchange it closes.
     tallies: dict[str, tuple[int, int]] = {}
     last_denial: dict[str, tuple[Any, str] | None] = {}
-    # A "re-delivery" is a typed prompt record whose session and delivery
-    # key (see claude_delivery_key) an earlier typed prompt record in this
-    # file already carried. Only a queued prompt's source_uuid can repeat: a
+    # A "redelivery" is a record that reaches the cwd check carrying a
+    # session and delivery key (see claude_delivery_key) that an earlier
+    # such record carried. Only a queued prompt's delivery key can repeat: a
     # Claude-desktop cloud workspace that restarted delivered its
     # already-delivered queued prompts again under the same source_uuids.
-    # The human typed each once, so only the first delivery is a prompt, and
-    # a re-delivery carrying other text or images than the first is refused.
-    # `delivered` maps each (session, delivery key) seen so far to the text
-    # and images of its first delivery. Only records attributed to this repo
-    # (by cwd) are seen, so a re-delivery whose first delivery had its cwd
-    # outside the repo counts as a first delivery.
+    # Every record that reaches the cwd check enters `first_delivery`, which
+    # maps each (session, delivery key) to the line number of the first such
+    # record to carry it and whether that record is attributed to this repo
+    # (by cwd). A redelivery attributed to this repo whose first delivery is
+    # not is refused right after that check, whatever its origin or content,
+    # since which page it belongs on is undecided. `delivered` maps each
+    # (session, delivery key) to the text and images of its first delivery
+    # among the user-role records attributed to this repo that are neither
+    # of machine origin nor local-command output, and only among those
+    # records is a redelivery recognized: the human typed each prompt once,
+    # so such a redelivery is no new prompt, and one carrying other text or
+    # images than the first is refused. A redelivery whose earlier
+    # deliveries attributed to this repo were all of machine origin is
+    # therefore judged as a first delivery would be.
     delivered: dict[tuple[str, str | int], tuple[str, tuple[str, ...]]] = {}
+    first_delivery: dict[tuple[str, str | int], tuple[int, bool]] = {}
     # Sessions whose most recently emitted message is a recovered slash
     # command, mapped to that record's promptId, so a local-command-stdout
     # record can find and unsend its paired command.
@@ -810,13 +837,32 @@ def claude_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holdin
         if attachment is None and not isinstance(message, dict):
             # TODO: Says this record has no message object.
             raise UserError(f"Recordum message obiectum non habet: {path}:{line_number}")
-        if not under_dir(record.get("cwd"), repo):
+        session = str(record.get("sessionId") or path.stem)
+        # Every record read into a session registers its session's file,
+        # whatever its cwd: everything below keeps a session's state within
+        # one file, and collect() refuses a session registered from two
+        # files. Read alone, a file's registrations go unheard.
+        session_file(session, path, line_number, record.get("timestamp"))
+        delivery = (session, claude_delivery_key(attachment, path, line_number))
+        inside = under_dir(record.get("cwd"), repo)
+        first_line, first_inside = first_delivery.setdefault(delivery, (line_number, inside))
+        if not inside:
             continue
+        if not first_inside:
+            # TODO: Says a queued prompt was delivered again with its cwd
+            # inside this project after its first delivery, in the same
+            # file and session, had its cwd outside it, citing the first
+            # delivery and then this one, so which page should show the
+            # prompt is undecided and claude_exchanges needs updating.
+            raise UserError(
+                "Rogatio primum extra inceptum, deinde intra tradita est:\n"
+                f"  {path}:{first_line}\n  {path}:{line_number}\n"
+                "Ad quam paginam rogatio pertineat nondum decretum est; claude_exchanges renovandum est."
+            )
         if "timestamp" not in record:
             # TODO: Says this record has no timestamp.
             raise UserError(f"Tempus deest in recordo: {path}:{line_number}")
         timestamp = parse_time(record["timestamp"])
-        session = str(record.get("sessionId") or path.stem)
         prior = previous.get(session, timestamp)
         gap = (timestamp - prior).total_seconds()
         previous[session] = max(prior, timestamp)
@@ -880,29 +926,34 @@ def claude_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holdin
             if text == "" and attachment is None:
                 text, ballots = claude_recovered(record, path, line_number)
                 denial_key = claude_denial_key(record, text)
+            images = claude_images(content, path, line_number)
+            # Compare and record every delivery before the checks below
+            # decide whether it is a prompt, so a redelivery is refused or
+            # recognized whatever either delivery carries. The get() yields
+            # the text and images `delivered` holds for this key, or this
+            # one's own if it holds none.
+            if delivered.get(delivery, (text, images)) != (text, images):
+                # TODO: Says a queued prompt delivered again carries other
+                # words or images than its first delivery under the same
+                # source_uuid — the format seems to have changed and
+                # claude_exchanges needs updating.
+                raise UserError(
+                    f"Rogatio iterum tradita aliud fert quam prima: {path}:{line_number}\n"
+                    "Forma mutata videtur; claude_exchanges renovandum est."
+                )
+            redelivery = delivery in delivered
+            delivered[delivery] = (text, images)
             if CLAUDE_CANNED.fullmatch(text):
                 holdings.add(("Claude Code", timestamp))
                 continue
-            images = claude_images(content, path, line_number)
             if text == "" and images == () and not any(b.picked for b in ballots):
                 continue  # tool plumbing with no typing: never rendered, so no holding
             holdings.add(("Claude Code", timestamp))
-            # A re-delivery stays held, so a page's stale copy of it gets
+            # A redelivery stays held, so a page's stale copy of it gets
             # purged, but is no new prompt: the work pending around it rides
             # the exchange in flight.
-            delivery = (session, claude_delivery_key(attachment, path, line_number))
-            if delivery in delivered:
-                if delivered[delivery] != (text, images):
-                    # TODO: Says a queued prompt delivered again carries other
-                    # words or images than its first delivery under the same
-                    # source_uuid — the format seems to have changed and
-                    # claude_exchanges needs updating.
-                    raise UserError(
-                        f"Rogatio iterum tradita aliud fert quam prima: {path}:{line_number}\n"
-                        "Forma mutata videtur; claude_exchanges renovandum est."
-                    )
+            if redelivery:
                 continue
-            delivered[delivery] = (text, images)
             # One typed act can fan out across several records (a denial
             # reason stamped onto each rejected parallel tool call), so a
             # repeat of the pending unanswered prompt is not a new prompt.
@@ -1877,10 +1928,42 @@ def collect(repo: Path, roots: Roots) -> tuple[list[Exchange], set[Holding]]:
         exchanges.extend(parsed[0])
         holdings.update(parsed[1])
 
+    # One Claude Code session's records can lie in two files: a cloud
+    # workspace that restarted continued its session in a second file under
+    # another project directory. claude_exchanges keeps a session's state
+    # within one file, so read apart the second file's redelivered prompts
+    # look new and its replies to the first file's last prompt are lost.
+    # Such a session is refused, for every repo alike. `session_files` maps
+    # each session to the file, line, and timestamp of its first record.
+    session_files: dict[str, tuple[Path, int, Any]] = {}
+
+    def session_file(session: str, path: Path, line_number: int, timestamp: Any) -> None:
+        first_path, first_line, first_timestamp = session_files.setdefault(
+            session, (path, line_number, timestamp)
+        )
+        # Files are compared, not paths: one file reached by two paths (a
+        # root listed beside a symlink to it, a transcript symlinked or hard
+        # linked into another project directory) is read twice, which weave
+        # collapses, and is no split session.
+        if not first_path.samefile(path):
+            # TODO: Says one session's records lie in two transcript files,
+            # citing the session's first record in each with that record's
+            # timestamp as the record holds it, so the file the session
+            # begins in can be told; to merge the two files into one, the
+            # file the session begins in first, or, when one file is a copy
+            # of the other, to delete the copy instead of merging; then to
+            # rerun.
+            raise UserError(
+                f"Sessio {session} in duobus fasciculis est:\n"
+                f"  {first_path}:{first_line} ({first_timestamp})\n  {path}:{line_number} ({timestamp})\n"
+                "Coniunge eos in unum fasciculum, prius eum in quo sessio incipit; "
+                "si alter alterius exemplar est, exemplar dele, noli coniungere. Deinde iterum curre."
+            )
+
     for root in roots.claude:
         if require_dir(root):
             for path in sorted(p for p in root.rglob("*.jsonl") if p.is_file()):
-                gather(claude_exchanges(path, repo))
+                gather(claude_exchanges(path, repo, session_file))
     for root in roots.codex:
         if require_dir(root):
             for directory in codex_session_dirs(root):
@@ -2249,6 +2332,7 @@ pre.prompt {
 details { margin: .55rem 0 0; }
 summary {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: .6rem;
   width: fit-content;
@@ -2274,7 +2358,7 @@ summary:hover { color: var(--muted); }
    provider color (the same hue as the edge stripe) and the agent's name a
    step louder than the rest of the line — promoted ink, never the mark
    color, so the reading survives any color deficiency. */
-.chip { display: inline-block; width: 8px; height: 8px; border-radius: 2px; background: var(--provider); }
+.chip { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 2px; background: var(--provider); }
 .agent { color: var(--muted); font-weight: 600; }
 /* INVIOLABLE: machine-generated prose renders only inside a .machine
    container, in the phosphor-terminal style — monospace green on
