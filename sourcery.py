@@ -4,8 +4,8 @@
 Reads the local transcript stores of four coding agents and produces a
 single self-contained HTML document, ordered by timestamp. The human's
 prompts are the only text visible by default; everything machine-generated
-is collapsed behind a quiet disclosure line that names the agent, model,
-and time. Supported stores:
+is collapsed behind a quiet disclosure line that names the human, agent,
+model, and time. Supported stores:
 
 - Claude Code:  ~/.claude/projects/**/*.jsonl
 - Codex:        ~/.codex/{sessions,archived_sessions}/**/*.jsonl
@@ -16,11 +16,13 @@ and time. Supported stores:
 Usage:
     python3 sourcery.py REPODIR OUTPUT.html [--open]
 
-OUTPUT.html is read before it is written: the page carries a snapshot of
-every exchange it shows, and a run merges what the stores still hold with
-what only the page remembers, so nothing once rendered is lost when stores
-are pruned or machines change. A page from before snapshots is refused
-until unrender.py has imported it.
+OUTPUT.html is derived from the ledgers beside it, one per human who runs
+sourcery. A run rewrites the runner's own ledger, merging what the
+runner's stores still hold with what only that ledger remembers, then
+renders the page from every ledger, so nothing once rendered is lost when
+stores are pruned or machines change. A page sourcery 5 wrote, which
+carries its own snapshot instead, is refused until adopt.py has imported
+it.
 
 Nonstandard store locations can be supplied with path-separated environment
 variables: AI_CHAT_CLAUDE_ROOTS, AI_CHAT_CODEX_ROOTS, AI_CHAT_VSCODE_USER_ROOTS,
@@ -33,6 +35,14 @@ IDE smuggles into the user role (open-file context, system reminders); a
 "canned" prompt is a fixed string a UI control fabricates in the user role
 (retry/continue buttons, quick-fix templates). Neither is the human's words
 and both are dropped.
+
+More jargon: a "login" is a human's GitHub account name, as the gh CLI
+saved it, lowercased; a "ledger" is one human's sourcery.LOGIN.jsonl, every
+exchange of theirs the page shows; a "display name" is what the page calls
+a human; a "credit" is the page's record of whose ledger holds a row.
+A "project name" is what every ledger's first line calls the repo: its
+repository's name, from its public home, or its checkout directory's name
+when it has no public home (see project_name).
 """
 
 from __future__ import annotations
@@ -48,6 +58,7 @@ import html
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import urllib.parse
@@ -55,7 +66,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "5.5.2"
+VERSION = "6.0.0"
 UTC = dt.timezone.utc
 
 
@@ -106,10 +117,10 @@ class Exchange:
 # timestamp. Every parser reports one for each record it attributes to the
 # repo that carries typing, or that it deliberately drops as machine text
 # (a canned prompt, a button click, a notification), so run() can tell a
-# record the store lost (keep the page's copy) from one the store still has
-# (the store's reading wins, purging stale page copies). Tool plumbing that
-# carries no typing is never a holding: it was never rendered, so it must
-# never purge a page copy that merely shares its millisecond.
+# record the store lost (keep the ledger's copy) from one the store still
+# has (the store's reading wins, purging stale ledger copies). Tool plumbing
+# that carries no typing is never a holding: it was never rendered, so it
+# must never purge a ledger copy that merely shares its millisecond.
 Holding = tuple[str, dt.datetime]
 
 
@@ -281,6 +292,31 @@ def repo_remote(repo: Path) -> str:
     return home
 
 
+def project_name(repo: Path, remote: str) -> str:
+    """The repo's project name: the last segment of the path of its public
+    home (remote, as repo_remote found it), spelled as the URL spells it,
+    or, when it has no public home, its checkout directory's name. A
+    default clone names the directory after the repository, so the two
+    agree until a directory is renamed; then, while there is a public home,
+    the directory's name never matters. A home whose path names no
+    repository (no path at all, or one ending in "/", as an origin URL
+    ending in "//" or "/.git" leaves it) is refused, as configuration
+    faults are."""
+    if remote == "":
+        return repo.name
+    name = urllib.parse.urlsplit(remote).path.rsplit("/", 1)[-1]
+    if name == "":
+        # TODO: Says the public home sourcery read from the origin remote
+        # (named, as sourcery read it) names no repository, naming this
+        # checkout, and to set origin's URL to the repository's home, then
+        # rerun.
+        raise UserError(
+            f"Sedes publica ex remoto 'origin' lecta nullum repositorium nominat: {remote!r} ({repo})\n"
+            "URL ipsius 'origin' ad sedem repositorii constitue, deinde iterum curre."
+        )
+    return name
+
+
 def env_paths(env: Mapping[str, str], key: str, defaults: Iterable[Path]) -> tuple[Path, ...]:
     raw = env.get(key)
     if raw is None:
@@ -422,10 +458,29 @@ def decode_file_uri(value: str) -> str | None:
     return path
 
 
-def under_dir(value: Any, root: Path) -> bool:
+def under_dir(value: Any, root: Path, source: Path) -> bool:
+    """Whether the path a record of the transcript at source names lies
+    under root."""
     if not isinstance(value, str) or value == "":
         return False
-    return Path(value).expanduser().resolve().is_relative_to(root)
+    path = Path(value).expanduser()
+    # On macOS, /home is an automount point, not a directory of this
+    # machine's own: resolving a path under it (the resolve() below) asks the
+    # automounter, which can hang for minutes. A path there comes from
+    # another machine's transcript, such as a Claude cloud workspace's, whose
+    # checkouts live under its own /home, so it is refused before anything
+    # resolves it.
+    if sys.platform == "darwin" and path.is_relative_to("/home"):
+        # TODO: Says this transcript came from another machine (for example
+        # a Claude cloud workspace), naming it and the path under /home it
+        # names; its directories must first be rewritten to this machine's
+        # checkout of the project, then rerun.
+        raise UserError(
+            f"Transcriptum ex alia machina venit (exempli gratia ex spatio operis Claude in nube): {source}\n"
+            f"Via {value} sub /home iacet. Directoria transcripti prius ad exemplar incepti in hac machina "
+            "rescribe, deinde iterum curre."
+        )
+    return path.resolve().is_relative_to(root)
 
 
 # Jargon: to "tally" is to count the lines a recorded edit added and deleted;
@@ -493,9 +548,14 @@ CLAUDE_HUMAN_ORIGINS = frozenset({"human"})
 CLAUDE_MACHINE_ORIGINS = frozenset({"task-notification", "peer"})
 
 
-def claude_origin_is_machine(record: Mapping[str, Any], path: Path, line_number: int) -> bool:
+def claude_origin_kind(record: Mapping[str, Any]) -> Any:
+    """The origin kind a record states, as stated; None when it states none."""
     origin = record.get("origin")
-    kind = origin.get("kind") if isinstance(origin, dict) else None
+    return origin.get("kind") if isinstance(origin, dict) else None
+
+
+def claude_origin_is_machine(record: Mapping[str, Any], path: Path, line_number: int) -> bool:
+    kind = claude_origin_kind(record)
     if kind is None or kind in CLAUDE_HUMAN_ORIGINS:
         return False
     if kind in CLAUDE_MACHINE_ORIGINS:
@@ -731,7 +791,7 @@ def claude_tally(record: Mapping[str, Any], repo: Path, path: Path, line_number:
     edits (their toolUseResult is the denial string, and nothing was
     written)."""
     result = record.get("toolUseResult")
-    if not isinstance(result, dict) or not under_dir(result.get("filePath"), repo):
+    if not isinstance(result, dict) or not under_dir(result.get("filePath"), repo, path):
         return (0, 0)
     hunks = result.get("structuredPatch") or []
     lines = [line for hunk in hunks for line in hunk.get("lines") or []]
@@ -790,20 +850,24 @@ def claude_exchanges(
     # already-delivered queued prompts again under the same source_uuids.
     # Every record that reaches the cwd check enters `first_delivery`, which
     # maps each (session, delivery key) to the line number of the first such
-    # record to carry it and whether that record is attributed to this repo
-    # (by cwd). A redelivery attributed to this repo whose first delivery is
-    # not is refused right after that check, whatever its origin or content,
-    # since which page it belongs on is undecided. `delivered` maps each
-    # (session, delivery key) to the text and images of its first delivery
-    # among the user-role records attributed to this repo that are neither
-    # of machine origin nor local-command output, and only among those
-    # records is a redelivery recognized: the human typed each prompt once,
-    # so such a redelivery is no new prompt, and one carrying other text or
-    # images than the first is refused. A redelivery whose earlier
-    # deliveries attributed to this repo were all of machine origin is
-    # therefore judged as a first delivery would be.
+    # record to carry it, whether that record is attributed to this repo
+    # (by cwd), and the origin kind it states (see claude_origin_kind). A
+    # redelivery attributed to this repo is refused right after that check,
+    # whatever its content, when its first delivery is not attributed to
+    # this repo, whatever either one's origin, since which page it belongs
+    # on is undecided; or when it states another origin kind than its first
+    # delivery, since which origin to believe is undecided. `delivered` maps
+    # each (session, delivery key) to the text and images of its first
+    # delivery among the user-role records attributed to this repo that are
+    # neither of machine origin nor local-command output, and only among
+    # those records is a redelivery recognized: the human typed each prompt
+    # once, so such a redelivery is no new prompt, and one carrying other
+    # text or images than the first is refused. A redelivery that is not
+    # refused states its first delivery's origin kind, so it is of machine
+    # origin exactly when its first delivery is: held as machine text like
+    # its first, or else judged against its first.
     delivered: dict[tuple[str, str | int], tuple[str, tuple[str, ...]]] = {}
-    first_delivery: dict[tuple[str, str | int], tuple[int, bool]] = {}
+    first_delivery: dict[tuple[str, str | int], tuple[int, bool, Any]] = {}
     # Sessions whose most recently emitted message is a recovered slash
     # command, mapped to that record's promptId, so a local-command-stdout
     # record can find and unsend its paired command.
@@ -844,20 +908,41 @@ def claude_exchanges(
         # files. Read alone, a file's registrations go unheard.
         session_file(session, path, line_number, record.get("timestamp"))
         delivery = (session, claude_delivery_key(attachment, path, line_number))
-        inside = under_dir(record.get("cwd"), repo)
-        first_line, first_inside = first_delivery.setdefault(delivery, (line_number, inside))
+        # The fields that say who sent the record: a queued prompt's
+        # attachment, or the record itself.
+        typed_source = attachment if attachment is not None else record
+        kind = claude_origin_kind(typed_source)
+        inside = under_dir(record.get("cwd"), repo, path)
+        first_line, first_inside, first_kind = first_delivery.setdefault(delivery, (line_number, inside, kind))
         if not inside:
             continue
         if not first_inside:
-            # TODO: Says a queued prompt was delivered again with its cwd
-            # inside this project after its first delivery, in the same
-            # file and session, had its cwd outside it, citing the first
-            # delivery and then this one, so which page should show the
-            # prompt is undecided and claude_exchanges needs updating.
+            # TODO: Says a record was delivered again with its cwd inside
+            # this project after its first delivery, in the same file and
+            # session, had its cwd outside it, whatever the record's origin
+            # (the human's, another agent's, a background task's, or none
+            # stated) and whatever it carries (words, images, harness text,
+            # or nothing), citing the first delivery and then this one, so
+            # which page should show the record is undecided and
+            # claude_exchanges needs updating.
             raise UserError(
-                "Rogatio primum extra inceptum, deinde intra tradita est:\n"
+                "Recordum primum extra inceptum, deinde intra traditum est, quacumque origine, quidquid fert:\n"
                 f"  {path}:{first_line}\n  {path}:{line_number}\n"
-                "Ad quam paginam rogatio pertineat nondum decretum est; claude_exchanges renovandum est."
+                "Ad quam paginam recordum pertineat nondum decretum est; claude_exchanges renovandum est."
+            )
+        if kind != first_kind:
+            # TODO: Says a record was delivered again inside this project,
+            # in the same file and session as its first delivery, stating
+            # another origin kind than its first delivery did (the human's,
+            # another agent's, a background task's, or none), naming both
+            # kinds and citing the first delivery and then this one;
+            # sourcery does not decide which origin to believe, so the case
+            # is to be examined and claude_exchanges updated.
+            raise UserError(
+                f"Recordum iterum traditum aliam originem fert quam primum: {first_kind!r}, deinde {kind!r}:\n"
+                f"  {path}:{first_line}\n  {path}:{line_number}\n"
+                "Utri originae credendum sit sourcery non decernit: casus inspiciendus, "
+                "claude_exchanges renovandum est."
             )
         if "timestamp" not in record:
             # TODO: Says this record has no timestamp.
@@ -881,7 +966,6 @@ def claude_exchanges(
             tallies[session] = (added + grew[0], deleted + grew[1])
         is_command = False
         if role == "user":
-            typed_source = attachment if attachment is not None else record
             content = attachment.get("prompt") if attachment is not None else message.get("content")
             if attachment is None and isinstance(content, str) and content.startswith(
                 "<local-command-stdout>"
@@ -949,7 +1033,7 @@ def claude_exchanges(
             if text == "" and images == () and not any(b.picked for b in ballots):
                 continue  # tool plumbing with no typing: never rendered, so no holding
             holdings.add(("Claude Code", timestamp))
-            # A redelivery stays held, so a page's stale copy of it gets
+            # A redelivery stays held, so a ledger's stale copy of it gets
             # purged, but is no new prompt: the work pending around it rides
             # the exchange in flight.
             if redelivery:
@@ -1137,12 +1221,12 @@ def codex_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holding
                 # successful application is tallied.
                 if kind == "patch_apply_end" and payload.get("success"):
                     for changed, change in (payload.get("changes") or {}).items():
-                        if under_dir(changed, repo):
+                        if under_dir(changed, repo, path):
                             grew = codex_tally(change, path, line_number)
                             tally = (tally[0] + grew[0], tally[1] + grew[1])
                 if kind not in {"user_message", "agent_message"}:
                     continue
-                if not under_dir(cwd, repo):
+                if not under_dir(cwd, repo, path):
                     continue
                 text = payload.get("message")
                 if not isinstance(text, str):
@@ -1316,7 +1400,7 @@ def vscode_state(path: Path) -> dict[str, Any]:
 def vscode_exchanges(
     path: Path, workspace: tuple[Path, ...], repo: Path
 ) -> tuple[list[Exchange], set[Holding]]:
-    inside = tuple(root for root in workspace if under_dir(str(root), repo))
+    inside = tuple(root for root in workspace if under_dir(str(root), repo, path))
     if inside == ():
         return [], set()
     if len(inside) != len(workspace):
@@ -1833,7 +1917,7 @@ def antigravity_parse(path: Path, repo: Path, key: bytes) -> tuple[list[Exchange
     if len(workspaces) > 1:
         raise ValueError(f"workspaces {sorted(workspaces)}")
     folder = decode_file_uri(next(iter(workspaces))) if workspaces else None
-    if folder is None or not under_dir(folder, repo):
+    if folder is None or not under_dir(folder, repo, path):
         return [], set()
     messages: list[Message] = []
     holdings: set[Holding] = set()
@@ -1892,6 +1976,11 @@ def antigravity_parse(path: Path, repo: Path, key: bytes) -> tuple[list[Exchange
     return paired("Antigravity", session, messages, path, (pending, 0, 0)), holdings
 
 
+def chronology(exchange: Exchange) -> tuple[dt.datetime, str, str, str]:
+    """The page's order: by time, ties broken by provider, session, prompt."""
+    return (exchange.timestamp, exchange.provider, exchange.session, exchange.prompt)
+
+
 def weave(exchanges: Iterable[Exchange]) -> list[Exchange]:
     """Merge all providers into one chronology, collapsing exact duplicates
     (resumed or forked sessions replay identical records into new files)."""
@@ -1899,7 +1988,7 @@ def weave(exchanges: Iterable[Exchange]) -> list[Exchange]:
     for exchange in exchanges:
         identity = dataclasses.replace(exchange, session="", source=Path())
         unique.setdefault(identity, exchange)
-    return sorted(unique.values(), key=lambda e: (e.timestamp, e.provider, e.session, e.prompt))
+    return sorted(unique.values(), key=chronology)
 
 
 def require_dir(root: Path) -> bool:
@@ -1988,6 +2077,59 @@ def collect(repo: Path, roots: Roots) -> tuple[list[Exchange], set[Holding]]:
         for path in sorted(p for p in conversations.glob("*.pb") if p.is_file()):
             gather(antigravity_exchanges(path, repo, antigravity_key()))
     return exchanges, holdings
+
+
+# --------------------------------------------------------------------- humans
+
+# A "login" names a human: the GitHub account sourcery credits each prompt
+# to, and names each human's ledger by. It is the login the gh command-line
+# tool saved when the human signed in, lowercased: GitHub ignores case in
+# logins, and so do macOS file names, so a human's ledger must have one file
+# name whatever capitals they registered with. A GitHub login is letters,
+# digits, and single hyphens, 1 to 39 characters, no hyphen at either end.
+GITHUB_LOGIN = re.compile(r"(?=.{1,39}\Z)[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*")
+# gh's saved login for github.com, read from its own configuration: no
+# network, unlike asking the GitHub API who is signed in.
+GH_USER = ("gh", "config", "get", "user", "-h", "github.com")
+
+
+def gh_user() -> subprocess.CompletedProcess[str]:
+    """The one call sourcery makes to gh, and the seam quals replace: they
+    never call the real gh."""
+    return subprocess.run(GH_USER, capture_output=True, encoding="utf-8", errors="replace", check=False)
+
+
+def login_error(found: str) -> UserError:
+    # TODO: Says the GitHub login the gh command-line tool saved could not
+    # be read, naming the command asked and what came back instead, and to
+    # run "gh auth login", then rerun.
+    return UserError(
+        f"Nomen GitHub a gh servatum legi non potest: {' '.join(GH_USER)}\n{found}\n"
+        "Curre 'gh auth login', deinde iterum curre."
+    )
+
+
+def github_login() -> str:
+    """The runner's login. gh missing, failing (as when no one is signed
+    in), or printing anything but one GitHub login is refused."""
+    try:
+        done = gh_user()
+    except OSError as exc:  # gh not installed, or not runnable
+        raise login_error(str(exc)) from exc
+    login = done.stdout.removesuffix("\n")
+    if done.returncode != 0 or not GITHUB_LOGIN.fullmatch(login):
+        raise login_error(f"exit {done.returncode}, stdout {done.stdout!r}, stderr {done.stderr!r}")
+    return login.lower()
+
+
+# A "display name" is what the page calls a human: the name this table
+# gives their login, or else the login itself. The table is an expedient
+# stand-in, approved by the human, for names humans would choose themselves.
+DISPLAY_NAMES = {"dreeves": "dreev", "mister-person": "logan"}
+
+
+def display_name(login: str) -> str:
+    return DISPLAY_NAMES.get(login, login)
 
 
 # ------------------------------------------------------------------ rendering
@@ -2360,6 +2502,8 @@ summary:hover { color: var(--muted); }
    color, so the reading survives any color deficiency. */
 .chip { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 2px; background: var(--provider); }
 .agent { color: var(--muted); font-weight: 600; }
+/* The human's display name wears the agent name's ink, not its weight. */
+.human { color: var(--muted); }
 /* INVIOLABLE: machine-generated prose renders only inside a .machine
    container, in the phosphor-terminal style — monospace green on
    near-black, in both color schemes — for maximal distinction from the
@@ -2572,17 +2716,24 @@ def minimap(exchanges: Sequence[Exchange], locals_: Sequence[dt.datetime]) -> st
 PROVIDER_SLUGS = {
     "Claude Code": "claude", "Codex": "codex", "Copilot Chat": "copilot", "Antigravity": "antigravity",
     # claude.ai chats have no store parser: their exchanges enter a page only
-    # by being seeded into its snapshot from outside sourcery, and every run
+    # by being seeded into a ledger from outside sourcery, and every run
     # keeps them, since no store holds them. They wear Claude Code's color.
     "claude.ai": "claudeai",
 }
-# unrender.py reads a page's provider back from its slug, so no two
+# page_credits reads a page's provider back from its slug, so no two
 # providers may share one.
 assert len(set(PROVIDER_SLUGS.values())) == len(PROVIDER_SLUGS)
 
 
-def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
-    assert exchanges, "render() requires at least one exchange"
+def render(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = "") -> str:
+    """The page for every row of the ledgers, given as login to rows, all
+    in one chronology."""
+    rows = sorted(
+        ((login, exchange) for login, exchanges in ledgers.items() for exchange in exchanges),
+        key=lambda row: chronology(row[1]),
+    )
+    assert rows, "render() requires at least one exchange"
+    exchanges = [exchange for _, exchange in rows]
     locals_ = [e.timestamp.astimezone() for e in exchanges]
     first, last = locals_[0].date().isoformat(), locals_[-1].date().isoformat()
     count = len(exchanges)
@@ -2597,7 +2748,7 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
     chunks: list[str] = []
     days: list[tuple[str, str]] = []  # (day, header text), one per day header
     current_day = None
-    for number, (exchange, local) in enumerate(zip(exchanges, locals_), start=1):
+    for number, ((login, exchange), local) in enumerate(zip(rows, locals_), start=1):
         day = local.date().isoformat()
         if day != current_day:
             weekday = WEEKDAYS[local.date().weekday()]
@@ -2640,6 +2791,7 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
         summary = (
             f'<a class="anchor" href="#p{number}">'
             f'<time datetime="{exchange.timestamp.isoformat()}">{local.strftime("%H:%M")}</time></a>'
+            f' <span class="human">{html.escape(display_name(login))}</span>'
             f' <span class="chip"></span>'
             f' <span class="agent">{html.escape(exchange.provider)}</span>{model}{effort}{thought}'
         )
@@ -2665,7 +2817,8 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
             else ""
         )
         chunks.append(
-            f'<article class="exchange {PROVIDER_SLUGS[exchange.provider]}" id="p{number}">'
+            f'<article class="exchange {PROVIDER_SLUGS[exchange.provider]}" id="p{number}"'
+            f' data-login="{html.escape(login, quote=True)}">'
             f"{diffstat(exchange.added, exchange.deleted)}{ballots}{prompt}{attachments}\n"
             f"<details>\n<summary>{summary}</summary>\n{reply}\n</details>\n"
             "</article>"
@@ -2698,12 +2851,13 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
     # The warning comment must follow the doctype — a comment before it
     # would throw browsers into quirks mode.
     # TODO: Says this file is generated by sourcery and never hand-edited;
-    # it carries its own memory of the dialog (the snapshot at its end),
-    # which the next generation reads back and then overwrites, so don't
-    # edit it in place.
+    # the memory of the dialog lives in the ledgers beside it
+    # (sourcery.LOGIN.jsonl), from which the next generation renders it
+    # anew, overwriting it, so don't edit it in place.
     return f"""<!doctype html>
 <!-- Fasciculus hic a sourcery generatus est, numquam manu scriptus.
-     Memoriam dialogi ipse fert, quam generatio proxima legit atque
+     Memoria dialogi in tabulis iuxta positis (sourcery.LOGIN.jsonl)
+     servatur, ex quibus generatio proxima eum denuo reddit atque
      superscribit. Noli emendare. -->
 <html lang="und">
 <head>
@@ -2731,27 +2885,29 @@ def render(repo: Path, exchanges: Sequence[Exchange], remote: str = "") -> str:
 {body}
 </main>
 <script>{JS}</script>
-{SNAPSHOT_OPEN}
-{snapshot(repo, exchanges)}
-</script>
 </body>
 </html>
 """
 
 
-# ------------------------------------------------------------------ snapshot
+# ------------------------------------------------------------------- ledgers
 
 
-# The page's own memory: every exchange it renders, embedded as JSON so the
-# next generation can read it back. Stores get pruned and machines change;
-# the page is then the only copy, and nothing it once rendered is lost.
-SNAPSHOT_OPEN = '<script type="application/json" id="snapshot">'
-SNAPSHOT = re.compile(re.escape(SNAPSHOT_OPEN) + r"\n(.*?)\n</script>", re.DOTALL)
+# A "ledger" is one human's memory of the dialog: every exchange of theirs
+# the page shows, kept beside the page in sourcery.LOGIN.jsonl. Stores get
+# pruned and machines change; the ledger, committed with the page, is then
+# the only copy, and nothing it once held is lost. Its first line is a
+# header naming the ledger format (LEDGER_FORMAT) and the repo, by its
+# project name; every further line is one exchange in freeze() form. One
+# exchange per line, so a git conflict in a ledger is resolved by keeping
+# both sides' lines; where both sides changed one row, that leaves two
+# readings of one prompt (see check_readings). A run rewrites the runner's
+# own ledger and no other.
 
 
 def freeze(exchange: Exchange) -> dict[str, Any]:
     """The exchange as JSON-ready fields, minus the store path: private to
-    this machine and irrelevant to the merge, so it never reaches the page."""
+    this machine and irrelevant to the merge, so it never reaches a ledger."""
     frozen = dataclasses.asdict(exchange)
     del frozen["source"]
     frozen["timestamp"] = exchange.timestamp.isoformat()
@@ -2760,7 +2916,7 @@ def freeze(exchange: Exchange) -> dict[str, Any]:
 
 # What a frozen exchange must look like, field by field: the JSON type of
 # every Exchange field but the omitted source. A missing or extra field, or
-# a value of another type, means a snapshot another schema wrote or a hand
+# a value of another type, means a ledger row another schema wrote or a hand
 # edit — never thawed into a guess.
 SHAPE: dict[str, type | tuple[type, ...]] = {
     "timestamp": str, "provider": str, "model": str, "session": str, "prompt": str,
@@ -2775,9 +2931,9 @@ def shaped(value: Any, kind: type | tuple[type, ...]) -> bool:
 
 
 def thaw(frozen: Mapping[str, Any], source: Path) -> Exchange:
-    """Inverse of freeze; the page is the source. The field set and every
-    field's type and range are checked, so a snapshot another schema wrote,
-    or one edited by hand, fails loudly instead of thawing into nonsense."""
+    """Inverse of freeze; the ledger is the source. The field set and every
+    field's type and range are checked, so a row another schema wrote, or
+    one edited by hand, fails loudly instead of thawing into nonsense."""
     fields = dict(frozen)
     sound = (
         set(fields) == set(SHAPE)
@@ -2807,25 +2963,183 @@ def thaw(frozen: Mapping[str, Any], source: Path) -> Exchange:
     return Exchange(source=source, **fields)
 
 
-def snapshot(repo: Path, exchanges: Sequence[Exchange]) -> str:
-    """One exchange per line, so a refresh diffs as appended lines. Every "<"
-    is escaped: the block can then neither end its script element early nor
-    open a comment inside it, whatever a prompt or reply contains."""
-    rows = ",\n".join(json.dumps(freeze(exchange), ensure_ascii=False) for exchange in exchanges)
-    # The version is provenance for a human reading the page; thaw checks the
-    # schema itself, so no version is ever refused or trusted on its own.
-    text = f'{{"sourcery": {json.dumps(VERSION)}, "repo": {json.dumps(repo.name)}, "exchanges": [\n{rows}\n]}}'
-    return text.replace("<", "\\u003c")
+def ledger_path(output: Path, login: str) -> Path:
+    return output.parent / f"sourcery.{login}.jsonl"
 
 
-def inherit(output: Path, repo: Path) -> list[Exchange]:
-    """Everything a previous generation of this page rendered, read back from
-    its snapshot; nothing when there is no page yet."""
-    if not output.exists():
-        return []
+# The "ledger format": the number a ledger's header names it by, which
+# changes only when the ledger format itself does (the header's keys, or
+# what a row holds), never with a sourcery release. Machines running two
+# releases thus write one header, so a git union merge of their ledgers
+# never doubles line 1 for the release alone. read_ledger reads this format
+# and refuses any other, saying that another release wrote it: a later
+# format keeps the header's "ledger" key, so that a release still reading
+# this one can recognize what it cannot read.
+LEDGER_FORMAT = 1
+# What a ledger's header must look like: each key's JSON type.
+HEADER_SHAPE = {"ledger": "int", "repo": "str"}
+
+
+def ledger_text(project: str, exchanges: Sequence[Exchange]) -> str:
+    """A ledger's whole text: the header line, naming the ledger format
+    and the project, then one exchange per line."""
+    lines = [{"ledger": LEDGER_FORMAT, "repo": project}, *map(freeze, exchanges)]
+    return "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines)
+
+
+def json_object(line: str) -> dict[str, Any]:
+    value = json.loads(line)
+    if not isinstance(value, dict):
+        raise ValueError(f"{type(value).__name__} != dict")
+    return value
+
+
+def read_ledger(path: Path, repo: Path, remote: str) -> dict[Exchange, str]:
+    """A ledger's exchanges, every line checked: a damaged line, a header
+    naming a ledger format other than LEDGER_FORMAT, or a header
+    naming a project other than the checkout's (repo's project name, given
+    its public home, remote, as repo_remote found it), fails loudly instead
+    of thawing into a guess. They are woven, as a run weaves the runner's
+    own, so a row a merge left doubled shows once whoever runs. Each maps to
+    its "citation", where a refusal finds it: the ledger's path and the
+    number of the first line holding it."""
+    project = project_name(repo, remote)
     try:
-        # Bytes, not text: universal newlines would rewrite a carriage return
-        # someone typed, and the page must give back exactly what it holds.
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # TODO: Says this ledger could not be read as a UTF-8 file, gives
+        # the reason, and that nothing was written.
+        raise UserError(f"Tabula legi non potest: {path}\n{exc}\nNihil scriptum est.") from exc
+    # Lines end at "\n" alone: JSON escapes it inside strings, but leaves
+    # other characters str.splitlines would break at (U+2028, say) as typed.
+    header, *rows = text.removesuffix("\n").split("\n")
+    number = 1  # the line being read, cited if it fails
+    try:
+        head = json_object(header)
+        form = ({key: type(value).__name__ for key, value in head.items()}, head.get("ledger"))
+        if form != (HEADER_SHAPE, LEDGER_FORMAT):
+            raise ValueError(f"{form} != {(HEADER_SHAPE, LEDGER_FORMAT)}")
+        cited: dict[Exchange, str] = {}
+        for number, row in enumerate(rows, start=2):
+            cited.setdefault(thaw(json_object(row), path), f"{path}:{number}")
+    except (ValueError, UserError) as exc:
+        # TODO: Says this ledger cannot be read at this line, with the
+        # reason: a ledger is a header line, then one exchange per line. If
+        # the header line names a ledger format other than LEDGER_FORMAT
+        # (named), another sourcery release wrote the ledger: run a release
+        # that reads that format, then rerun. If it holds git conflict
+        # markers, resolve the conflict by keeping both sides' lines (the
+        # header line once), then rerun. With the line
+        # "sourcery.*.jsonl merge=union" added to the attributes file git
+        # reads for all of the human's repositories (normally
+        # ~/.config/git/attributes: per gitattributes(5), the file
+        # core.attributesFile names, by default
+        # $XDG_CONFIG_HOME/git/attributes, or ~/.config/git/attributes when
+        # XDG_CONFIG_HOME is unset or empty), git keeps both sides' lines by
+        # itself; but such a merge can leave the header line twice: keep on
+        # the first line the one naming this project (named), delete the
+        # other, then rerun. Nothing was written.
+        raise UserError(
+            f"Tabula legi non potest: {path}:{number}\n{exc}\n"
+            "Tabula est linea capitis, deinde una rogatio per lineam. "
+            f"Si linea capitis formam tabulae aliam quam {LEDGER_FORMAT} nominat, tabulam alia editio sourcery "
+            "scripsit: curre editionem quae illam formam legit, deinde iterum curre. Si signa conflictus git fert, "
+            "conflictum solve utriusque partis lineas servando (lineam capitis semel), deinde iterum curre.\n"
+            "Linea 'sourcery.*.jsonl merge=union' in fasciculo attributorum quem git omnibus repositoriis "
+            "tuis legit (plerumque ~/.config/git/attributes) addita, git sponte utriusque partis lineas "
+            f"servat; sed fusio talis lineam capitis bis relinquere potest: eam quae {project!r} nominat in "
+            "prima linea serva, alteram dele, deinde iterum curre.\n"
+            "Nihil scriptum est."
+        ) from exc
+    if head["repo"] != project:
+        # TODO: Says this ledger belongs to another project, naming the
+        # project its first line names, then this checkout's project and
+        # directory, then the ledger; then names this checkout's public
+        # home as sourcery found it from the origin remote ('' when it found
+        # none); nothing was written. A project is named by the last part
+        # of the path of its public home's URL (the origin remote's), or,
+        # when it has no public home, by its directory's name. When a
+        # repository is renamed on GitHub, sourcery refuses its ledgers
+        # until each ledger's first line names the new repository. If the
+        # ledger is this project's: if the repository is now named as this
+        # checkout names it (named), write that name in place of the
+        # ledger's (named) in each ledger's first line; if not, fix this
+        # checkout: set origin's URL to the repository's home, or, when it
+        # has no public home, rename the directory as the ledger names the
+        # project (named). If the ledger is in fact another project's,
+        # choose another output path. Then rerun.
+        raise UserError(
+            f"Tabula ad aliud inceptum pertinet: {head['repo']!r}, non {project!r} ({repo}): {path}\n"
+            f"Sedes publica huius directorii (ex remoto 'origin'): {remote!r}\n"
+            "Inceptum nominatur ultima parte viae URL sedis suae publicae (remoti 'origin'), "
+            "aut, si sedem publicam non habet, nomine directorii sui.\n"
+            "Repositorio in GitHub renominato, sourcery tabulas eius recusat donec prima linea "
+            "cuiusque tabulae novum repositorium nominet.\n"
+            f"Si tabula ad hoc inceptum pertinet: si repositorium nunc {project!r} nominatur, in prima "
+            f"linea cuiusque tabulae pro {head['repo']!r} scribe {project!r}; sin minus, hic corrige: "
+            "URL ipsius 'origin' ad sedem repositorii constitue, aut, si sedem publicam non habet, "
+            f"directorium renomina {head['repo']!r}. Si vero re vera ad aliud inceptum pertinet, "
+            "aliam viam output elige.\n"
+            "Deinde iterum curre.\nNihil scriptum est."
+        )
+    return {exchange: cited[exchange] for exchange in weave(cited)}
+
+
+# Any file named like a ledger, ignoring case. read_ledgers refuses one whose
+# name is not exactly sourcery.LOGIN.jsonl for a lowercase login, so no
+# capitals can split one human's ledger in two (see GITHUB_LOGIN).
+LEDGER_NAME = re.compile(r"sourcery\.(.*)\.jsonl", re.IGNORECASE | re.DOTALL)
+
+
+def read_ledgers(
+    output: Path, repo: Path, remote: str
+) -> tuple[dict[str, list[Exchange]], dict[Exchange, str]]:
+    """Every ledger beside the output page, by login, in login order, and
+    every row's citation (see read_ledger)."""
+    ledgers: dict[str, list[Exchange]] = {}
+    citations: dict[Exchange, str] = {}
+    for path in sorted(output.parent.glob("*")):
+        named = LEDGER_NAME.fullmatch(path.name)
+        if named is None:
+            continue  # no ledger
+        login = named[1]
+        if path.name != ledger_path(output, login.lower()).name or not GITHUB_LOGIN.fullmatch(login):
+            # TODO: Says this file is named like a ledger but is none: a
+            # ledger's name is sourcery.LOGIN.jsonl, all lowercase, LOGIN
+            # being a GitHub login; rename the file so, or move it away, then
+            # rerun. Nothing was written.
+            raise UserError(
+                f"Fasciculus nomen tabulae imitatur, sed tabula non est: {path}\n"
+                "Nomen tabulae est sourcery.LOGIN.jsonl, totum minusculis litteris, LOGIN nomen GitHub. "
+                "Fasciculum renomina vel remove, deinde iterum curre.\nNihil scriptum est."
+            )
+        cited = read_ledger(path, repo, remote)
+        ledgers[login] = list(cited)
+        citations.update(cited)
+    return ledgers, citations
+
+
+# A "credit" records, on the page, whose ledger holds each row it shows:
+# each article carries the login in a data-login attribute, beside the row's
+# provider (the article's class) and time (its summary's time element), so a
+# run can check the page against the ledgers without reading display names.
+# Typed text is escaped on the page, so none can forge a credit.
+PROVIDER_NAMES = {slug: name for name, slug in PROVIDER_SLUGS.items()}
+CREDIT = re.compile(
+    rf'<article class="exchange ({"|".join(map(re.escape, PROVIDER_NAMES))})" id="p[0-9]+"'
+    r' data-login="([^"]*)">.*?<time datetime="([^"]*)">',
+    re.DOTALL,
+)
+
+
+def page_credits(output: Path) -> set[tuple[str, Holding]]:
+    """Every row the existing page credits, as its login and holding;
+    nothing when there is no page yet. A page that does not credit every
+    row it shows cannot be checked against the ledgers and is refused: one
+    sourcery 5 wrote, or no sourcery page at all."""
+    if not output.exists():
+        return set()
+    try:
         page = output.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         # TODO: Says the existing output could not be read as a UTF-8 file
@@ -2834,41 +3148,159 @@ def inherit(output: Path, repo: Path) -> list[Exchange]:
         raise UserError(
             f"Pagina exsistens legi non potest: {output}\n{exc}\nNihil scriptum est."
         ) from exc
-    found = SNAPSHOT.findall(page)
-    if len(found) != 1:
-        # TODO: Says the existing output carries no snapshot (or several), so
-        # nothing can be merged into it: either it predates snapshots — run
-        # unrender.py on it first — or it is not a sourcery page — choose
-        # another output path. Nothing was written.
+    credits = CREDIT.findall(page)
+    if not 0 < len(credits) == page.count("<article "):
+        # TODO: Says the existing output was not written by sourcery 6: it
+        # does not credit every prompt it shows to a ledger, so it cannot be
+        # checked against the ledgers. A page sourcery 5 wrote, carrying a
+        # snapshot, is first imported by adopt.py, run as shown, LOGIN being
+        # the GitHub login of the human whose sourcery 5 wrote the page,
+        # perhaps not the human running sourcery now; for any other file,
+        # choose another output path. Nothing was written.
         raise UserError(
-            f"Pagina exsistens memoriam (snapshot) non fert: {output}\n"
-            "Aut pagina vetus est — curre prius unrender.py — aut pagina sourcery non est: "
-            "elige aliam viam output.\nNihil scriptum est."
+            f"Pagina exsistens a sourcery 6 scripta non est: {output}\n"
+            "Si pagina sourcery 5 est (memoriam snapshot fert), curre prius:\n"
+            f"  python3 adopt.py REPODIR {output} {output} LOGIN\n"
+            "LOGIN est nomen GitHub hominis cuius sourcery 5 paginam scripsit, fortasse non tuum.\n"
+            "Aliter elige aliam viam output.\nNihil scriptum est."
         )
-    try:
-        data = json.loads(found[0])
-        name = data["repo"]
-        exchanges = [thaw(frozen, output) for frozen in data["exchanges"]]
-    except (ValueError, KeyError, TypeError) as exc:
-        # TODO: Says the page's snapshot is malformed and nothing was written.
-        raise UserError(f"Memoria paginae corrupta est: {output}\nNihil scriptum est.") from exc
-    if name != repo.name:
-        # TODO: Says the page's snapshot belongs to another project, naming
-        # both, and nothing was written.
+    return {(login, (PROVIDER_NAMES[slug], parse_time(when))) for slug, login, when in credits}
+
+
+def listed(output: Path, credits: Iterable[tuple[str, Holding]]) -> str:
+    """Prompts for a refusal to list, given as login and holding: under
+    each login's ledger path and its count of them, each prompt by agent
+    and time, one per line."""
+    by_login: dict[str, list[Holding]] = {}
+    for login, held in credits:
+        by_login.setdefault(login, []).append(held)
+    return "".join(
+        f"\n  {ledger_path(output, login)}: {len(helds)}"
+        + "".join(f"\n    {provider} {when.isoformat()}" for provider, when in helds)
+        for login, helds in by_login.items()
+    )
+
+
+def check_ledgers(
+    output: Path,
+    login: str,
+    ledgers: Mapping[str, Sequence[Exchange]],
+    credits: set[tuple[str, Holding]],
+    holdings: set[Holding],
+) -> None:
+    """Refuse, before anything is written, ledgers that disagree with the
+    page, with each other, or with the runner's stores. Each prompt belongs
+    to one human, so each holding belongs to one ledger."""
+    held = {other: {holding(exchange) for exchange in rows} for other, rows in ledgers.items()}
+    lacking = sorted(credit for credit in credits if credit[1] not in held.get(credit[0], set()))
+    if lacking:
+        # TODO: Says the existing page shows this many prompts that the
+        # ledgers it credits them to do not hold, listing under each such
+        # ledger how many and each prompt by agent and time. Such a ledger
+        # may be uncommitted, deleted, or renamed: restore it, then rerun;
+        # git brings back a deleted one: "git log --diff-filter=D -- PATH"
+        # names the commit REV that deleted it, "git checkout REV^ -- PATH"
+        # restores it. Only if the prompts were removed from their ledger on
+        # purpose: delete the page, then rerun; that drops every credit the
+        # page holds, every human's, so first make sure every other ledger
+        # is whole. Nothing was written.
         raise UserError(
-            f"Memoria paginae ad aliud inceptum pertinet: {name!r}, non {repo.name!r}: {output}\n"
+            f"Pagina exsistens {len(lacking)} rogationes ostendit quas tabulae quibus tribuuntur non tenent:"
+            f"{listed(output, lacking)}\n"
+            "Fortasse tabula non commissa, deleta, vel renominata est: restitue eam, deinde iterum curre. "
+            "Tabulam deletam git restituit: 'git log --diff-filter=D -- VIA' commissum REV nominat quod eam "
+            "delevit, 'git checkout REV^ -- VIA' eam reddit.\n"
+            "Solum si rogationes consulto e tabula sua remotae sunt, paginam dele, deinde iterum curre: "
+            "ita pagina omnes tributiones omnium hominum amittit, ergo prius cave ut ceterae tabulae integrae sint.\n"
             "Nihil scriptum est."
         )
-    return exchanges
+    owners: dict[Holding, str] = {}
+    for other, holds in held.items():
+        for h in sorted(holds):
+            first = owners.setdefault(h, other)
+            if first != other:
+                # TODO: Says one prompt (agent and time) is held by two
+                # ledgers, naming both: each prompt belongs to one human, so
+                # remove it from the ledger it does not belong to, then
+                # rerun. Nothing was written.
+                raise UserError(
+                    f"Rogatio {h[0]} {h[1].isoformat()} in duabus tabulis est:\n"
+                    f"  {ledger_path(output, first)}\n  {ledger_path(output, other)}\n"
+                    "Rogatio unius hominis est: remove eam ex tabula ad quam non pertinet, "
+                    "deinde iterum curre.\nNihil scriptum est."
+                )
+    claimed = sorted((owners[h], h) for h in holdings if owners.get(h, login) != login)
+    if claimed:
+        # TODO: Says this machine's transcript stores hold this many prompts
+        # that other humans' ledgers hold, listing under each such ledger
+        # how many and each prompt by agent and time: each prompt belongs to
+        # one human, so none is credited to the runner (named by login) too.
+        # Perhaps gh is signed in as someone else. Or that human's
+        # transcripts were copied to this machine: remove the copies from
+        # this machine's stores. Or this machine's transcripts reached that
+        # human's machine first, and their ledger holds the prompts wrongly:
+        # remove the copies from their stores and these rows from their
+        # ledger by hand, and delete the page. Then rerun. Nothing was
+        # written.
+        raise UserError(
+            f"Reposita huius machinae {len(claimed)} rogationes tenent quas tabulae aliorum iam tenent:"
+            f"{listed(output, claimed)}\n"
+            f"Rogatio unius hominis est, nec tibi ({login}) quoque tribuitur. Fortasse gh alium hominem nominat. "
+            "Aut transcripta illius huc translata sunt: exemplaria e repositis huius machinae remove. "
+            "Aut transcripta huius machinae prius ad machinam illius pervenerunt, et tabula eius ea perperam "
+            "tenet: exemplaria e repositis eius et has lineas e tabula eius manu remove, paginamque dele. "
+            "Deinde iterum curre.\nNihil scriptum est."
+        )
+
+
+# Two "readings" of one prompt are two rows alike in provider, time,
+# session, and prompt text, but differing in anything else. A ledger comes
+# to hold two when runs on two machines read the prompt's record
+# differently (one while its reply was still arriving, say) and a git merge
+# kept both sides' lines (merge=union does); a run reads two itself when
+# two transcripts of the prompt's session disagree, or when one transcript
+# holds the prompt's record twice and its copies read differently (the
+# first with no reply, say). Exactly identical rows are no two readings:
+# weave collapses them before this check.
+def prompt_key(row: Exchange) -> tuple[str, dt.datetime, str, str]:
+    """What every reading of one prompt shares: its agent, time, session,
+    and words."""
+    return (row.provider, row.timestamp, row.session, row.prompt)
+
+
+def check_readings(
+    ledgers: Mapping[str, Iterable[Exchange]], citations: Mapping[Exchange, str], advice: str
+) -> None:
+    """Refuse, before anything is written, two readings of one prompt among
+    the ledgers' rows, citing each as citations gives it, then giving the
+    advice the caller words to fit where it read the rows."""
+    first: dict[tuple[str, dt.datetime, str, str], Exchange] = {}
+    for rows in ledgers.values():
+        for row in rows:
+            seen = first.setdefault(prompt_key(row), row)
+            if seen != row:
+                # TODO: Says one prompt, named by agent, time, and session,
+                # has two readings (versions), rows alike in those and in
+                # its words but differing otherwise, citing each where it
+                # was read: a ledger's row by the ledger's file and line, a
+                # row read from a transcript, or from the snapshot of a page
+                # sourcery 5 wrote, by that file; then the caller's advice
+                # (see each call). Nothing was written.
+                raise UserError(
+                    f"Rogationis {row.provider} {row.timestamp.isoformat()} (sessio {row.session}) "
+                    f"duae lectiones sunt:\n  {citations[seen]}\n  {citations[row]}\n"
+                    f"{advice}\nNihil scriptum est."
+                )
 
 
 # ----------------------------------------------------------------------- exit
 
 
-# Output is written atomically so a partial document is never left behind.
-# An existing document has already been read back by inherit() by the time
-# this runs — its snapshot is merged into the new page — and is then
-# replaced whole: it is always generated, never hand-edited (the page itself
+# Output (the runner's ledger, then the page) is written atomically so a
+# partial document is never left behind. An existing document has already
+# been read by the time this runs (the ledger's rows merged into its
+# successor, the page checked against the ledgers) and is then replaced
+# whole: the page is always generated, never hand-edited (the page itself
 # opens with a warning comment saying so).
 def write_output(path: Path, page: str) -> None:
     target = path.resolve()
@@ -2913,36 +3345,88 @@ def run(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None)
     try:
         options = parse_args(args)
         repo = canonical_repo(options.repo)
+        remote = repo_remote(repo)
+        project = project_name(repo, remote)
         roots = discover_roots(environment)
+        login = github_login()
         fresh, holdings = collect(repo, roots)
-        inherited = inherit(options.output, repo)
-        # The store is the truth for every record it still holds and the page
-        # for the rest: a page copy of a record the store still has is
-        # dropped (the store's reading wins, so parser fixes purge stale
-        # copies), a page copy of a record the store lost is kept (nothing
-        # rendered is ever lost). Fresh first, so weave keeps the store's copy.
-        kept = [exchange for exchange in inherited if holding(exchange) not in holdings]
-        exchanges = weave(fresh + kept)
-        if exchanges == []:
+        credits = page_credits(options.output)
+        ledgers, citations = read_ledgers(options.output, repo, remote)
+        check_ledgers(options.output, login, ledgers, credits, holdings)
+        # The store is the truth for every record it still holds and the
+        # runner's ledger for the rest: a ledger copy of a record the store
+        # still has is dropped (the store's reading wins, so parser fixes
+        # purge stale copies), a ledger copy of a record the store lost is
+        # kept (nothing rendered is ever lost). Fresh first, so weave keeps
+        # the store's copy. The runner's ledger is absent until their first
+        # run: then it holds nothing.
+        old = ledgers.get(login, [])
+        kept = [exchange for exchange in old if holding(exchange) not in holdings]
+        mine = weave(fresh + kept)
+        ledgers = dict(sorted({**ledgers, login: mine}.items()))
+        # Two readings of one prompt are sought only now, among the rows
+        # this run would write and render: two the runner's ledger held of
+        # a prompt the runner's stores hold were both just replaced by the
+        # stores' reading, so a rerun on the machine whose transcripts hold
+        # the prompt's session heals them. A row read from the stores has no
+        # ledger line yet, so it is cited by its transcript. Two readings
+        # both read from the stores are sought first, among the stores' rows
+        # alone: no ledger line holds either, and no run elsewhere settles
+        # them, so their advice is their own.
+        sources = {exchange: str(exchange.source) for exchange in fresh}
+        # TODO: Says both readings were read from this machine's own
+        # transcripts, which disagree about the prompt, and that if one file
+        # is a stale copy of the other, to move the copy out of the
+        # transcript store, then rerun; if not, as when one file is cited
+        # twice (it holds both readings), sourcery does not decide which
+        # reading to believe: the case is to be examined and the script
+        # updated.
+        check_readings(
+            {login: weave(fresh)},
+            sources,
+            "Ambae lectiones e transcriptis huius machinae lectae sunt, quae de rogatione dissentiunt. "
+            "Si alter fasciculus alterius exemplar obsoletum est, exemplar e reposito transcriptorum alio move, "
+            "deinde iterum curre. Sin minus, ut cum unus fasciculus bis citatur, utri lectioni credendum sit "
+            "sourcery non decernit: casus inspiciendus, scriptum renovandum est.",
+        )
+        # TODO: Says to delete the stale line, then rerun; or to rerun on
+        # the machine whose transcripts hold that session.
+        check_readings(
+            ledgers,
+            {**citations, **sources},
+            "Lineam obsoletam dele, deinde iterum curre; aut iterum curre in machina cuius "
+            "transcripta illam sessionem tenent.",
+        )
+        if not any(ledgers.values()):
             raise no_exchanges_error(repo, roots)
-        write_output(options.output, render(repo, exchanges, repo_remote(repo)))
+        # The page is rendered before anything is written, so a refusal found
+        # while rendering it writes nothing.
+        page = render(repo, ledgers, remote)
+        ledger = ledger_path(options.output, login)
+        write_output(ledger, ledger_text(project, mine))
+        write_output(options.output, page)
         output = options.output.resolve()
-        # TODO: Reports success with the output path and the number of
-        # exported prompts.
-        print(f"Written: {output}\nPrompts: {len(exchanges)}")
-        # A page prompt whose record the store still holds but no longer
+        # TODO: Reports success with each path written (the runner's
+        # ledger, then the page), the number of exported prompts, and how
+        # many of them each human's ledger holds, by login.
+        print(
+            f"Written: {ledger.resolve()}\nWritten: {output}\nPrompts: {sum(map(len, ledgers.values()))}"
+            + "".join(f"\n  {who}: {len(rows)}" for who, rows in ledgers.items())
+        )
+        # A ledger prompt whose record the store still holds but no longer
         # reads as a prompt was dropped by the merge above. It is named here,
         # every run, so a parser change that dropped typed words by mistake
-        # cannot pass unseen: the diff of the page shows the loss, this line
-        # says why.
+        # cannot pass unseen: the diff of the ledger shows the loss, this
+        # line says why.
+        # Prompts are counted by prompt_key, so two readings the ledger
+        # held of one prompt count as the one prompt they read.
         yielded = {holding(exchange) for exchange in fresh}
         dropped = sorted(
-            (exchange for exchange in inherited if holding(exchange) in holdings and holding(exchange) not in yielded),
-            key=holding,
+            {prompt_key(exchange) for exchange in old if holding(exchange) in holdings and holding(exchange) not in yielded}
         )
-        # Reports how many prompts the page showed that the store now
-        # reads as machine text, each named by agent and time.
-        print(f"Prompts deleted: {len(dropped)}" + "".join(f"\n  {e.provider} {e.timestamp.isoformat()}" for e in dropped))
+        # Reports how many prompts the runner's ledger held that the store
+        # now reads as machine text, each named by agent and time.
+        print(f"Prompts deleted: {len(dropped)}" + "".join(f"\n  {provider} {when.isoformat()}" for provider, when, _, _ in dropped))
         if options.open_after and not webbrowser.open(output.as_uri()):
             # Says the browser refused to open the file.
             raise UserError(f"Browser failed to open: {output}")

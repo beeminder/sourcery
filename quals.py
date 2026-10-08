@@ -13,18 +13,21 @@ import dataclasses
 import datetime as dt
 import hashlib
 import io
+import itertools
 import json
 import os
 import re
 import shutil
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
 
+import adopt
 import sourcery as ace
-import unrender
 
 T0 = "2026-03-01T10:00:00.000Z"
 T1 = "2026-03-01T10:05:00.000Z"
@@ -61,6 +64,94 @@ class Fixture(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
+
+
+# The login every qual credits unless it says otherwise: what CliQuals' gh
+# seam reports, and the ledger RenderQuals render from.
+LOGIN = "dreeves"
+
+
+def gh_says(stdout, returncode=0, stderr=""):
+    """A stand-in for the gh seam: gh ran, exiting with returncode and
+    printing stdout and stderr. Quals never call the real gh."""
+    return lambda: subprocess.CompletedProcess(ace.GH_USER, returncode, stdout, stderr)
+
+
+def gh_missing():
+    """A stand-in for the gh seam on a machine without gh."""
+    raise FileNotFoundError(2, "No such file or directory", "gh")
+
+
+def ledger_header(project):
+    """A ledger's first line as sourcery writes it: the ledger format, 1,
+    and the project name."""
+    return {"ledger": 1, "repo": project}
+
+
+def ledger_text(repo_name, exchanges, header=None):
+    """A ledger written by hand, line by line: the header (ledger_header's
+    for repo_name unless one is given), then each exchange in freeze()
+    form."""
+    head = ledger_header(repo_name) if header is None else header
+    return "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in [head, *map(ace.freeze, exchanges)])
+
+
+def ledger_rows(path):
+    """A ledger's lines as JSON values, the header first."""
+    text = path.read_text(encoding="utf-8")
+    assert text.endswith("\n"), text[-80:]
+    return [json.loads(line) for line in text.removesuffix("\n").split("\n")]
+
+
+def jsonable(exchange):
+    """The exchange's freeze() form as a ledger line gives it back."""
+    return json.loads(json.dumps(ace.freeze(exchange)))
+
+
+def five_page(repo, exchanges, version="5.5.2", name=None):
+    """A page as sourcery 5 wrote it: its articles crediting no one and
+    naming no human, and before </body> its snapshot, the block 5.5.2's
+    snapshot() wrote (every exchange in freeze() form, one per line, every
+    "<" escaped), naming the repo `name`, or repo's own name."""
+    bare = re.sub(r' data-login="[^"]*"| <span class="human">[^<]*</span>', "", ace.render(repo, {LOGIN: exchanges}))
+    rows = ",\n".join(json.dumps(ace.freeze(e), ensure_ascii=False) for e in exchanges)
+    named = json.dumps(repo.name if name is None else name)
+    snapshot = f'{{"sourcery": {json.dumps(version)}, "repo": {named}, "exchanges": [\n{rows}\n]}}'
+    escaped = snapshot.replace("<", "\\u003c")
+    head, tail = bare.rsplit("</body>", 1)
+    return f'{head}<script type="application/json" id="snapshot">\n{escaped}\n</script>\n</body>{tail}'
+
+
+def with_snapshot(page, text):
+    """A page sourcery 5 wrote, its snapshot's JSON replaced by text."""
+    return re.sub(
+        r'(<script type="application/json" id="snapshot">\n).*?(\n</script>)',
+        lambda found: found[1] + text.replace("<", "\\u003c") + found[2],
+        page,
+        flags=re.DOTALL,
+    )
+
+
+@contextlib.contextmanager
+def on_platform(name):
+    """Run as on the platform sys.platform calls name, with every path under
+    /home resolving to itself, as a plain directory would: quals never ask
+    this machine's automounter to resolve one. Yields the list of every path
+    under /home resolved meanwhile."""
+    resolved = []
+    original = sys.platform, Path.resolve
+
+    def resolve(path, strict=False):
+        if path.is_relative_to("/home"):
+            resolved.append(path)
+            return path
+        return original[1](path, strict)
+
+    sys.platform, Path.resolve = name, resolve
+    try:
+        yield resolved
+    finally:
+        sys.platform, Path.resolve = original
 
 
 # ---------------------------------------------------------------- Claude Code
@@ -843,7 +934,7 @@ class ClaudeQuals(Fixture):
         # Expectata: each prompt once, at its first delivery; the work
         # around the redeliveries, before and after, credited to the
         # exchange in flight (the second prompt's); both redeliveries still
-        # held, so a page's stale copies of them get purged. Resultata
+        # held, so a ledger's stale copies of them get purged. Resultata
         # (v5.5.0): each prompt shown twice, the work split between the
         # second prompt and the second redelivery.
         cwd = str(self.repo)
@@ -1427,6 +1518,95 @@ class ClaudeQuals(Fixture):
                     with self.assertRaises(ace.UserError) as ctx:
                         ace.claude_exchanges(path, self.repo)
                     self.assertEqual(str(ctx.exception), str(typed.exception))
+
+    # The origin fields a queued prompt's attachment can carry: the human's
+    # typing, another agent's message, a background task's notification,
+    # and none at all (a record predating the field).
+    ORIGINS = (
+        {"origin": {"kind": "human"}},
+        {"origin": {"kind": "peer"}},
+        {"origin": {"kind": "task-notification"}},
+        {},
+    )
+
+    def stated(self, queued, fields):
+        """The queued prompt with its attachment's origin field (cq() gives
+        the kind "human") replaced by `fields`: an origin, or none."""
+        del queued["attachment"]["origin"]
+        queued["attachment"].update(fields)
+        return queued
+
+    def test_redelivery_whose_origin_differs_from_its_first_deliverys_fails_loudly(self):
+        # Replicata: a queued prompt is delivered inside the repo, then
+        # redelivered there, identical, under the same source_uuid, the two
+        # deliveries stating different origin kinds: every ordered pair of
+        # the human's ("human"), another agent's ("peer"), a background
+        # task's ("task-notification"), and none (no origin field).
+        # Expectata: a loud error citing the file at the first delivery's
+        # line and at the redelivery's, naming both kinds; sourcery picks no
+        # rule for which delivery to believe. Resultata (v5.5.2): no error;
+        # the redelivery was held as machine text, became a prompt of its
+        # own, or was taken for an ordinary redelivery, as its own origin
+        # decided.
+        cwd = str(self.repo)
+        for first, second in itertools.permutations(self.ORIGINS, 2):
+            path = self.path([
+                cu("start the work", ts=T0, cwd=cwd),
+                self.stated(cq("Findings: all green.", T1, cwd, source_uuid="src-1"), first),
+                self.stated(cq("Findings: all green.", T2, cwd, source_uuid="src-1"), second),
+            ])
+            kinds = [repr(fields.get("origin", {}).get("kind")) for fields in (first, second)]
+            with self.subTest(first=first, second=second):
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.claude_exchanges(path, self.repo)
+                for cited in (f"{path}:2", f"{path}:3", *kinds):
+                    self.assertIn(cited, str(ctx.exception))
+
+    def test_redelivery_stating_its_first_deliverys_origin_is_judged_as_before(self):
+        # Replicata: a queued prompt is delivered inside the repo, then
+        # redelivered there, identical, under the same source_uuid, both
+        # deliveries stating the same origin kind: the human's, another
+        # agent's, a background task's, or none. Expectata: no error; both
+        # deliveries held; of machine origin, neither is a prompt; typed, or
+        # of no stated origin, the first delivery is the prompt and the
+        # redelivery none. Resultata (v5.5.2): as expected; this guards the
+        # refusal of a redelivery of another origin against refusing one of
+        # the same.
+        cwd = str(self.repo)
+        aside = "Findings: all green."
+        for fields, prompts in zip(self.ORIGINS, ([aside], [], [], [aside])):
+            path = self.path([
+                cu("start the work", ts=T0, cwd=cwd),
+                self.stated(cq(aside, T1, cwd, source_uuid="src-1"), fields),
+                self.stated(cq(aside, T2, cwd, source_uuid="src-1"), fields),
+            ])
+            with self.subTest(fields=fields):
+                exchanges, holdings = ace.claude_exchanges(path, self.repo)
+                self.assertEqual([e.prompt for e in exchanges], ["start the work", *prompts])
+                self.assertEqual(holdings, {("Claude Code", utc(ts)) for ts in (T0, T1, T2)})
+
+    def test_redelivery_outside_the_repo_stating_another_origin_changes_nothing(self):
+        # Replicata: a queued prompt is delivered inside the repo, then
+        # redelivered, identical, with its cwd outside the repo, stating
+        # another origin kind (another agent's). Expectata: no error, and
+        # the same exchanges and holdings as when the redelivery states the
+        # first delivery's origin: one prompt, at its first delivery, and
+        # nothing of the redelivery, that record being another directory's.
+        # Resultata (v5.5.2): as expected; this guards the refusal of a
+        # redelivery of another origin against records this repo's page
+        # never shows.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+
+        def read(fields):
+            return ace.claude_exchanges(self.path([
+                cu("start the work", ts=T0, cwd=cwd),
+                cq("aside", T1, cwd, source_uuid="src-1"),
+                self.stated(cq("aside", T2, elsewhere, source_uuid="src-1"), fields),
+            ]), self.repo)
+
+        same = read(self.ORIGINS[0])
+        self.assertEqual([e.prompt for e in same[0]], ["start the work", "aside"])
+        self.assertEqual(read(self.ORIGINS[1]), same)
 
     def test_interrupt_markers_dropped_but_typed_text_around_them_kept(self):
         cwd = str(self.repo)
@@ -2159,6 +2339,57 @@ class CodexQuals(Fixture):
         self.assertEqual(ace.codex_exchanges(self.path(records), self.repo)[0], [])
 
 
+# ---------------------------------------------------- paths under /home
+
+class HomeQuals(Fixture):
+    # A cwd as a Claude cloud workspace records it: another machine's
+    # checkout, under that machine's /home.
+    CLOUD = "/home/user/svenn"
+
+    def transcripts(self):
+        """A Claude Code transcript and a Codex session, each one prompt
+        typed with its cwd at CLOUD."""
+        claude = write_jsonl(
+            self.tmp / "claude" / "p" / "sess.jsonl",
+            [cu("start the work", ts=T0, cwd=self.CLOUD), ca([{"type": "text", "text": "Working."}], cwd=self.CLOUD)],
+        )
+        codex = write_jsonl(
+            self.tmp / "codex" / "rollout-1.jsonl", [cxmeta(self.CLOUD), cxuser("start the work", ts=T0)]
+        )
+        return ((ace.claude_exchanges, claude), (ace.codex_exchanges, codex))
+
+    def test_cwd_under_home_on_macos_refused_at_once(self):
+        # Replicata: on macOS, a Claude Code transcript copied from another
+        # machine (a Claude cloud workspace), its records' cwd under /home,
+        # or a Codex session whose cwd is. Expectata: a loud error naming
+        # the transcript and the path, saying it came from another machine
+        # and its directories must first be rewritten to this machine's
+        # checkout, raised before any path under /home is resolved: on
+        # macOS /home is an automount point, where resolving a path can
+        # hang for minutes. Resultata (v5.5.2): the cwd resolved, which on
+        # this machine has hung for minutes, and the transcript then read
+        # as outside the repo.
+        with on_platform("darwin") as resolved:
+            for parse, path in self.transcripts():
+                with self.subTest(path=path):
+                    with self.assertRaises(ace.UserError) as ctx:
+                        parse(path, self.repo)
+                    self.assertIn(str(path), str(ctx.exception))
+                    self.assertIn(self.CLOUD, str(ctx.exception))
+        self.assertEqual(resolved, [])
+
+    def test_cwd_under_home_elsewhere_is_this_machines_own(self):
+        # Replicata: on Linux, where /home holds this machine's own
+        # checkouts, the same transcripts, read for the repo at their cwd.
+        # Expectata: no error; each yields its prompt. Resultata (v5.5.2): as
+        # expected; this guards the refusal of paths under /home on macOS
+        # against reaching other platforms.
+        with on_platform("linux"):
+            for parse, path in self.transcripts():
+                with self.subTest(path=path):
+                    self.assertEqual([e.prompt for e in parse(path, Path(self.CLOUD))[0]], ["start the work"])
+
+
 # ------------------------------------------------------ VS Code / Copilot Chat
 
 def md(value):
@@ -2498,7 +2729,7 @@ class RenderQuals(Fixture):
     def test_prompt_visible_exact_reply_collapsed(self):
         page = ace.render(
             self.repo,
-            [exchange(prompt="a<b>&c\n  indented", reply="<script>alert(1)</script>")],
+            {LOGIN: [exchange(prompt="a<b>&c\n  indented", reply="<script>alert(1)</script>")]},
         )
         self.assertIn("a&lt;b&gt;&amp;c\n  indented", page)
         self.assertNotIn("<script>alert(1)", page)
@@ -2509,7 +2740,7 @@ class RenderQuals(Fixture):
         self.assertLess(prompt_at, details_at)
 
     def test_meta_line_carries_time_provider_model(self):
-        page = ace.render(self.repo, [exchange()])
+        page = ace.render(self.repo, {LOGIN: [exchange()]})
         local = utc(T0).astimezone().strftime("%H:%M")
         summary = page[page.index("<summary") : page.index("</summary>")]
         self.assertIn(local, summary)
@@ -2517,8 +2748,56 @@ class RenderQuals(Fixture):
         self.assertIn("claude-opus-4-8", summary)
         self.assertNotIn("(", summary)
 
+    def test_meta_line_names_each_prompts_human_by_display_name(self):
+        # Replicata: a page rendered from three humans' ledgers, given in no
+        # particular order: dreeves and mister-person, whom the display
+        # table names, and a login it does not name. Expectata: the rows
+        # interleave by time; each article records its login invisibly, in
+        # a data-login attribute; each meta line shows its human's display
+        # name (the table's, else the login itself) right after the time.
+        # Resultata (v5.5.2): render took no humans, and no line named one.
+        page = ace.render(
+            self.repo,
+            {
+                "mister-person": [exchange(timestamp=utc(T1), prompt="b")],
+                "dreeves": [exchange(timestamp=utc(T3), prompt="d"), exchange(prompt="a")],
+                "someone-else": [exchange(timestamp=utc(T2), prompt="c")],
+            },
+        )
+        articles = re.findall(
+            r'<article class="exchange claude" id="p(\d)" data-login="([a-z-]+)">'
+            r'.*?<pre class="prompt">(\w)</pre>.*?<summary>(.*?)</summary>',
+            page,
+            re.DOTALL,
+        )
+        self.assertEqual(
+            [(number, login, prompt) for number, login, prompt, _ in articles],
+            [("1", "dreeves", "a"), ("2", "mister-person", "b"), ("3", "someone-else", "c"), ("4", "dreeves", "d")],
+        )
+        for (_, _, _, summary), name in zip(articles, ("dreev", "logan", "someone-else", "dreev")):
+            self.assertIn(f'</time></a> <span class="human">{name}</span> <span class="chip"></span>', summary)
+
+    def test_single_human_page_names_its_human_too(self):
+        # Replicata: a page rendered from one ledger. Expectata: its meta
+        # line still shows the human's display name. Resultata (v5.5.2): no
+        # human named.
+        page = ace.render(self.repo, {"dreeves": [exchange()]})
+        self.assertIn('data-login="dreeves">', page)
+        self.assertIn('<span class="human">dreev</span>', page)
+
+    def test_display_names_are_the_approved_table(self):
+        # Replicata: the display table, an expedient stand-in for names
+        # humans choose. Expectata: exactly the two names the human
+        # approved; every other login displays as itself. Resultata
+        # (v5.5.2): no table.
+        self.assertEqual(ace.DISPLAY_NAMES, {"dreeves": "dreev", "mister-person": "logan"})
+        self.assertEqual(
+            [ace.display_name(login) for login in ("dreeves", "mister-person", "dreev", "logan")],
+            ["dreev", "logan", "dreev", "logan"],
+        )
+
     def test_effort_shown_in_parens_after_model(self):
-        page = ace.render(self.repo, [exchange(effort="xhigh")])
+        page = ace.render(self.repo, {LOGIN: [exchange(effort="xhigh")]})
         summary = page[page.index("<summary") : page.index("</summary>")]
         self.assertIn("claude-opus-4-8", summary)
         self.assertIn("(xhigh)", summary)
@@ -2527,27 +2806,27 @@ class RenderQuals(Fixture):
     def test_one_day_header_per_local_day_with_weekday(self):
         page = ace.render(
             self.repo,
-            [exchange(prompt="x"), exchange(timestamp=utc(T1), prompt="y")],
+            {LOGIN: [exchange(prompt="x"), exchange(timestamp=utc(T1), prompt="y")]},
         )
         self.assertEqual(page.count('class="day"'), 1)
         local = utc(T0).astimezone().date()
         self.assertIn(f"{local.isoformat()} {ace.WEEKDAYS[local.weekday()]}<", page)
 
     def test_thought_duration_shown_when_known(self):
-        page = ace.render(self.repo, [exchange(elapsed=327.0)])
+        page = ace.render(self.repo, {LOGIN: [exchange(elapsed=327.0)]})
         summary = page[page.index("<summary") : page.index("</summary>")]
         self.assertIn("thought for 5m27s", summary)
-        page = ace.render(self.repo, [exchange()])
+        page = ace.render(self.repo, {LOGIN: [exchange()]})
         self.assertNotIn("thought for", page)
 
     def test_provider_identity_stripe_class_and_chip(self):
         page = ace.render(
             self.repo,
-            [
+            {LOGIN: [
                 exchange(),
                 exchange(timestamp=utc(T1), provider="Codex", prompt="b"),
                 exchange(timestamp=utc(T2), provider="Copilot Chat", prompt="c"),
-            ],
+            ]},
         )
         # Each exchange wears its provider's class so the CSS edge stripe and
         # meta-line chip can color by agent.
@@ -2574,25 +2853,34 @@ class RenderQuals(Fixture):
         rule = rule[: rule.index("}")]
         self.assertIn("\n  flex-wrap: wrap;\n", rule)
 
+    def test_display_name_wears_the_agent_names_ink(self):
+        # Replicata: a meta line, where the human's display name (span.human)
+        # sits beside the agent's name (span.agent). Expectata: the
+        # stylesheet gives .human the ink .agent wears, var(--muted), and
+        # not .agent's weight. Resultata (v6.0.0): no rule for .human, so the
+        # name wore the summary's faint ink.
+        self.assertIn("\n.human { color: var(--muted); }\n", ace.CSS)
+        self.assertIn("\n.agent { color: var(--muted); font-weight: 600; }\n", ace.CSS)
+
     def test_unknown_provider_fails_loudly(self):
         with self.assertRaises(KeyError):
-            ace.render(self.repo, [exchange(provider="Quantum")])
+            ace.render(self.repo, {LOGIN: [exchange(provider="Quantum")]})
 
     def test_claude_ai_exchange_wears_claude_codes_color(self):
         # Replicata: an exchange from a claude.ai chat, which reaches a page
-        # only through its snapshot (no store parser reads claude.ai).
+        # only through a ledger (no store parser reads claude.ai).
         # Expectata: its article carries the class claudeai, whose stripe
         # and chip take Claude Code's color, defined for both color schemes,
         # and its meta line names claude.ai. Resultata (v5.5.0): KeyError,
         # claude.ai being no known provider.
-        page = ace.render(self.repo, [exchange(provider="claude.ai", model="claude-opus-5-5")])
+        page = ace.render(self.repo, {LOGIN: [exchange(provider="claude.ai", model="claude-opus-5-5")]})
         self.assertIn('<article class="exchange claudeai"', page)
         self.assertIn('<span class="agent">claude.ai</span>', page)
         self.assertIn(".exchange.claudeai { --provider: var(--claude); }", ace.CSS)
         self.assertEqual(ace.CSS.count("--claude:"), 2)
 
     def test_provider_slugs_are_unique(self):
-        # Replicata: invert PROVIDER_SLUGS, as unrender.py does to read a
+        # Replicata: invert PROVIDER_SLUGS, as page_credits does to read a
         # page's provider back from its article class. Expectata: no slug
         # lost, so every slug names one provider. Resultata (v5.5.0): as
         # expected; this guards each new provider's slug.
@@ -2601,29 +2889,29 @@ class RenderQuals(Fixture):
     def test_autogenerated_warning_comment_after_doctype(self):
         # The warning must follow the doctype: a comment before it would
         # throw browsers into quirks mode.
-        page = ace.render(self.repo, [exchange()])
+        page = ace.render(self.repo, {LOGIN: [exchange()]})
         self.assertTrue(page.startswith("<!doctype html>\n<!-- "), page[:60])
         self.assertLess(page.index("-->"), page.index("<html"))
 
     def test_wall_clock_shown_only_when_beyond_thought(self):
-        page = ace.render(self.repo, [exchange(elapsed=327.0, wall=540.0)])
+        page = ace.render(self.repo, {LOGIN: [exchange(elapsed=327.0, wall=540.0)]})
         summary = page[page.index("<summary") : page.index("</summary>")]
         self.assertIn("thought for 5m27s · 9m wall-clock time", summary)
         # A wall span matching the working time at display precision adds
         # nothing and stays off,
-        page = ace.render(self.repo, [exchange(elapsed=327.0, wall=327.4)])
+        page = ace.render(self.repo, {LOGIN: [exchange(elapsed=327.0, wall=327.4)]})
         self.assertNotIn("wall-clock time", page)
         # as does one the working time exceeds (activity credited off records
         # later than the last reply),
-        page = ace.render(self.repo, [exchange(elapsed=327.0, wall=300.0)])
+        page = ace.render(self.repo, {LOGIN: [exchange(elapsed=327.0, wall=300.0)]})
         self.assertNotIn("wall-clock time", page)
         # and one on an exchange with no working time shown at all.
-        page = ace.render(self.repo, [exchange(wall=540.0)])
+        page = ace.render(self.repo, {LOGIN: [exchange(wall=540.0)]})
         self.assertNotIn("thought for", page)
         self.assertNotIn("wall-clock time", page)
 
     def test_diffstat_shown_with_ratio_blocks(self):
-        page = ace.render(self.repo, [exchange(added=1234, deleted=45, prompt="hi")])
+        page = ace.render(self.repo, {LOGIN: [exchange(added=1234, deleted=45, prompt="hi")]})
         self.assertIn("+1,234 −45", page)
         self.assertEqual(page.count('<span class="add"></span>'), 4)  # round(5·1234/1279)
         self.assertEqual(page.count('<span class="del"></span>'), 1)
@@ -2631,24 +2919,24 @@ class RenderQuals(Fixture):
         # The stat precedes the prompt so it floats beside the prompt's top.
         self.assertLess(page.index('class="diffstat"'), page.index('class="prompt"'))
         # A prompt that touched no code gets no diffstat at all.
-        page = ace.render(self.repo, [exchange()])
+        page = ace.render(self.repo, {LOGIN: [exchange()]})
         self.assertNotIn('<div class="diffstat">', page)
 
     def test_diffstat_tiny_and_onesided_ratios(self):
-        page = ace.render(self.repo, [exchange(added=1, deleted=1)])
+        page = ace.render(self.repo, {LOGIN: [exchange(added=1, deleted=1)]})
         self.assertEqual(page.count('<span class="add"></span>'), 1)
         self.assertEqual(page.count('<span class="del"></span>'), 1)
         self.assertEqual(page.count('<span class="nil"></span>'), 3)
-        page = ace.render(self.repo, [exchange(added=0, deleted=7)])
+        page = ace.render(self.repo, {LOGIN: [exchange(added=0, deleted=7)]})
         self.assertIn("+0 −7", page)
         self.assertEqual(page.count('<span class="add"></span>'), 0)
         self.assertEqual(page.count('<span class="del"></span>'), 5)
         # A nonzero side always gets at least one block.
-        page = ace.render(self.repo, [exchange(added=1, deleted=999)])
+        page = ace.render(self.repo, {LOGIN: [exchange(added=1, deleted=999)]})
         self.assertEqual(page.count('<span class="add"></span>'), 1)
         self.assertEqual(page.count('<span class="del"></span>'), 4)
         # An even split renders symmetrically, remainder unfilled.
-        page = ace.render(self.repo, [exchange(added=10, deleted=10)])
+        page = ace.render(self.repo, {LOGIN: [exchange(added=10, deleted=10)]})
         self.assertEqual(page.count('<span class="add"></span>'), 2)
         self.assertEqual(page.count('<span class="del"></span>'), 2)
         self.assertEqual(page.count('<span class="nil"></span>'), 1)
@@ -2656,23 +2944,23 @@ class RenderQuals(Fixture):
     def test_deck_totals_shown_when_any_lines_counted(self):
         page = ace.render(
             self.repo,
-            [exchange(added=2, deleted=1), exchange(timestamp=utc(T1), prompt="b", added=3)],
+            {LOGIN: [exchange(added=2, deleted=1), exchange(timestamp=utc(T1), prompt="b", added=3)]},
         )
         local = utc(T0).astimezone().date().isoformat()
         deck = f"2 prompts · {local} · +5 −1"
         self.assertIn(f'<p class="deck">{deck}</p>', page)
         self.assertIn(f'<meta name="description" content="{deck}">', page)
-        page = ace.render(self.repo, [exchange()])
+        page = ace.render(self.repo, {LOGIN: [exchange()]})
         self.assertNotIn("+0 −0", page)
 
     def test_minimap_sliver_per_prompt_linked_and_scaled(self):
         page = ace.render(
             self.repo,
-            [
+            {LOGIN: [
                 exchange(added=100, deleted=0),
                 exchange(timestamp=utc(T1), prompt="b", added=25, deleted=4),
                 exchange(timestamp=utc(T2), prompt="c"),
-            ],
+            ]},
         )
         svg = page[page.index('<svg class="minimap"') : page.index("</svg>")]
         self.assertEqual(svg.count("<a "), 3)
@@ -2695,30 +2983,30 @@ class RenderQuals(Fixture):
             self.assertEqual(ace.elapsed_text(seconds), expected)
 
     def test_pasted_images_rendered_with_prompt_not_collapsed(self):
-        page = ace.render(self.repo, [exchange(images=("data:image/png;base64,QUJD",))])
+        page = ace.render(self.repo, {LOGIN: [exchange(images=("data:image/png;base64,QUJD",))]})
         img_at = page.index('src="data:image/png;base64,QUJD"')
         self.assertLess(page.index('class="prompt"'), img_at)
         self.assertLess(img_at, page.index("<details>"))
 
     def test_generator_attribution_links_home(self):
-        page = ace.render(self.repo, [exchange()])
+        page = ace.render(self.repo, {LOGIN: [exchange()]})
         self.assertIn(
             '<a href="https://github.com/beeminder/sourcery">generated by sourcery</a>',
             page,
         )
 
     def test_remote_link_replaces_directory_when_known(self):
-        page = ace.render(self.repo, [exchange()], remote="https://github.com/dreeves/crashla")
+        page = ace.render(self.repo, {LOGIN: [exchange()]}, remote="https://github.com/dreeves/crashla")
         self.assertIn('<a href="https://github.com/dreeves/crashla">github.com/dreeves/crashla</a>', page)
         self.assertNotIn(str(self.repo), page)
-        page = ace.render(self.repo, [exchange()])
+        page = ace.render(self.repo, {LOGIN: [exchange()]})
         self.assertIn(str(self.repo), page)
         self.assertNotIn("github.com/dreeves/crashla", page)
 
     def test_expand_controls_and_permalink_anchors(self):
         page = ace.render(
             self.repo,
-            [exchange(prompt="a"), exchange(timestamp=utc(T1), prompt="b")],
+            {LOGIN: [exchange(prompt="a"), exchange(timestamp=utc(T1), prompt="b")]},
         )
         self.assertIn('data-omnia="open"', page)
         self.assertIn('data-omnia="close"', page)
@@ -2727,25 +3015,25 @@ class RenderQuals(Fixture):
         self.assertIn('href="#p2"', page)
 
     def test_empty_reply_marked(self):
-        page = ace.render(self.repo, [exchange(reply="")])
+        page = ace.render(self.repo, {LOGIN: [exchange(reply="")]})
         self.assertIn('class="reply machine empty"', page)
 
     def test_only_final_empty_reply_marked_still_generating(self):
         page = ace.render(
             self.repo,
-            [exchange(prompt="a", reply=""), exchange(timestamp=utc(T1), prompt="b", reply="")],
+            {LOGIN: [exchange(prompt="a", reply=""), exchange(timestamp=utc(T1), prompt="b", reply="")]},
         )
         self.assertEqual(page.count("Response still generating when this transcript was captured"), 1)
         self.assertIn("No response.", page)
         self.assertLess(page.index("No response."), page.index("Response still generating"))
-        page = ace.render(self.repo, [exchange(prompt="a", reply=""), exchange(timestamp=utc(T1), prompt="b", reply="done")])
+        page = ace.render(self.repo, {LOGIN: [exchange(prompt="a", reply=""), exchange(timestamp=utc(T1), prompt="b", reply="done")]})
         self.assertNotIn("Response still generating", page)
 
     def test_machine_prose_only_inside_machine_containers(self):
         ballot = ace.Ballot("Q?", ("A label", "B label"), ("A label",))
         page = ace.render(
             self.repo,
-            [exchange(prompt="typed words", reply="agent words", ballots=(ballot,))],
+            {LOGIN: [exchange(prompt="typed words", reply="agent words", ballots=(ballot,))]},
         )
         self.assertIn('<div class="reply machine">', page)
         self.assertIn('<div class="ballot machine">', page)
@@ -2762,13 +3050,13 @@ class RenderQuals(Fixture):
         # are legible only against the agent's question and labels, so the
         # ballot renders before the closed <details>, still in phosphor.
         ballot = ace.Ballot("Q?", ("A label", "B label"), ("A label",))
-        page = ace.render(self.repo, [exchange(prompt="typed words", ballots=(ballot,))])
+        page = ace.render(self.repo, {LOGIN: [exchange(prompt="typed words", ballots=(ballot,))]})
         article = page[page.index("<article") : page.index("</article>")]
         self.assertLess(article.index('<div class="ballot machine">'), article.index("<details>"))
 
     def test_click_only_answer_renders_without_prompt_block(self):
         ballot = ace.Ballot("Q?", ("Delete it", "Keep it"), ("Delete it",))
-        page = ace.render(self.repo, [exchange(prompt="", ballots=(ballot,))])
+        page = ace.render(self.repo, {LOGIN: [exchange(prompt="", ballots=(ballot,))]})
         self.assertNotIn('<pre class="prompt">', page)
         self.assertIn("✓ Delete it", page)
         self.assertIn("· Keep it", page)
@@ -2780,7 +3068,7 @@ class RenderQuals(Fixture):
         # exact text and its target an anchor the header itself carries.
         page = ace.render(
             self.repo,
-            [exchange(prompt="a"), exchange(timestamp=utc("2026-03-05T10:00:00.000Z"), prompt="b")],
+            {LOGIN: [exchange(prompt="a"), exchange(timestamp=utc("2026-03-05T10:00:00.000Z"), prompt="b")]},
         )
         self.assertIn('<div id="progress">', page)
         self.assertIn('class="progress-bar"', page)
@@ -2797,7 +3085,7 @@ class RenderQuals(Fixture):
         self.assertEqual(marks, days)
         # Two prompts on one day are one day header, so one mark.
         page = ace.render(
-            self.repo, [exchange(prompt="a"), exchange(timestamp=utc(T1), prompt="b")]
+            self.repo, {LOGIN: [exchange(prompt="a"), exchange(timestamp=utc(T1), prompt="b")]}
         )
         self.assertEqual(page.count('class="daymark"'), 1)
 
@@ -2807,7 +3095,7 @@ class RenderQuals(Fixture):
         # the script shows them past 300px of scroll, resizing the bar on
         # scroll and resize and after any disclosure opens or closes (which
         # reflows the whole page under the rail).
-        page = ace.render(self.repo, [exchange()])
+        page = ace.render(self.repo, {LOGIN: [exchange()]})
         self.assertIn("scrollY > 300", page)
         self.assertIn('addEventListener("scroll", sync, { passive: true })', page)
         self.assertIn('addEventListener("resize", sync)', page)
@@ -2870,9 +3158,13 @@ class CliQuals(Fixture):
         # for the application's key in the installed binary.
         self.finder = ace.antigravity_key
         ace.antigravity_key = lambda: AG_TEST_KEY
+        # The runner is LOGIN; the real seam would ask the installed gh.
+        self.gh_user = ace.gh_user
+        ace.gh_user = gh_says(f"{LOGIN}\n")
 
     def tearDown(self):
         ace.antigravity_key = self.finder
+        ace.gh_user = self.gh_user
 
     def run_cli(self, argv):
         out, err = io.StringIO(), io.StringIO()
@@ -2932,9 +3224,9 @@ class CliQuals(Fixture):
         self.assertEqual(code, 2)
         self.assertIn("absent", err)
 
-    def test_existing_output_without_snapshot_rejected(self):
-        # Replicata: the output path already holds a file carrying no
-        # snapshot — a page from before snapshots, or not a sourcery page at
+    def test_existing_output_crediting_no_ledger_rejected(self):
+        # Replicata: the output path already holds a file crediting no
+        # ledger — a page from before snapshots, or not a sourcery page at
         # all. Expectata: exit 2 naming the path, file left byte-identical.
         # Resultata before snapshots: silently overwritten.
         self.populate()
@@ -2968,10 +3260,10 @@ class CliQuals(Fixture):
         self.assertEqual(code, 0, err)
         return out, out_path.read_text(encoding="utf-8")
 
-    def test_pruned_session_kept_from_page(self):
+    def test_pruned_session_kept_from_ledger(self):
         # Replicata: run, then the Claude session file vanishes from the store
         # (pruned, or this is another machine). Expectata: the next run keeps
-        # that exchange from the page. Resultata before snapshots: gone.
+        # that exchange from the ledger. Resultata before snapshots: gone.
         self.populate()
         out_path = self.tmp / "out.html"
         self.generate(out_path)
@@ -2984,8 +3276,9 @@ class CliQuals(Fixture):
         order = [page.index("claude prompt"), page.index("codex prompt"), page.index("copilot prompt")]
         self.assertEqual(order, sorted(order))
 
-    def test_empty_stores_regenerate_from_page_alone(self):
-        # A new machine: no transcript roots exist at all, only the page.
+    def test_empty_stores_regenerate_from_ledger_alone(self):
+        # A new machine: no transcript roots exist at all, only the page and
+        # its ledger.
         self.populate()
         out_path = self.tmp / "out.html"
         _, first = self.generate(out_path)
@@ -2994,9 +3287,10 @@ class CliQuals(Fixture):
         _, again = self.generate(out_path)
         self.assertEqual(again, first)
 
-    def test_store_record_supersedes_page_copy(self):
+    def test_store_record_supersedes_ledger_copy(self):
         # The store is the truth for a record it still holds: the record's
-        # text changes under the same timestamp, so the page copy is replaced.
+        # text changes under the same timestamp, so the ledger copy is
+        # replaced.
         self.populate()
         out_path = self.tmp / "out.html"
         self.generate(out_path)
@@ -3017,7 +3311,7 @@ class CliQuals(Fixture):
     def test_reclassified_record_purged_even_when_session_yields_nothing(self):
         # Replicata: after a run, a parser fix classes the Copilot session's
         # only request as machine text (system-initiated). Expectata: the
-        # store still holds the record, so the page's copy is purged even
+        # store still holds the record, so the ledger's copy is purged even
         # though the session now yields no exchange at all. Resultata under a
         # session-level rule: the session looked pruned and the stale copy
         # stayed forever.
@@ -3037,7 +3331,7 @@ class CliQuals(Fixture):
         # Replicata: a run; then the store's Copilot request is reclassified
         # as machine text (system-initiated) while a Claude prompt's text is
         # merely revised in place. Expectata: the rerun drops the Copilot
-        # page copy and NAMES it on stdout by agent and time; the revised
+        # ledger copy and NAMES it on stdout by agent and time; the revised
         # Claude prompt, replaced rather than dropped, is not named; a run
         # with nothing dropped says so with a count of zero. Resultata
         # before: the drop happened silently, so a parser change that
@@ -3061,13 +3355,60 @@ class CliQuals(Fixture):
         self.assertNotIn("Claude Code", out.split("Prompts deleted")[1])
         self.assertNotIn("copilot prompt", page)
 
+    def test_two_readings_of_a_prompt_the_store_now_reads_as_nothing_reported_deleted_once(self):
+        # Replicata: dreeves's ledger holds two readings of the Copilot
+        # prompt his store holds, their replies cut short at two points, as
+        # a merge keeping both sides' lines leaves them, and two Codex
+        # prompts of one time and session whose words differ, the shape of
+        # a pair crashla's sourcery 5 page holds; the store's records of both
+        # times now read as machine text (the Copilot request
+        # system-initiated, the Codex message a canned handoff). Expectata:
+        # exit 0, none of the four rows shown, and stdout naming the deleted
+        # prompts, the Copilot prompt once, each Codex prompt once:
+        # "Prompts deleted: 3", then each by agent and time on its own line.
+        # Resultata (v6.0.0): "Prompts deleted: 4", the Copilot prompt named
+        # twice. Resultata counting prompts by agent and time alone:
+        # "Prompts deleted: 2", the two Codex prompts named as one.
+        self.populate()
+        request = vsreq("copilot prompt", [md("copilot reply")], ts=int(utc(T2).timestamp() * 1000))
+        request["isSystemInitiated"] = True
+        (self.vscode_root / "workspaceStorage" / "h1" / "chatSessions" / "a.json").write_text(
+            json.dumps(vssession([request])), encoding="utf-8"
+        )
+        pair_time = "2026-02-21T04:18:45.833Z"
+        write_jsonl(
+            self.codex_root / "sessions" / "2026" / "rollout-2.jsonl",
+            [cxmeta(str(self.repo), sid="cr1"),
+             cxuser("The following is the Codex agent history added since your last message.", ts=pair_time)],
+        )
+        readings = [
+            exchange(timestamp=utc(T2), provider="Copilot Chat", model="copilot/gemini-3.1-pro-preview", session="v1",
+                     prompt="copilot prompt", reply=reply)
+            for reply in ("copilot", "copilot rep")
+        ]
+        pair = [
+            exchange(timestamp=utc(pair_time), provider="Codex", model="gpt-5.4", session="cr1", prompt=words)
+            for words in ("first words", "second words")
+        ]
+        (self.tmp / f"sourcery.{LOGIN}.jsonl").write_text(ledger_text(self.repo.name, readings + pair), encoding="utf-8")
+        out, page = self.generate(self.tmp / "out.html")
+        self.assertTrue(
+            out.endswith(
+                f"Prompts: 2\n  {LOGIN}: 2\nPrompts deleted: 3\n  Codex {utc(pair_time).isoformat()}"
+                f"\n  Codex {utc(pair_time).isoformat()}\n  Copilot Chat {utc(T2).isoformat()}\n"
+            ),
+            out,
+        )
+        for text in ("copilot prompt", "first words", "second words"):
+            self.assertNotIn(text, page)
+
     def test_rerun_purges_redelivered_copy_and_relabels_handed_off_exchange(self):
-        # Replicata: a page written by v5.5.0 from a cloud-workspace session
-        # whose chat part was handed off and whose queued prompt was
+        # Replicata: a ledger holding what v5.5.0 read from a cloud-workspace
+        # session whose chat part was handed off and whose queued prompt was
         # redelivered after a restart: the first exchange labeled with the
         # chat model, the queued prompt shown twice. Expectata: a rerun
-        # shows the queued prompt once, names the redelivery's page copy on
-        # stdout as deleted, and labels the first exchange with the
+        # shows the queued prompt once, names the redelivery's ledger copy
+        # on stdout as deleted, and labels the first exchange with the
         # workspace model. Resultata (v5.5.0): the rerun changed nothing.
         cwd = str(self.repo)
         redelivered = "2026-03-01T10:30:00.000Z"
@@ -3095,7 +3436,7 @@ class CliQuals(Fixture):
             exchange(timestamp=utc(redelivered), model="", session="cs1", prompt="also this", reply=""),
         ]
         out_path = self.tmp / "out.html"
-        out_path.write_text(ace.render(self.repo, stale, ""), encoding="utf-8")
+        (self.tmp / f"sourcery.{LOGIN}.jsonl").write_text(ledger_text(self.repo.name, stale), encoding="utf-8")
         out, page = self.generate(out_path)
         self.assertIn("Prompts: 2", out)
         self.assertIn(f"Prompts deleted: 1\n  Claude Code {utc(redelivered).isoformat()}", out)
@@ -3131,10 +3472,10 @@ class CliQuals(Fixture):
         self.assertEqual(out_path.read_bytes(), page)
 
     def test_seeded_claude_ai_exchange_survives_rerun(self):
-        # Replicata: a page whose snapshot was seeded with a claude.ai chat
-        # exchange (no store parser reads claude.ai) is rerun beside a Claude
-        # Code session. Expectata: the claude.ai exchange is kept from the
-        # snapshot, since no store holds it, and rendered in time order
+        # Replicata: a ledger seeded with a claude.ai chat exchange (no
+        # store parser reads claude.ai) is rerun beside a Claude Code
+        # session. Expectata: the claude.ai exchange is kept from the
+        # ledger, since no store holds it, and rendered in time order
         # beside the store's exchange; nothing is reported deleted.
         # Resultata (v5.5.0): the page was refused as corrupt, claude.ai
         # being no known provider.
@@ -3149,12 +3490,13 @@ class CliQuals(Fixture):
         seed = exchange(provider="claude.ai", model="claude-opus-5-5", effort="max", session="chat-1",
                         prompt="chat prompt", reply="chat reply")
         out_path = self.tmp / "out.html"
-        out_path.write_text(f"{ace.SNAPSHOT_OPEN}\n{ace.snapshot(self.repo, [seed])}\n</script>\n", encoding="utf-8")
+        ledger = self.tmp / f"sourcery.{LOGIN}.jsonl"
+        ledger.write_text(ledger_text(self.repo.name, [seed]), encoding="utf-8")
         out, page = self.generate(out_path)
-        self.assertIn("Prompts: 2\nPrompts deleted: 0\n", out)
+        self.assertIn(f"Prompts: 2\n  {LOGIN}: 2\nPrompts deleted: 0\n", out)
         self.assertLess(page.index('<article class="exchange claudeai"'), page.index('<article class="exchange claude"'))
         self.assertEqual(
-            [(e.provider, e.prompt) for e in ace.inherit(out_path, self.repo)],
+            [(row["provider"], row["prompt"]) for row in ledger_rows(ledger)[1:]],
             [("claude.ai", "chat prompt"), ("Claude Code", "claude prompt")],
         )
 
@@ -3201,8 +3543,8 @@ class CliQuals(Fixture):
 
     def test_forked_session_copy_not_duplicated_after_original_pruned(self):
         # Replicata: a fork replays identical records into a new session
-        # file; the page holds one copy; then the original file is pruned.
-        # Expectata: the fork's live record supersedes the page copy and the
+        # file; the ledger holds one copy; then the original file is pruned.
+        # Expectata: the fork's live record supersedes the ledger copy and the
         # prompt renders once. Resultata with session in the holding: the page
         # copy, tagged with the pruned session, survived beside the fork's.
         self.populate()
@@ -3242,44 +3584,51 @@ class CliQuals(Fixture):
         self.assertNotIn("still generating", page)
         self.assertEqual(page.count('<pre class="prompt">claude prompt</pre>'), 1)
 
-    def test_snapshot_omits_store_paths(self):
+    def test_ledger_and_page_omit_store_paths(self):
         self.populate()
         out_path = self.tmp / "out.html"
         _, page = self.generate(out_path)
-        block = ace.SNAPSHOT.search(page).group(1)
+        ledger = (self.tmp / f"sourcery.{LOGIN}.jsonl").read_text(encoding="utf-8")
         for root in (self.claude_root, self.codex_root, self.vscode_root):
-            self.assertNotIn(str(root), block)
-        self.assertNotIn('"source"', block)
+            self.assertNotIn(str(root), ledger)
+            self.assertNotIn(str(root), page)
+        self.assertNotIn('"source"', ledger)
 
-    def test_malformed_snapshot_rejected_and_page_untouched(self):
+    def test_malformed_ledger_rejected_and_nothing_written(self):
         self.populate()
         out_path = self.tmp / "out.html"
         _, page = self.generate(out_path)
-        block = ace.SNAPSHOT.search(page).group(1)
-        data = json.loads(block)
-        data["exchanges"][0]["author"] = "someone"
-        foreign = json.dumps(data).replace("<", "\\u003c")
+        ledger = self.tmp / f"sourcery.{LOGIN}.jsonl"
+        header, first, *rest = ledger.read_text(encoding="utf-8").removesuffix("\n").split("\n")
+        foreign = json.dumps({**json.loads(first), "author": "someone"})
         for bad in ("{not json", foreign):
-            broken = page.replace(block, bad)
-            self.assertNotEqual(broken, page)
-            out_path.write_text(broken, encoding="utf-8")
+            broken = "\n".join([header, bad, *rest]) + "\n"
+            ledger.write_text(broken, encoding="utf-8")
             code, _, err = self.run_cli([str(self.repo), str(out_path)])
             self.assertEqual(code, 2)
-            self.assertIn(str(out_path), err)
-            self.assertEqual(out_path.read_text(encoding="utf-8"), broken)
+            self.assertIn(f"{ledger}:2", err)
+            self.assertEqual(ledger.read_text(encoding="utf-8"), broken)
+            self.assertEqual(out_path.read_text(encoding="utf-8"), page)
 
-    def test_prompt_quoting_the_snapshot_opener_does_not_confuse_the_reader(self):
-        # Replicata: a typed prompt is the snapshot opener line itself plus a
-        # closing tag. Expectata: the page still holds exactly one block and
-        # gives the prompt back byte-exact. Resultata with an unescaped block:
-        # two openers, and the reader refuses the page.
-        text = ace.SNAPSHOT_OPEN + "\n{}\n</script>"
+    def test_prompt_quoting_the_credit_markup_does_not_confuse_the_reader(self):
+        # Replicata: a typed prompt is an article's opening tag, crediting
+        # another login, and a summary's time, as the page writes them.
+        # Expectata: the rerun succeeds, the page crediting one row, and the
+        # ledger gives the prompt back byte-exact. Resultata with an
+        # unescaped prompt: a second credit, naming a ledger that holds no
+        # such row, and the rerun refused.
+        text = (
+            '<article class="exchange claude" id="p1" data-login="mister-person">'
+            '<time datetime="2026-03-01T09:00:00+00:00">'
+        )
         write_jsonl(self.claude_root / "p" / "s.jsonl", [cu(text, ts=T0, cwd=str(self.repo))])
         out_path = self.tmp / "out.html"
         self.generate(out_path)
-        _, page = self.generate(out_path)
-        self.assertEqual(len(ace.SNAPSHOT.findall(page)), 1)
-        self.assertEqual([e.prompt for e in ace.inherit(out_path, self.repo)], [text])
+        self.generate(out_path)
+        self.assertEqual(ace.page_credits(out_path), {(LOGIN, ("Claude Code", utc(T0)))})
+        self.assertEqual(
+            [row["prompt"] for row in ledger_rows(self.tmp / f"sourcery.{LOGIN}.jsonl")[1:]], [text]
+        )
 
     def test_collect_reports_holdings_and_unwoven_exchanges(self):
         self.populate()
@@ -3610,64 +3959,19 @@ class CliQuals(Fixture):
                 self.assertEqual(read(self.claude_root), alone)
             link.unlink()
 
-    def test_flagship_legacy_page_imported_then_merged_with_partial_store(self):
-        # Replicata: a page from before snapshots, rendered from all three
-        # providers; then the Claude session is pruned, the Copilot request's
-        # text is revised in place under the same timestamp, and Codex is
-        # intact plus one new prompt. unrender.py imports the page, then
-        # sourcery.py merges. Expectata: the pruned Claude prompt is kept from
-        # the page, the Copilot page copy is superseded by the store's reading,
-        # the Codex prompt renders once under its store session, the new Codex
-        # prompt is added, all in order; a rerun is byte-identical.
-        self.populate()
-        out_path = self.tmp / "out.html"
-        _, page = self.generate(out_path)
-        out_path.write_text(legacy(page), encoding="utf-8")
-        (self.claude_root / "p" / "s.jsonl").unlink()
-        revised = vsreq("revised copilot prompt", [md("revised copilot reply")], ts=int(utc(T2).timestamp() * 1000))
-        (self.vscode_root / "workspaceStorage" / "h1" / "chatSessions" / "a.json").write_text(
-            json.dumps(vssession([revised])), encoding="utf-8"
-        )
-        write_jsonl(
-            self.codex_root / "sessions" / "2026" / "rollout-1.jsonl",
-            [
-                cxmeta(str(self.repo)),
-                cxuser("codex prompt", ts=T1),
-                cxagent("codex reply", ts=T2),
-                cxuser("new codex prompt", ts=T3),
-                cxagent("new codex reply", ts="2026-03-01T10:20:00.000Z"),
-            ],
-        )
-        self.assertEqual(self.run_cli([str(self.repo), str(out_path)])[0], 2)  # a legacy page is refused
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = unrender.run([str(self.repo), str(out_path)])
-        self.assertEqual(code, 0, err.getvalue())
-        self.assertEqual({e.session for e in ace.inherit(out_path, self.repo)}, {"unrendered"})
-        out, merged = self.generate(out_path)
-        self.assertIn("Prompts: 4", out)
-        for text in (
-            "claude prompt", "claude reply", "codex prompt", "new codex prompt",
-            "revised copilot prompt", "revised copilot reply",
-        ):
-            self.assertIn(text, merged)
-        self.assertNotIn('<pre class="prompt">copilot prompt</pre>', merged)
-        self.assertEqual(merged.count('<pre class="prompt">codex prompt</pre>'), 1)
-        order = [
-            merged.index(f'<pre class="prompt">{text}</pre>')
-            for text in ("claude prompt", "codex prompt", "revised copilot prompt", "new codex prompt")
-        ]
-        self.assertEqual(order, sorted(order))
-        sessions = {e.prompt: e.session for e in ace.inherit(out_path, self.repo)}
-        self.assertEqual((sessions["codex prompt"], sessions["claude prompt"]), ("cx1", "unrendered"))
-        _, again = self.generate(out_path)
-        self.assertEqual(again, merged)
-
-    def test_every_json_escape_survives_page_round_trip(self):
+    def test_every_json_escape_survives_ledger_round_trip(self):
+        # Replicata: a prompt and reply holding every character JSON escapes,
+        # every character a reader splitting lines on more than "\n" would
+        # break at, and markup the page writes; then the store is pruned, so
+        # the ledger alone remembers them. Expectata: the ledger gives both
+        # back byte-exact, one line for the exchange, and the page holds one
+        # script. Resultata with lines split as str.splitlines splits them:
+        # the row broken across lines, and the ledger refused.
         text = (
             'quote " backslash \\ slash / bs \b ff \f nl \n cr \r tab \t nul \x00 del \x7f '
             "ls   ps   lit \\u003c amp & lt < gt > tag </script> cmt <!-- --> cdata ]]> "
-            "astral \U0001F41D combining é crlf \r\n opener " + ace.SNAPSHOT_OPEN
+            "astral \U0001F41D combining é crlf \r\n vt \x0b fs \x1c gs \x1d rs \x1e nel \x85 "
+            'credit <article class="exchange claude" id="p1" data-login="x">'
         )
         write_jsonl(
             self.claude_root / "p" / "s.jsonl",
@@ -3677,16 +3981,17 @@ class CliQuals(Fixture):
         self.generate(out_path)
         (self.claude_root / "p" / "s.jsonl").unlink()
         _, page = self.generate(out_path)
-        self.assertEqual([(e.prompt, e.reply) for e in ace.inherit(out_path, self.repo)], [(text, text)])
-        self.assertEqual(len(ace.SNAPSHOT.findall(page)), 1)
-        self.assertEqual(count_scripts(page), 2)
+        ledger = self.tmp / f"sourcery.{LOGIN}.jsonl"
+        self.assertEqual([(row["prompt"], row["reply"]) for row in ledger_rows(ledger)[1:]], [(text, text)])
+        self.assertEqual(ledger.read_bytes().count(b"\n"), 2)
+        self.assertEqual(count_scripts(page), 1)
 
-    def test_tool_result_at_same_millisecond_elsewhere_never_purges_page_copy(self):
-        # Replicata: the page holds a Claude prompt at T0 from session A; A is
-        # pruned; session B, still in the store, has a bare tool_result record
-        # at T0 (tool plumbing, no typing). Expectata: the page copy is kept —
-        # a record that could never have been rendered is no holding.
-        # Resultata before the fix: purged, and nothing replaced it.
+    def test_tool_result_at_same_millisecond_elsewhere_never_purges_ledger_copy(self):
+        # Replicata: the ledger holds a Claude prompt at T0 from session A; A
+        # is pruned; session B, still in the store, has a bare tool_result
+        # record at T0 (tool plumbing, no typing). Expectata: the ledger copy
+        # is kept — a record that could never have been rendered is no
+        # holding. Resultata before the fix: purged, and nothing replaced it.
         write_jsonl(
             self.claude_root / "p" / "a.jsonl",
             [
@@ -3717,7 +4022,7 @@ class CliQuals(Fixture):
         self.assertIn("Prompts: 2", out)
 
     def test_store_copy_wins_even_when_less_complete(self):
-        # Replicata: the page holds a prompt with its reply; the store's copy
+        # Replicata: the ledger holds a prompt with its reply; the store's copy
         # of the session then loses the reply record but keeps the prompt
         # (a restore from an older backup). Expectata, deliberately: the
         # store's reading wins and the page now shows the prompt awaiting a
@@ -3737,35 +4042,133 @@ class CliQuals(Fixture):
         self.assertNotIn("reply one", page)
         self.assertIn("Prompts: 1", out)
 
-    def test_snapshot_missing_field_rejected_and_page_untouched(self):
-        # A snapshot another schema wrote: a row lacking a field, even one the
+    def test_ledger_missing_field_rejected_and_nothing_written(self):
+        # A ledger another schema wrote: a row lacking a field, even one the
         # dataclass would default, is refused rather than thawed into a guess.
         self.populate()
         out_path = self.tmp / "out.html"
         _, page = self.generate(out_path)
-        block = ace.SNAPSHOT.search(page).group(1)
-        data = json.loads(block)
-        for row in data["exchanges"]:
+        ledger = self.tmp / f"sourcery.{LOGIN}.jsonl"
+        header, *rows = ledger_rows(ledger)
+        for row in rows:
             del row["effort"]
-        broken = page.replace(block, json.dumps(data).replace("<", "\\u003c"))
-        out_path.write_text(broken, encoding="utf-8")
+        broken = "".join(json.dumps(line) + "\n" for line in [header, *rows])
+        ledger.write_text(broken, encoding="utf-8")
         code, _, err = self.run_cli([str(self.repo), str(out_path)])
         self.assertEqual(code, 2)
-        self.assertIn(str(out_path), err)
-        self.assertEqual(out_path.read_text(encoding="utf-8"), broken)
+        self.assertIn(f"{ledger}:2", err)
+        self.assertEqual(ledger.read_text(encoding="utf-8"), broken)
+        self.assertEqual(out_path.read_text(encoding="utf-8"), page)
 
-    def test_snapshot_version_key_is_provenance_not_a_gate(self):
+    def test_ledger_first_line_names_the_format_not_the_release(self):
+        # Replicata: a run, then a rerun on unchanged stores by another
+        # sourcery release (VERSION replaced), as on two machines a release
+        # apart. Expectata: the ledger's first line is {"ledger": 1, "repo":
+        # PROJECT}, the ledger format and the project name, naming no
+        # release, so both runs write the ledger byte-identical, and a union
+        # merge between the two machines' ledgers never doubles line 1.
+        # Resultata (v6.0.0): the first line named the release that wrote
+        # it, {"sourcery": VERSION, "repo": PROJECT}, so each release
+        # rewrote line 1.
         self.populate()
         out_path = self.tmp / "out.html"
-        _, page = self.generate(out_path)
-        block = ace.SNAPSHOT.search(page).group(1)
-        self.assertEqual(json.loads(block)["sourcery"], ace.VERSION)
-        out_path.write_text(
-            page.replace(block, block.replace(json.dumps(ace.VERSION), '"0.0.0"', 1)), encoding="utf-8"
-        )
-        code, out, err = self.run_cli([str(self.repo), str(out_path)])
-        self.assertEqual(code, 0, err)
+        self.generate(out_path)
+        ledger = self.ledger()
+        self.assertEqual(ledger_rows(ledger)[0], ledger_header(self.repo.name))
+        written = ledger.read_bytes()
+        release = ace.VERSION
+        ace.VERSION = "9.9.9"
+        try:
+            out, _ = self.generate(out_path)
+        finally:
+            ace.VERSION = release
         self.assertIn("Prompts: 3", out)
+        self.assertEqual(ledger.read_bytes(), written)
+
+    def test_ledger_of_another_format_refused(self):
+        # Replicata: beside the page, the runner's ledger or mister-person's,
+        # its first line naming a ledger format other than 1: 2, as a later
+        # format would; "1", 1.0, or true, no format number at all; or the
+        # first line sourcery 6.0.0 wrote before ledgers named their format,
+        # {"sourcery": "6.0.0", "repo": PROJECT}. Expectata: exit 2 citing
+        # the ledger at line 1; nothing written. Resultata (v6.0.0): no
+        # format named; a first line naming any release was read alike.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        for login in (LOGIN, "mister-person"):
+            for header in (
+                {"ledger": 2, "repo": self.repo.name},
+                {"ledger": "1", "repo": self.repo.name},
+                {"ledger": 1.0, "repo": self.repo.name},
+                {"ledger": True, "repo": self.repo.name},
+                {"sourcery": "6.0.0", "repo": self.repo.name},
+            ):
+                self.ledger(login).write_text(ledger_text(self.repo.name, [self.theirs()], header), encoding="utf-8")
+                with self.subTest(login=login, header=header):
+                    err = self.refused([str(self.repo), str(out_path)])
+                    self.assertIn(f"Tabula legi non potest: {self.ledger(login)}:1\n", err)
+            self.ledger(login).unlink()
+
+    def test_ledger_of_a_later_format_refused_saying_another_release_wrote_it(self):
+        # Replicata: beside the page, mister-person's ledger or the
+        # runner's, as a later sourcery release writing ledger format 2
+        # would leave it on a machine that upgraded: its first line
+        # {"ledger": 2, "repo": PROJECT}. Expectata: exit 2 citing the
+        # ledger at line 1, saying that when the header line names a ledger
+        # format other than 1, another sourcery release wrote the ledger,
+        # and to run a release that reads that format, then rerun; nothing
+        # written. Resultata (v6.0.0): only the advice for a git conflict or
+        # a union merge, though no merge made the ledger; and advice added
+        # once format 2 exists never reaches a machine still running this
+        # release, which is the one that meets such a ledger.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        for login in ("mister-person", LOGIN):
+            self.ledger(login).write_text(
+                ledger_text(self.repo.name, [self.theirs()], {"ledger": 2, "repo": self.repo.name}), encoding="utf-8"
+            )
+            with self.subTest(login=login):
+                err = self.refused([str(self.repo), str(out_path)])
+                self.assertIn(f"Tabula legi non potest: {self.ledger(login)}:1\n", err)
+                self.assertIn(
+                    "Si linea capitis formam tabulae aliam quam 1 nominat, tabulam alia editio sourcery scripsit: "
+                    "curre editionem quae illam formam legit, deinde iterum curre.",
+                    err,
+                )
+            self.ledger(login).unlink()
+
+    def test_header_line_a_union_merge_left_twice_refused_saying_which_to_keep(self):
+        # Replicata: github.com/dreeves/blog is renamed newblog, and this
+        # checkout's origin names newblog. dreeves's ledger is as git's
+        # union merge (merge=union) left it, line 1 twice: on one machine he
+        # wrote newblog in place of blog on its first line, as sourcery's
+        # refusal says to, while on another, whose origin still named blog,
+        # a run added a prompt beside it; the merge kept both sides' lines,
+        # so line 1 names blog and line 3 newblog. Expectata: exit 2 citing
+        # the ledger at line 3, saying that such a union merge can leave the
+        # header line twice, and to keep on the first line the one naming
+        # 'newblog' and delete the other, then rerun; nothing written. With
+        # that done, the run succeeds, showing both prompts. Resultata
+        # (v6.0.0): no word of a header line left twice.
+        self.origin("https://github.com/dreeves/newblog.git")
+        older = exchange(timestamp=utc("2026-03-01T08:00:00.000Z"), session="cs0", prompt="older prompt")
+        original = exchange(timestamp=utc("2026-03-01T09:00:00.000Z"), session="cs0", prompt="original prompt")
+        row = lambda e: json.dumps(ace.freeze(e), ensure_ascii=False)
+        lines = [json.dumps(ledger_header("blog")), row(older), json.dumps(ledger_header("newblog")), row(original)]
+        self.ledger().write_text("\n".join(lines) + "\n", encoding="utf-8")
+        out_path = self.tmp / "out.html"
+        err = self.refused([str(self.repo), str(out_path)])
+        self.assertIn(f"Tabula legi non potest: {self.ledger()}:3\n", err)
+        self.assertIn(
+            "git sponte utriusque partis lineas servat; sed fusio talis lineam capitis bis relinquere potest: "
+            "eam quae 'newblog' nominat in prima linea serva, alteram dele, deinde iterum curre.\n",
+            err,
+        )
+        self.ledger().write_text("\n".join([lines[2], lines[1], lines[3]]) + "\n", encoding="utf-8")
+        out, page = self.generate(out_path)
+        self.assertIn(f"Prompts: 2\n  {LOGIN}: 2\n", out)
+        for text in ("older prompt", "original prompt"):
+            self.assertIn(f'<pre class="prompt">{text}</pre>', page)
 
     def test_copilot_button_click_without_timestamp_fails_loudly(self):
         # Every request is a holding, so its timestamp is checked before the
@@ -3815,9 +4218,9 @@ class CliQuals(Fixture):
             self.assertIn("Prompts: 3", out)  # the page is written before the browser is asked
         finally:
             ace.webbrowser.open = original
-        self.assertEqual(len(ace.SNAPSHOT.findall(out_path.read_text(encoding="utf-8"))), 1)
+        self.assertEqual(len(ace.page_credits(out_path)), 3)
 
-    def test_relative_output_path_inherits_previous_page(self):
+    def test_relative_output_path_reads_the_ledger_beside_it(self):
         self.populate()
         cwd = os.getcwd()
         os.chdir(self.tmp)
@@ -3854,7 +4257,7 @@ class CliQuals(Fixture):
         self.assertIn(str(out_path), err)
         self.assertEqual(out_path.read_bytes(), before)
 
-    def test_printed_count_deck_articles_and_snapshot_agree(self):
+    def test_printed_count_deck_articles_and_ledger_agree(self):
         self.populate()
         out_path = self.tmp / "out.html"
         self.generate(out_path)
@@ -3868,8 +4271,9 @@ class CliQuals(Fixture):
         self.assertEqual(count, 4)
         self.assertEqual(page.count("<article "), count)
         self.assertIn(f'<p class="deck">{count} prompts', page)
-        self.assertEqual(len(json.loads(ace.SNAPSHOT.search(page).group(1))["exchanges"]), count)
-        self.assertEqual(len(ace.inherit(out_path, self.repo)), count)
+        self.assertIn(f"\n  {LOGIN}: {count}\n", out)
+        self.assertEqual(len(ledger_rows(self.tmp / f"sourcery.{LOGIN}.jsonl")) - 1, count)
+        self.assertEqual(len(ace.page_credits(out_path)), count)
 
     def test_kept_and_fresh_sharing_a_timestamp_both_survive_in_stable_order(self):
         write_jsonl(
@@ -3948,6 +4352,1688 @@ class CliQuals(Fixture):
         with self.assertRaises(SyntaxError):
             ast.parse(source, feature_version=(3, 9))
         ast.parse(source, feature_version=(3, 10))
+
+    # ------------------------------------------------------------- ledgers
+
+    def ledger(self, login=LOGIN):
+        return self.tmp / f"sourcery.{login}.jsonl"
+
+    def origin(self, url):
+        """Give the repo one remote, origin, at url."""
+        git = self.repo / ".git"
+        git.mkdir(exist_ok=True)
+        (git / "config").write_text(f'[remote "origin"]\n\turl = {url}\n', encoding="utf-8")
+
+    def refused(self, argv):
+        """Run the CLI expecting a refusal: exit 2, nothing on stdout, and
+        every file beside the page left byte-identical, none added or
+        removed. Returns the error text."""
+        return self.refused_by(self.run_cli, argv)
+
+    def refused_by(self, cli, argv):
+        """refused() for the CLI `cli` runs: sourcery's, or adopt.py's."""
+        before = {path.name: path.read_bytes() for path in self.tmp.iterdir() if path.is_file()}
+        code, out, err = cli(argv)
+        self.assertEqual((code, out), (2, ""), err)
+        self.assertEqual({path.name: path.read_bytes() for path in self.tmp.iterdir() if path.is_file()}, before)
+        return err
+
+    def theirs(self):
+        """mister-person's exchange: a Codex prompt an hour before the
+        populated stores' first."""
+        return exchange(timestamp=utc("2026-03-01T09:00:00.000Z"), provider="Codex", model="gpt-5.4",
+                        session="lg1", prompt="logan prompt", reply="logan reply")
+
+    def test_run_writes_the_runners_ledger_beside_the_page(self):
+        # Replicata: a run by the login dreeves, each provider's store
+        # holding one prompt. Expectata: beside the page,
+        # sourcery.dreeves.jsonl: its first line the header naming the
+        # ledger format, 1, and the project, then one line per exchange in
+        # freeze() form, in the page's order, the file ending in a newline;
+        # stdout naming the ledger, then the page, as written. Resultata
+        # (v5.5.2): no ledger; the page carried a snapshot of its exchanges
+        # instead.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        out, _ = self.generate(out_path)
+        header, *rows = ledger_rows(self.ledger())
+        self.assertEqual(header, ledger_header(self.repo.name))
+        exchanges, _ = ace.collect(self.repo, ace.discover_roots(self.env))
+        self.assertEqual(rows, [jsonable(e) for e in ace.weave(exchanges)])
+        self.assertEqual([row["prompt"] for row in rows], ["claude prompt", "codex prompt", "copilot prompt"])
+        self.assertEqual(re.findall(r"^Written: (.*)$", out, re.MULTILINE), [str(self.ledger()), str(out_path)])
+
+    def test_page_holds_no_snapshot_and_credits_each_row_invisibly(self):
+        # Replicata: a run. Expectata: the page holds one script, its own,
+        # and no data block; each article records the login whose ledger
+        # holds its row, and its meta line shows that human's display name.
+        # Resultata (v5.5.2): a second script, the JSON snapshot of every
+        # exchange, and no human named.
+        self.populate()
+        _, page = self.generate(self.tmp / "out.html")
+        self.assertEqual(count_scripts(page), 1)
+        self.assertNotIn("application/json", page)
+        self.assertEqual(len(re.findall(r'<article class="exchange \w+" id="p\d" data-login="dreeves">', page)), 3)
+        self.assertEqual(page.count('<span class="human">dreev</span>'), 3)
+
+    def test_ledger_not_page_remembers_what_the_stores_lost(self):
+        # Replicata: a run; then the page is deleted and the Claude session
+        # pruned from the store. Expectata: the next run restores the pruned
+        # exchange from the ledger. Resultata (v5.5.2): the exchange gone,
+        # the page having been its only copy.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        out_path.unlink()
+        (self.claude_root / "p" / "s.jsonl").unlink()
+        out, page = self.generate(out_path)
+        for text in ("claude prompt", "claude reply", "codex prompt", "copilot prompt"):
+            self.assertIn(text, page)
+        self.assertIn("Prompts: 3", out)
+
+    def test_page_rendered_from_every_ledger_and_only_the_runners_written(self):
+        # Replicata: beside the page lies another human's ledger,
+        # sourcery.mister-person.jsonl, holding a Codex exchange an hour
+        # older than the stores' prompts, and dreeves runs. Expectata: the
+        # page shows both humans' prompts in time order, each credited to
+        # its login and named by its display name; stdout counts the prompts
+        # per human, by login; the other ledger is never written, and
+        # dreeves's ledger holds dreeves's rows alone. Resultata (v5.5.2):
+        # the other ledger ignored, and the page dreeves's alone.
+        self.populate()
+        other = self.ledger("mister-person")
+        # Its header's keys written in another order, so a rewrite could
+        # not match it.
+        other.write_text(
+            ledger_text(self.repo.name, [self.theirs()], {"repo": self.repo.name, "ledger": 1}), encoding="utf-8"
+        )
+        before = (other.stat().st_ino, other.read_bytes())
+        out_path = self.tmp / "out.html"
+        out, page = self.generate(out_path)
+        self.assertIn("Prompts: 4\n  dreeves: 3\n  mister-person: 1\nPrompts deleted: 0\n", out)
+        self.assertEqual(re.findall(r"^Written: (.*)$", out, re.MULTILINE), [str(self.ledger()), str(out_path)])
+        self.assertEqual((other.stat().st_ino, other.read_bytes()), before)
+        self.assertEqual(
+            re.findall(
+                r'data-login="([a-z-]+)">.*?<pre class="prompt">([a-z ]+)</pre>.*?<span class="human">(\w+)</span>',
+                page,
+                re.DOTALL,
+            ),
+            [
+                ("mister-person", "logan prompt", "logan"),
+                ("dreeves", "claude prompt", "dreev"),
+                ("dreeves", "codex prompt", "dreev"),
+                ("dreeves", "copilot prompt", "dreev"),
+            ],
+        )
+        self.assertEqual(
+            [row["prompt"] for row in ledger_rows(self.ledger())[1:]], ["claude prompt", "codex prompt", "copilot prompt"]
+        )
+
+    def test_runner_without_prompts_writes_a_ledger_holding_its_header_alone(self):
+        # Replicata: dreeves runs with empty stores beside mister-person's
+        # ledger. Expectata: the page shows mister-person's prompt; dreeves's
+        # ledger is written all the same, holding its header alone; stdout
+        # counts dreeves at zero. Resultata (v5.5.2): "No prompts found".
+        self.ledger("mister-person").write_text(ledger_text(self.repo.name, [self.theirs()]), encoding="utf-8")
+        out, page = self.generate(self.tmp / "out.html")
+        self.assertIn("logan prompt", page)
+        self.assertIn("Prompts: 1\n  dreeves: 0\n  mister-person: 1\n", out)
+        self.assertEqual(ledger_rows(self.ledger()), [ledger_header(self.repo.name)])
+
+    def test_ledger_rows_in_any_order_render_in_time_order(self):
+        # Replicata: ledgers whose rows lie out of time order, as a git
+        # merge keeping both sides' lines can leave them. Expectata: the
+        # page shows every row in time order; the runner's rewritten ledger
+        # is in time order; the other ledger stays as it lies. Resultata
+        # (v5.5.2): ledgers ignored.
+        mine = [exchange(timestamp=utc(T3), prompt="mine late"), exchange(timestamp=utc(T0), prompt="mine early")]
+        their = [
+            exchange(timestamp=utc(T2), provider="Codex", prompt="their late"),
+            exchange(timestamp=utc(T1), provider="Codex", prompt="their early"),
+        ]
+        self.ledger().write_text(ledger_text(self.repo.name, mine), encoding="utf-8")
+        self.ledger("mister-person").write_text(ledger_text(self.repo.name, their), encoding="utf-8")
+        before = self.ledger("mister-person").read_bytes()
+        _, page = self.generate(self.tmp / "out.html")
+        order = [page.index(f">{text}<") for text in ("mine early", "their early", "their late", "mine late")]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual([row["prompt"] for row in ledger_rows(self.ledger())[1:]], ["mine early", "mine late"])
+        self.assertEqual(self.ledger("mister-person").read_bytes(), before)
+
+    def test_row_doubled_in_a_ledger_renders_once_whoever_runs(self):
+        # Replicata: alice's ledger holds one row twice, beside another, as
+        # an editor's "accept both" on a git conflict can leave it; dreeves
+        # runs, then alice runs, on the same files, no store holding
+        # anything. Expectata: each run shows the doubled row once and
+        # counts alice's prompts as 2, and both write the same page.
+        # Resultata (v6.0.0 before the fix): dreeves's run showed the row
+        # twice and counted alice at 3; alice's run, weaving her own rows,
+        # showed it once and counted 2.
+        rows = [
+            exchange(timestamp=utc("2026-03-01T09:00:00.000Z"), provider="Codex", model="gpt-5.4", session="al1",
+                     prompt="alice prompt", reply="alice reply"),
+            exchange(timestamp=utc(T3), provider="Codex", model="gpt-5.4", session="al1", prompt="alice two"),
+        ]
+        header, first, second = ledger_text(self.repo.name, rows).removesuffix("\n").split("\n")
+        self.ledger("alice").write_text("\n".join([header, first, first, second]) + "\n", encoding="utf-8")
+        out_path = self.tmp / "out.html"
+        runs = {}
+        for login in (LOGIN, "alice"):
+            ace.gh_user = gh_says(f"{login}\n")
+            runs[login] = self.generate(out_path)
+        for login, (out, page) in runs.items():
+            with self.subTest(runner=login):
+                self.assertIn("Prompts: 2\n  alice: 2\n  dreeves: 0\n", out)
+                self.assertEqual(page.count('<pre class="prompt">alice prompt</pre>'), 1)
+        self.assertEqual(runs[LOGIN][1], runs["alice"][1])
+
+    def test_rows_alike_but_for_the_session_in_a_ledger_render_once_whoever_runs(self):
+        # Replicata: alice's ledger holds one Codex prompt twice, its rows
+        # alike but for the session, as when one of her machines read the
+        # prompt from its session's transcript and another from a fork that
+        # replayed the session's records into a new one, and a merge kept
+        # both lines; beside them, another prompt. dreeves runs, then alice
+        # runs, on the same files, no store holding anything. Expectata:
+        # each run shows the prompt once and counts alice's prompts as 2,
+        # and both write the same page. Resultata (v6.0.0): as expected;
+        # this guards read_ledger's weaving of every ledger it reads, which
+        # collapses such rows as weave collapses a fork's replayed copies,
+        # against reading other humans' ledgers unwoven: dreeves's run then
+        # showed the prompt twice and counted alice at 3. (Rows identical
+        # outright collapse even unwoven, read_ledger keying each row by its
+        # exchange.)
+        first = exchange(timestamp=utc("2026-03-01T09:00:00.000Z"), provider="Codex", model="gpt-5.4", session="al1",
+                         prompt="alice prompt", reply="alice reply")
+        forked = dataclasses.replace(first, session="al2")
+        other = exchange(timestamp=utc(T3), provider="Codex", model="gpt-5.4", session="al1", prompt="alice two")
+        self.ledger("alice").write_text(ledger_text(self.repo.name, [first, forked, other]), encoding="utf-8")
+        out_path = self.tmp / "out.html"
+        runs = {}
+        for login in (LOGIN, "alice"):
+            ace.gh_user = gh_says(f"{login}\n")
+            runs[login] = self.generate(out_path)
+        for login, (out, page) in runs.items():
+            with self.subTest(runner=login):
+                self.assertIn("Prompts: 2\n  alice: 2\n  dreeves: 0\n", out)
+                self.assertEqual(page.count('<pre class="prompt">alice prompt</pre>'), 1)
+        self.assertEqual(runs[LOGIN][1], runs["alice"][1])
+
+    def test_two_readings_of_one_prompt_in_a_ledger_refused_citing_both_lines(self):
+        # Replicata: a ledger holding two rows of one Codex prompt, alike in
+        # agent, time, session, and words, as a git merge keeping both
+        # sides' lines (merge=union) leaves them when runs on two machines
+        # read the prompt differently; the rows differ in one other field: the
+        # reply, the model, the effort, the images, the working time, the
+        # wall-clock span, the ballots, the lines added, or the lines
+        # deleted. They lie at lines 2 and 4, another prompt's row between
+        # them, in dreeves's ledger (the runner's) or mister-person's, and
+        # no store holds the session. Expectata: exit 2, the refusal naming
+        # the prompt by agent, time, and session, citing both rows by ledger
+        # and line, and saying to delete the stale line, then rerun, or to
+        # rerun on the machine whose transcripts hold that session; nothing
+        # written. Resultata (v6.0.0): exit 0, the prompt shown twice.
+        held = self.theirs()
+        between = exchange(timestamp=utc("2026-03-01T09:30:00.000Z"), provider="Codex", session="lg1", prompt="between")
+        changes = (
+            ("reply", "logan reply, then more"), ("model", "gpt-5.5"), ("effort", "high"),
+            ("images", ("data:image/png;base64,AA==",)), ("elapsed", 12.5), ("wall", 99.0),
+            ("ballots", (ace.Ballot("Q?", ("a", "b"), ("a",)),)), ("added", 3), ("deleted", 2),
+        )
+        out_path = self.tmp / "out.html"
+        for login in (LOGIN, "mister-person"):
+            for field, value in changes:
+                reading = dataclasses.replace(held, **{field: value})
+                self.ledger(login).write_text(ledger_text(self.repo.name, [held, between, reading]), encoding="utf-8")
+                with self.subTest(login=login, field=field):
+                    err = self.refused([str(self.repo), str(out_path)])
+                    self.assertIn(
+                        f"Rogationis Codex {held.timestamp.isoformat()} (sessio lg1) duae lectiones sunt:\n"
+                        f"  {self.ledger(login)}:2\n  {self.ledger(login)}:4\n"
+                        "Lineam obsoletam dele, deinde iterum curre; aut iterum curre in machina cuius "
+                        "transcripta illam sessionem tenent.\n",
+                        err,
+                    )
+            self.ledger(login).unlink()
+
+    def test_two_readings_cite_the_first_line_holding_a_doubled_row(self):
+        # Replicata: dreeves's ledger holds a Codex row at lines 2 and 3,
+        # doubled, as an editor's "accept both" on a git conflict can leave
+        # a row, and at line 4 a second reading of that prompt, its reply
+        # longer; no store holds the session. Expectata:
+        # exit 2, the refusal citing the doubled row by the first line
+        # holding it, 2, and the second reading by its line, 4; nothing
+        # written. Resultata (v6.0.0): as expected; this guards a row's
+        # citation, the first line holding it, as read_ledger says, against
+        # citing a later line holding the same row.
+        held = self.theirs()
+        reading = dataclasses.replace(held, reply="logan reply, then more")
+        header, doubled, other = ledger_text(self.repo.name, [held, reading]).removesuffix("\n").split("\n")
+        self.ledger().write_text("\n".join([header, doubled, doubled, other]) + "\n", encoding="utf-8")
+        err = self.refused([str(self.repo), str(self.tmp / "out.html")])
+        self.assertIn(f" duae lectiones sunt:\n  {self.ledger()}:2\n  {self.ledger()}:4\n", err)
+
+    def test_rerun_on_the_machine_holding_the_session_heals_two_readings(self):
+        # Replicata: dreeves's ledger holds two readings of the Claude Code
+        # prompt his stores hold, their replies cut short at two points (as
+        # runs on two machines while the reply arrived leave them, once a
+        # merge keeps both sides' lines), and a prompt the stores lost.
+        # Expectata: exit 0; the stores' reading replaces both readings, so
+        # the page shows the prompt once, with the stores' reply, and the
+        # ledger holds it once; the lost prompt is kept; no prompt is
+        # reported deleted. Resultata (v6.0.0): as expected; this guards the
+        # healing rerun against the check reading the ledger as it lies,
+        # before the stores' readings replace its rows.
+        self.populate()
+        lost = exchange(timestamp=utc("2026-03-01T08:00:00.000Z"), session="cs0", prompt="lost prompt")
+        cut = [exchange(session="cs1", prompt="claude prompt", reply=reply) for reply in ("claude", "claude rep")]
+        self.ledger().write_text(ledger_text(self.repo.name, [lost, *cut]), encoding="utf-8")
+        out, page = self.generate(self.tmp / "out.html")
+        self.assertIn(f"Prompts: 4\n  {LOGIN}: 4\nPrompts deleted: 0\n", out)
+        self.assertEqual(page.count('<pre class="prompt">claude prompt</pre>'), 1)
+        self.assertIn("<p>claude reply</p>", page)
+        self.assertEqual(
+            [(row["prompt"], row["reply"]) for row in ledger_rows(self.ledger())[1:]],
+            [("lost prompt", "r"), ("claude prompt", "claude reply"), ("codex prompt", "codex reply"),
+             ("copilot prompt", "copilot reply")],
+        )
+
+    def test_two_readings_of_one_prompt_in_the_transcripts_refused_citing_both_files(self):
+        # Replicata: two Codex transcripts of one session (one id) hold one
+        # prompt, alike in time and words, one of them with the reply cut
+        # short; no ledger exists. Expectata: exit 2, the refusal naming the
+        # prompt by agent, time, and session and citing each reading where
+        # it was read, its transcript's file, there being no ledger line;
+        # nothing written. Resultata (v6.0.0): exit 0, the prompt shown
+        # twice, and both readings written to the ledger.
+        cwd = str(self.repo)
+        first, second = (
+            write_jsonl(
+                self.codex_root / "sessions" / "2026" / name,
+                [cxmeta(cwd, sid="cx1"), cxuser("codex prompt", ts=T1), cxagent(reply, ts=T2)],
+            )
+            for name, reply in (("rollout-1.jsonl", "codex reply"), ("rollout-2.jsonl", "codex re"))
+        )
+        err = self.refused([str(self.repo), str(self.tmp / "out.html")])
+        self.assertIn(
+            f"Rogationis Codex {utc(T1).isoformat()} (sessio cx1) duae lectiones sunt:\n  {first}\n  {second}\n", err
+        )
+
+    def test_two_readings_of_one_prompt_in_the_transcripts_refused_with_advice_that_fits(self):
+        # Replicata: as in the qual before, two Codex transcripts of one
+        # session hold one prompt, alike in time and words, one of them with
+        # the reply cut short; no ledger exists. Expectata: exit 2, the
+        # refusal citing both files, then saying that both readings were
+        # read from this machine's transcripts, which disagree about the
+        # prompt, and that if one file is a stale copy of the other, the
+        # copy is to be moved out of the transcript store, then rerun; if
+        # not, that sourcery does not decide which reading to believe, the
+        # case to be examined and the script updated; nothing written.
+        # Resultata (v6.0.0): the advice for two readings in a ledger, to
+        # delete the stale line or to rerun on the machine whose
+        # transcripts hold the session, neither of which can apply: no
+        # ledger line holds either reading, and this is that machine.
+        cwd = str(self.repo)
+        first, second = (
+            write_jsonl(
+                self.codex_root / "sessions" / "2026" / name,
+                [cxmeta(cwd, sid="cx1"), cxuser("codex prompt", ts=T1), cxagent(reply, ts=T2)],
+            )
+            for name, reply in (("rollout-1.jsonl", "codex reply"), ("rollout-2.jsonl", "codex re"))
+        )
+        err = self.refused([str(self.repo), str(self.tmp / "out.html")])
+        self.assertIn(
+            f" duae lectiones sunt:\n  {first}\n  {second}\n"
+            "Ambae lectiones e transcriptis huius machinae lectae sunt, quae de rogatione dissentiunt. "
+            "Si alter fasciculus alterius exemplar obsoletum est, exemplar e reposito transcriptorum alio move, "
+            "deinde iterum curre. Sin minus, ut cum unus fasciculus bis citatur, utri lectioni credendum sit "
+            "sourcery non decernit: casus inspiciendus, scriptum renovandum est.\nNihil scriptum est.",
+            err,
+        )
+        self.assertNotIn("Lineam obsoletam dele", err)
+
+    def test_two_readings_of_one_prompt_in_one_transcript_refused_with_advice_that_fits(self):
+        # Replicata: one Claude Code transcript holding a prompt's user
+        # record twice, verbatim, the reply after the second, so the first
+        # reads with no reply; no ledger exists. A Claude Code pair always
+        # comes from one file: a session in two files is refused before
+        # any two readings are sought. Expectata: exit 2, the refusal
+        # citing that one file twice, then the transcripts' advice: if one
+        # file is a stale copy of the other, the copy is to be moved out of
+        # the transcript store, then rerun; if not, as when one file is
+        # cited twice, sourcery does not decide which reading to believe:
+        # the case is to be examined and the script updated; nothing
+        # written. Resultata (v6.0.0): the advice spoke only of one file a
+        # stale copy of another, which cannot apply to one file holding
+        # both readings.
+        cwd = str(self.repo)
+        transcript = write_jsonl(
+            self.claude_root / "p" / "s.jsonl",
+            [cu("claude prompt", ts=T0, cwd=cwd), cu("claude prompt", ts=T0, cwd=cwd),
+             ca([{"type": "text", "text": "claude reply"}], cwd=cwd)],
+        )
+        err = self.refused([str(self.repo), str(self.tmp / "out.html")])
+        self.assertIn(
+            f"Rogationis Claude Code {utc(T0).isoformat()} (sessio cs1) duae lectiones sunt:\n"
+            f"  {transcript}\n  {transcript}\n"
+            "Ambae lectiones e transcriptis huius machinae lectae sunt, quae de rogatione dissentiunt. "
+            "Si alter fasciculus alterius exemplar obsoletum est, exemplar e reposito transcriptorum alio move, "
+            "deinde iterum curre. Sin minus, ut cum unus fasciculus bis citatur, utri lectioni credendum sit "
+            "sourcery non decernit: casus inspiciendus, scriptum renovandum est.\nNihil scriptum est.",
+            err,
+        )
+
+    def test_one_transcript_read_twice_is_no_two_readings(self):
+        # Replicata: a run whose stores hold each of two transcripts twice:
+        # the Claude Code store listed in AI_CHAT_CLAUDE_ROOTS beside a
+        # symlink to it, and a Codex transcript copied whole into a second
+        # file. Expectata: exit 0, each prompt shown and counted once: rows
+        # alike but for the file they were read from are one reading, as
+        # weave collapses them, never two. Resultata (v6.0.0): as expected;
+        # this guards the check of the stores' own rows for two readings,
+        # made apart from the ledgers', against checking them unwoven: each
+        # such prompt was then refused as two readings, its one transcript
+        # cited twice.
+        self.populate()
+        alias = self.tmp / "alias"
+        alias.symlink_to(self.claude_root)
+        self.env["AI_CHAT_CLAUDE_ROOTS"] = os.pathsep.join([str(self.claude_root), str(alias)])
+        rollout = self.codex_root / "sessions" / "2026" / "rollout-1.jsonl"
+        shutil.copy(rollout, rollout.with_name("rollout-1-copy.jsonl"))
+        out, page = self.generate(self.tmp / "out.html")
+        self.assertIn(f"Prompts: 3\n  {LOGIN}: 3\n", out)
+        for text in ("claude prompt", "codex prompt"):
+            self.assertEqual(page.count(f'<pre class="prompt">{text}</pre>'), 1)
+
+    def test_rows_of_one_time_in_other_sessions_or_words_are_no_two_readings_of_one_prompt(self):
+        # Replicata: dreeves's ledger holds a Codex prompt, then a row of the
+        # same agent and time in another session (a forked session whose
+        # reply differs), and one in the same session whose words differ;
+        # no store holds them. Expectata: exit 0, all three shown and
+        # counted: rows unlike in session or in words are no two readings of
+        # one prompt. Resultata (v6.0.0): as expected; this guards the check's
+        # key, agent, time, session, and words, against narrowing.
+        held = self.theirs()
+        forked = dataclasses.replace(held, session="lg2", reply="another reply")
+        reworded = dataclasses.replace(held, prompt="logan prompt, reworded", reply="a third reply")
+        self.ledger().write_text(ledger_text(self.repo.name, [held, forked, reworded]), encoding="utf-8")
+        out, page = self.generate(self.tmp / "out.html")
+        self.assertIn(f"Prompts: 3\n  {LOGIN}: 3\nPrompts deleted: 0\n", out)
+        for text in ("logan reply", "another reply", "a third reply"):
+            self.assertIn(f"<p>{text}</p>", page)
+
+    def test_rows_of_one_session_and_words_at_another_time_or_by_another_agent_are_no_two_readings(self):
+        # Replicata: dreeves's ledger holds a Codex prompt; a row alike in
+        # agent, session, and words five minutes later, as when the human
+        # types the same words twice in one session; and a row alike in
+        # time, session, and words but of another agent, Claude Code; the
+        # three replies differ, and no store holds them. Expectata: exit 0,
+        # all three shown and counted, and the ledger holding all three as
+        # they were, in time order: rows unlike in time or in agent are no
+        # two readings of one prompt. Resultata (v6.0.0): as expected; this
+        # guards the check's key, agent, time, session, and words, against
+        # losing the time or the agent.
+        held = self.theirs()
+        again = dataclasses.replace(held, timestamp=utc("2026-03-01T09:05:00.000Z"), reply="again reply")
+        other = dataclasses.replace(held, provider="Claude Code", model="claude-opus-4-8", reply="claude reply")
+        self.ledger().write_text(ledger_text(self.repo.name, [held, again, other]), encoding="utf-8")
+        out, page = self.generate(self.tmp / "out.html")
+        self.assertIn(f"Prompts: 3\n  {LOGIN}: 3\nPrompts deleted: 0\n", out)
+        for text in ("logan reply", "again reply", "claude reply"):
+            self.assertIn(f"<p>{text}</p>", page)
+        self.assertEqual(ledger_rows(self.ledger())[1:], [jsonable(e) for e in (other, held, again)])
+
+    def test_two_prompts_of_one_codex_time_and_session_kept_whatever_else_differs(self):
+        # Replicata: dreeves's ledger holds two Codex rows of one time and
+        # one session whose words differ, and with them the model, the
+        # reply (the second's empty), the effort, the working time, and the
+        # wall-clock span, the shape of a pair crashla's sourcery 5 page
+        # holds; no store holds them any longer. Expectata: exit 0, both
+        # shown and counted, and the ledger holding both as they were.
+        # Resultata (v6.0.0): as expected; this guards the check's key
+        # against losing the words, which would refuse such a ledger on
+        # every run, with no store left to heal it by a rerun.
+        first = exchange(timestamp=utc("2026-02-21T04:18:45.833Z"), provider="Codex", model="gpt-5.4", session="cr1",
+                         prompt="first words", reply="first reply", effort="high", elapsed=3.0, wall=4.0)
+        second = dataclasses.replace(first, model="gpt-5.5", prompt="second words", reply="", effort="", elapsed=0.0,
+                                     wall=0.0)
+        self.ledger().write_text(ledger_text(self.repo.name, [first, second]), encoding="utf-8")
+        out, page = self.generate(self.tmp / "out.html")
+        self.assertIn(f"Prompts: 2\n  {LOGIN}: 2\nPrompts deleted: 0\n", out)
+        for text in ("first words", "second words"):
+            self.assertIn(f'<pre class="prompt">{text}</pre>', page)
+        self.assertEqual(ledger_rows(self.ledger())[1:], [jsonable(first), jsonable(second)])
+
+    def test_unparseable_ledger_refused_saying_to_keep_both_sides_lines(self):
+        # Replicata: a ledger a git merge left conflict markers in, or one
+        # otherwise unreadable as a header line then one exchange per line:
+        # a line that is no JSON object, a blank line, a header missing a
+        # key or carrying an extra one or none at all, a row with a field
+        # unknown or missing or a timestamp unreadable, an empty file; the
+        # runner's ledger, or another human's. Expectata: exit 2 citing the
+        # ledger at the line, saying that a git conflict is resolved by
+        # keeping both sides' lines, and nothing written. Resultata
+        # (v5.5.2): ledgers ignored.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        mine = self.ledger().read_text(encoding="utf-8")
+        header, first, second, third = mine.removesuffix("\n").split("\n")
+        row = json.loads(first)
+        cases = [
+            (LOGIN, [header, first, "<<<<<<< HEAD", second, "=======", third, ">>>>>>> theirs"], 3),
+            (LOGIN, [header, "{not json", second, third], 2),
+            (LOGIN, [header, first, "", second, third], 3),
+            (LOGIN, [header, "[1, 2]", second, third], 2),
+            (LOGIN, [header, json.dumps({**row, "author": "someone"}), second, third], 2),
+            (LOGIN, [header, json.dumps({k: v for k, v in row.items() if k != "wall"}), second, third], 2),
+            (LOGIN, [header, first, json.dumps({**row, "timestamp": "yesterday"}), third], 3),
+            (LOGIN, [json.dumps({"ledger": 1}), first, second, third], 1),
+            (LOGIN, [json.dumps({"ledger": 1, "repo": self.repo.name, "login": LOGIN}), first], 1),
+            (LOGIN, [json.dumps({"ledger": 1, "repo": 5}), first], 1),
+            (LOGIN, [first, second, third], 1),
+            (LOGIN, None, 1),
+            ("mister-person", [header, "<<<<<<< HEAD", first, "=======", ">>>>>>> theirs"], 2),
+        ]
+        for login, lines, number in cases:
+            text = "" if lines is None else "\n".join(lines) + "\n"
+            self.ledger(login).write_text(text, encoding="utf-8")
+            with self.subTest(login=login, lines=lines):
+                err = self.refused([str(self.repo), str(out_path)])
+                self.assertIn(f"{self.ledger(login)}:{number}\n", err)
+                self.assertIn("utriusque partis lineas servando", err)
+            self.ledger().write_text(mine, encoding="utf-8")
+            self.ledger("mister-person").unlink(missing_ok=True)
+
+    def test_unparseable_ledger_refusal_says_git_keeps_both_sides_lines_given_the_union_attribute(self):
+        # Replicata: the runner's ledger holding git conflict markers, or
+        # another human's, or a ledger damaged otherwise (a line that is no
+        # JSON). Expectata: exit 2, the refusal saying, after how to resolve
+        # a conflict by keeping both sides' lines, that with the line
+        # "sourcery.*.jsonl merge=union" added to the attributes file git
+        # reads for all the human's repositories (normally
+        # ~/.config/git/attributes) git keeps both sides' lines by itself,
+        # but that such a merge can leave the header line twice, the one to
+        # keep on the first line being the one naming this project, 'repo';
+        # nothing written. Resultata (v6.0.0): no word of git's attributes
+        # file. Resultata (v6.0.0 before the fix): the attributes file named
+        # as ~/.config/git/attributes alone, which git reads only when
+        # core.attributesFile and $XDG_CONFIG_HOME are unset
+        # (gitattributes(5)), and no word of a header line left twice.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        mine = self.ledger().read_text(encoding="utf-8")
+        header, first, second, third = mine.removesuffix("\n").split("\n")
+        for login, lines in (
+            (LOGIN, [header, first, "<<<<<<< HEAD", second, "=======", third, ">>>>>>> theirs"]),
+            ("mister-person", [header, "<<<<<<< HEAD", first, "=======", ">>>>>>> theirs"]),
+            (LOGIN, [header, "{not json", second, third]),
+        ):
+            self.ledger(login).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            with self.subTest(login=login, lines=lines):
+                err = self.refused([str(self.repo), str(out_path)])
+                self.assertIn(
+                    "conflictum solve utriusque partis lineas servando (lineam capitis semel), deinde iterum curre.\n"
+                    "Linea 'sourcery.*.jsonl merge=union' in fasciculo attributorum quem git omnibus repositoriis "
+                    "tuis legit (plerumque ~/.config/git/attributes) addita, git sponte utriusque partis lineas "
+                    "servat; sed fusio talis lineam capitis bis relinquere potest: eam quae 'repo' nominat in prima "
+                    "linea serva, alteram dele, deinde iterum curre.\nNihil scriptum est.",
+                    err,
+                )
+            self.ledger().write_text(mine, encoding="utf-8")
+            self.ledger("mister-person").unlink(missing_ok=True)
+
+    def test_unreadable_ledger_refused_cleanly(self):
+        # Replicata: beside the page lies a file named like a ledger that is
+        # no UTF-8 text, or a directory so named. Expectata: exit 2 naming
+        # it, nothing written. Resultata (v5.5.2): ledgers ignored.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        self.ledger().write_bytes(b'{"ledger": 1, "repo": "repo"}\n\xff\xfe\n')
+        err = self.refused([str(self.repo), str(out_path)])
+        self.assertIn(str(self.ledger()), err)
+        self.ledger().unlink()
+        self.ledger().mkdir()
+        err = self.refused([str(self.repo), str(out_path)])
+        self.assertIn(str(self.ledger()), err)
+
+    def test_ledger_of_another_project_refused(self):
+        # Replicata: beside the page lies a ledger whose header names
+        # another project (that project's page shares the directory, or
+        # this checkout's directory is named otherwise than the one the
+        # ledger was written in): the runner's own, or another human's.
+        # Expectata: exit 2 naming both projects, the ledger, and this
+        # checkout's directory; nothing written. Resultata (v5.5.2): ledgers
+        # ignored. Resultata (v6.0.0 before the fix): the directory unnamed,
+        # and no word that a project is named by its checkout's directory.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        for login in (LOGIN, "mister-person"):
+            self.ledger(login).write_text(ledger_text("elsewhere", [self.theirs()]), encoding="utf-8")
+            with self.subTest(login=login):
+                err = self.refused([str(self.repo), str(out_path)])
+                self.assertIn(str(self.ledger(login)), err)
+                self.assertIn("'elsewhere'", err)
+                self.assertIn(f"'{self.repo.name}'", err)
+                self.assertIn(str(self.repo), err)
+            self.ledger(login).unlink()
+
+    def test_ledger_names_its_project_by_its_public_homes_last_segment(self):
+        # Replicata: a run in a checkout whose directory, repo, is named
+        # otherwise than its repository, as beemblog is for
+        # github.com/dreeves/blog: origin is that repository, given by ssh
+        # or by https. Expectata: the ledger's first line names the project
+        # blog, the last segment of the public home; the page's title and
+        # heading still name the directory, repo. Resultata (v6.0.0): the
+        # first line named the directory, repo.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        for url in ("git@github.com:dreeves/blog.git", "https://github.com/dreeves/blog"):
+            self.origin(url)
+            with self.subTest(url=url):
+                _, page = self.generate(out_path)
+                self.assertEqual(ledger_rows(self.ledger())[0], ledger_header("blog"))
+                self.assertIn("<title>repo</title>", page)
+                self.assertIn("<h1>repo</h1>", page)
+
+    def test_ledgers_naming_the_repository_read_in_a_checkout_named_otherwise(self):
+        # Replicata: beside the page lie dreeves's and mister-person's
+        # ledgers, their first lines naming blog, as runs in checkouts of
+        # github.com/dreeves/blog named blog wrote them, dreeves's holding a
+        # prompt the stores lost; dreeves runs in a checkout of that
+        # repository named repo. Expectata: exit 0; the page shows both
+        # humans' prompts, the lost one among them; dreeves's ledger still
+        # names blog; mister-person's is left as it was. Resultata (v6.0.0):
+        # refused as another project's ledger, the directory to be renamed
+        # blog.
+        self.populate()
+        self.origin("git@github.com:dreeves/blog.git")
+        lost = exchange(timestamp=utc("2026-03-01T08:00:00.000Z"), session="cs0", prompt="lost prompt")
+        self.ledger().write_text(ledger_text("blog", [lost]), encoding="utf-8")
+        self.ledger("mister-person").write_text(ledger_text("blog", [self.theirs()]), encoding="utf-8")
+        before = self.ledger("mister-person").read_bytes()
+        out, page = self.generate(self.tmp / "out.html")
+        self.assertIn("Prompts: 5\n  dreeves: 4\n  mister-person: 1\nPrompts deleted: 0\n", out)
+        for text in ("lost prompt", "logan prompt", "claude prompt"):
+            self.assertIn(f'<pre class="prompt">{text}</pre>', page)
+        self.assertEqual(ledger_rows(self.ledger())[0], ledger_header("blog"))
+        self.assertEqual(self.ledger("mister-person").read_bytes(), before)
+
+    def test_checkout_without_a_public_home_names_its_project_by_its_directory(self):
+        # Replicata: a run in a checkout named repo whose origin names no
+        # public home (a git:// mirror of github.com/facebook/codemod, an
+        # ssh host serving no web page), or with no remote, or no .git at
+        # all; then beside the page a ledger whose first line names codemod.
+        # Expectata: the run's ledger names the directory, repo; the codemod
+        # ledger is refused as another project's, nothing written.
+        # Resultata (v6.0.0): as expected; this guards the directory's name
+        # as the project's when repo_remote finds no public home, against a
+        # name read off the raw remote URL.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        configs = (
+            '[remote "origin"]\n\turl = git://github.com/facebook/codemod.git\n',
+            '[remote "origin"]\n\turl = ssh://dreeves@mpdev.mooo.com/var/dev/codemod\n',
+            "[core]\n\tbare = false\n",
+            None,
+        )
+        for config in configs:
+            shutil.rmtree(self.repo / ".git", ignore_errors=True)
+            if config is not None:
+                (self.repo / ".git").mkdir()
+                (self.repo / ".git" / "config").write_text(config, encoding="utf-8")
+            with self.subTest(config=config):
+                self.generate(out_path)
+                self.assertEqual(ledger_rows(self.ledger())[0], ledger_header("repo"))
+                self.ledger("mister-person").write_text(ledger_text("codemod", [self.theirs()]), encoding="utf-8")
+                err = self.refused([str(self.repo), str(out_path)])
+                self.assertIn("'codemod', non 'repo'", err)
+                self.ledger("mister-person").unlink()
+
+    def test_ledger_naming_the_checkouts_directory_refused_while_it_has_a_public_home(self):
+        # Replicata: a checkout named repo whose origin is
+        # github.com/dreeves/blog; beside the page, a ledger whose first
+        # line names repo, the directory, as only a checkout without a
+        # public home names its project: dreeves's own, or mister-person's.
+        # Expectata: exit 2, naming 'repo', non 'blog', this checkout, and
+        # the ledger, and saying that a project is named by the last part of
+        # the path of its public home's URL, and by its directory only when
+        # it has no public home; nothing written. Resultata (v6.0.0): as
+        # expected; this guards the directory's name as the project's only
+        # without a public home, against a check accepting either name, and
+        # the naming rule against dropping out of the refusal.
+        self.populate()
+        self.origin("git@github.com:dreeves/blog.git")
+        out_path = self.tmp / "out.html"
+        for login in (LOGIN, "mister-person"):
+            self.ledger(login).write_text(ledger_text(self.repo.name, [self.theirs()]), encoding="utf-8")
+            with self.subTest(login=login):
+                err = self.refused([str(self.repo), str(out_path)])
+                self.assertIn(
+                    f"Tabula ad aliud inceptum pertinet: 'repo', non 'blog' ({self.repo}): {self.ledger(login)}\n", err
+                )
+                self.assertIn(
+                    "Inceptum nominatur ultima parte viae URL sedis suae publicae (remoti 'origin'), "
+                    "aut, si sedem publicam non habet, nomine directorii sui.\n",
+                    err,
+                )
+            self.ledger(login).unlink()
+
+    def test_ledgers_of_a_repository_renamed_on_github_refused_until_their_first_lines_name_it(self):
+        # Replicata: github.com/dreeves/blog is renamed newblog on GitHub,
+        # and origin now names newblog; dreeves's and mister-person's
+        # ledgers' first lines still name blog. Expectata: each ledger
+        # refused in turn, exit 2, naming the project its first line names,
+        # this checkout's, this checkout's directory, and the ledger, and
+        # saying that a repository renamed on GitHub has its ledgers refused
+        # until each ledger's first line names the new repository, and that
+        # if the ledger is this project's and the repository is now named
+        # newblog, 'newblog' is to be written in place of 'blog' in each
+        # ledger's first line; nothing written. With both first lines so
+        # edited, the run succeeds. Resultata (v6.0.0): the ledgers compared
+        # with the directory's name, repo, and the directory to be renamed
+        # blog. Resultata (v6.0.0 before the fix): the first lines to be
+        # edited "if this checkout is that project", as true of a checkout
+        # whose origin still names the old repository (see the next qual).
+        self.populate()
+        self.origin("https://github.com/dreeves/newblog.git")
+        lost = exchange(timestamp=utc("2026-03-01T08:00:00.000Z"), session="cs0", prompt="lost prompt")
+        self.ledger().write_text(ledger_text("blog", [lost]), encoding="utf-8")
+        self.ledger("mister-person").write_text(ledger_text("blog", [self.theirs()]), encoding="utf-8")
+        out_path = self.tmp / "out.html"
+        for login in (LOGIN, "mister-person"):
+            with self.subTest(login=login):
+                err = self.refused([str(self.repo), str(out_path)])
+                self.assertIn(
+                    f"Tabula ad aliud inceptum pertinet: 'blog', non 'newblog' ({self.repo}): {self.ledger(login)}\n",
+                    err,
+                )
+                self.assertIn(
+                    "Repositorio in GitHub renominato, sourcery tabulas eius recusat donec prima linea "
+                    "cuiusque tabulae novum repositorium nominet.\n"
+                    "Si tabula ad hoc inceptum pertinet: si repositorium nunc 'newblog' nominatur, in prima "
+                    "linea cuiusque tabulae pro 'blog' scribe 'newblog'; ",
+                    err,
+                )
+            first, rest = self.ledger(login).read_text(encoding="utf-8").split("\n", 1)
+            self.ledger(login).write_text(first.replace('"blog"', '"newblog"') + "\n" + rest, encoding="utf-8")
+        out, page = self.generate(out_path)
+        self.assertIn("Prompts: 5\n  dreeves: 4\n  mister-person: 1\n", out)
+        self.assertIn('<pre class="prompt">lost prompt</pre>', page)
+
+    def test_another_projects_ledger_refusal_names_the_public_home_and_the_fix_for_each_cause(self):
+        # Replicata: beside the page lies mister-person's ledger, its first
+        # line naming another project than this checkout's, for one of
+        # three causes: (a) github.com/dreeves/blog was renamed newblog on
+        # GitHub and the ledger names newblog, but this checkout's origin
+        # still names blog, as a clone keeps working while GitHub redirects
+        # the old URL; (b) the repository has no public home (origin
+        # ssh://dreeves@mpdev.mooo.com/var/dev/mp) and the ledger names mp,
+        # mister-person's checkout's directory, this one being named repo;
+        # (c) the ledger is in fact another project's, elsewhere's, whose
+        # page shares this page's directory. Expectata: exit 2, the refusal
+        # naming, after the ledger, this checkout's public home as sourcery
+        # found it ('' when none); then, after the mandated sentence on
+        # repositories renamed on GitHub, saying: if the ledger is this
+        # project's, write this checkout's project name in place of the
+        # ledger's in each first line if the repository is now so named,
+        # and if not, fix this checkout, setting origin's URL to the
+        # repository's home, or, without a public home, renaming the
+        # directory as the ledger names the project; if the ledger is in
+        # fact another project's, choose another output path; then rerun;
+        # nothing written. Resultata (v6.0.0): no public home named, and the
+        # one advice, "if this checkout is that project", to write this
+        # checkout's project name into each first line: in (a) undoing the
+        # rename ("pro 'newblog' scribe 'blog'"), in (b) making
+        # mister-person's checkout refuse in turn ("pro 'mp' scribe
+        # 'repo'"), in (c) no advice at all.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        for url, theirs, ours, home in (
+            ("git@github.com:dreeves/blog.git", "newblog", "blog", "https://github.com/dreeves/blog"),
+            ("ssh://dreeves@mpdev.mooo.com/var/dev/mp", "mp", "repo", ""),
+            ("https://github.com/dreeves/repo", "elsewhere", "repo", "https://github.com/dreeves/repo"),
+        ):
+            self.origin(url)
+            self.ledger("mister-person").write_text(ledger_text(theirs, [self.theirs()]), encoding="utf-8")
+            with self.subTest(url=url):
+                err = self.refused([str(self.repo), str(out_path)])
+                self.assertIn(
+                    f"Tabula ad aliud inceptum pertinet: {theirs!r}, non {ours!r} ({self.repo}): "
+                    f"{self.ledger('mister-person')}\n"
+                    f"Sedes publica huius directorii (ex remoto 'origin'): {home!r}\n",
+                    err,
+                )
+                self.assertIn(
+                    "cuiusque tabulae novum repositorium nominet.\n"
+                    f"Si tabula ad hoc inceptum pertinet: si repositorium nunc {ours!r} nominatur, in prima "
+                    f"linea cuiusque tabulae pro {theirs!r} scribe {ours!r}; sin minus, hic corrige: "
+                    "URL ipsius 'origin' ad sedem repositorii constitue, aut, si sedem publicam non habet, "
+                    f"directorium renomina {theirs!r}. Si vero re vera ad aliud inceptum pertinet, "
+                    "aliam viam output elige.\n"
+                    "Deinde iterum curre.\nNihil scriptum est.",
+                    err,
+                )
+
+    def test_ledger_naming_the_project_in_other_capitals_refused(self):
+        # Replicata: a checkout named repo whose origin is
+        # github.com/dreeves/TagTime; beside the page, the runner's ledger,
+        # or mister-person's, its first line naming tagtime, as a run in a
+        # checkout cloned by that URL in lowercase names the project (GitHub
+        # ignores case in repository names). Expectata: exit 2, refused as
+        # another project's ledger, 'tagtime', non 'TagTime'; nothing
+        # written. Resultata (v6.0.0): as expected; this guards project
+        # names compared exactly, capitals and all, as decided, against a
+        # comparison ignoring case.
+        self.populate()
+        self.origin("https://github.com/dreeves/TagTime.git")
+        out_path = self.tmp / "out.html"
+        for login in (LOGIN, "mister-person"):
+            self.ledger(login).write_text(ledger_text("tagtime", [self.theirs()]), encoding="utf-8")
+            with self.subTest(login=login):
+                err = self.refused([str(self.repo), str(out_path)])
+                self.assertIn(
+                    f"Tabula ad aliud inceptum pertinet: 'tagtime', non 'TagTime' ({self.repo}): {self.ledger(login)}\n",
+                    err,
+                )
+            self.ledger(login).unlink()
+
+    def test_public_home_naming_no_repository_refused_naming_it(self):
+        # Replicata: a run, and an adoption of a page sourcery 5 wrote, in a
+        # checkout whose origin's URL leaves a public home naming no
+        # repository: a host alone (https://github.com), or a path ending in
+        # "/", as an origin URL ending in "//" or "/.git" leaves it, in https
+        # or scp form. Expectata: exit 2, the refusal naming that home as
+        # sourcery read it from origin and this checkout, and saying to set
+        # origin's URL to the repository's home, then rerun; nothing
+        # written. Resultata (v6.0.0): an AssertionError traceback.
+        self.populate()
+        out_path, old = self.tmp / "out.html", self.tmp / "old.html"
+        old.write_text(five_page(self.repo, [exchange()]), encoding="utf-8")
+        for url, home in (
+            ("https://github.com", "https://github.com"),
+            ("https://github.com/dreeves//", "https://github.com/dreeves/"),
+            ("https://github.com/dreeves/.git", "https://github.com/dreeves/"),
+            ("git@github.com:dreeves/.git", "https://github.com/dreeves/"),
+            ("https://github.com/dreeves/blog//", "https://github.com/dreeves/blog/"),
+        ):
+            self.origin(url)
+            for cli, argv in (
+                (self.run_cli, [str(self.repo), str(out_path)]),
+                (self.adopt_cli, [str(self.repo), str(old), str(out_path), LOGIN]),
+            ):
+                with self.subTest(url=url, cli=cli.__name__):
+                    err = self.refused_by(cli, argv)
+                    self.assertIn(
+                        f"Sedes publica ex remoto 'origin' lecta nullum repositorium nominat: {home!r} ({self.repo})\n"
+                        "URL ipsius 'origin' ad sedem repositorii constitue, deinde iterum curre.",
+                        err,
+                    )
+
+    def test_prompt_held_by_two_ledgers_refused_naming_both(self):
+        # Replicata: dreeves's and mister-person's ledgers both hold a Codex
+        # prompt of one time (one ledger copied as the other, say), which no
+        # store holds. Expectata: exit 2 naming both ledgers and the
+        # prompt's agent and time; nothing written. Two rows of one ledger
+        # sharing a time (a forked session whose replies differ) are no
+        # refusal. Resultata (v5.5.2): ledgers ignored.
+        held = self.theirs()
+        for login in (LOGIN, "mister-person"):
+            self.ledger(login).write_text(ledger_text(self.repo.name, [held]), encoding="utf-8")
+        out_path = self.tmp / "out.html"
+        err = self.refused([str(self.repo), str(out_path)])
+        self.assertIn(str(self.ledger()), err)
+        self.assertIn(str(self.ledger("mister-person")), err)
+        self.assertIn(f"Codex {held.timestamp.isoformat()}", err)
+        self.ledger("mister-person").unlink()
+        fork = dataclasses.replace(held, session="lg2", reply="another reply")
+        self.ledger().write_text(ledger_text(self.repo.name, [held, fork]), encoding="utf-8")
+        out, _ = self.generate(out_path)
+        self.assertIn("Prompts: 2", out)
+
+    def test_prompt_held_by_two_other_humans_ledgers_refused_naming_both(self):
+        # Replicata: alice's and bob's ledgers both hold a Codex prompt of
+        # one time, which no store holds, and dreeves runs, his own ledger
+        # holding neither. Expectata: exit 2 naming both ledgers and the
+        # prompt's agent and time; nothing written. Resultata with the check
+        # confined to pairs that include the runner's ledger: exit 0, the
+        # prompt shown twice, credited to each of them.
+        self.populate()
+        held = self.theirs()
+        for login in ("alice", "bob"):
+            self.ledger(login).write_text(ledger_text(self.repo.name, [held]), encoding="utf-8")
+        err = self.refused([str(self.repo), str(self.tmp / "out.html")])
+        self.assertIn(str(self.ledger("alice")), err)
+        self.assertIn(str(self.ledger("bob")), err)
+        self.assertIn(f"Codex {held.timestamp.isoformat()}", err)
+
+    def test_runners_store_holding_another_humans_prompt_refused_naming_them(self):
+        # Replicata: mister-person's ledger holds a Claude Code prompt whose
+        # record dreeves's store holds too: as a typed prompt, or as machine
+        # text the parser drops (an interrupt marker). Expectata: exit 2
+        # naming mister-person and the prompt's agent and time; nothing
+        # written. Resultata (v5.5.2): ledgers ignored, and the prompt shown
+        # as dreeves's.
+        theirs = exchange(timestamp=utc(T0), session="lg1", prompt="logan prompt")
+        self.ledger("mister-person").write_text(ledger_text(self.repo.name, [theirs]), encoding="utf-8")
+        for text in ("claude prompt", "[Request interrupted by user]"):
+            write_jsonl(self.claude_root / "p" / "s.jsonl", [cu(text, ts=T0, cwd=str(self.repo))])
+            with self.subTest(text=text):
+                err = self.refused([str(self.repo), str(self.tmp / "out.html")])
+                self.assertIn("mister-person", err)
+                self.assertIn(f"Claude Code {utc(T0).isoformat()}", err)
+
+    def test_runners_store_holding_other_humans_prompts_refused_listing_every_one(self):
+        # Replicata: mister-person's ledger holds two Claude Code prompts
+        # whose records dreeves's store holds too, as when a transcript was
+        # copied from one human's machine to the other's, in either
+        # direction. Expectata: exit 2 listing, under mister-person's
+        # ledger with its count, both prompts by agent and time, and naming
+        # the runner; nothing written. Resultata (v6.0.0 before the fix):
+        # the first prompt alone named.
+        theirs = [
+            exchange(timestamp=utc(T0), session="lg1", prompt="logan prompt"),
+            exchange(timestamp=utc(T2), session="lg1", prompt="logan two"),
+        ]
+        self.ledger("mister-person").write_text(ledger_text(self.repo.name, theirs), encoding="utf-8")
+        write_jsonl(
+            self.claude_root / "p" / "s.jsonl",
+            [
+                cu("logan prompt", ts=T0, cwd=str(self.repo), session="lg1"),
+                ca([{"type": "text", "text": "r"}], ts=T1, cwd=str(self.repo), session="lg1"),
+                cu("logan two", ts=T2, cwd=str(self.repo), session="lg1"),
+            ],
+        )
+        err = self.refused([str(self.repo), str(self.tmp / "out.html")])
+        self.assertIn(
+            f"\n  {self.ledger('mister-person')}: 2"
+            f"\n    Claude Code {utc(T0).isoformat()}\n    Claude Code {utc(T2).isoformat()}\n",
+            err,
+        )
+        self.assertIn(f"({LOGIN})", err)
+
+    def test_page_crediting_a_row_its_ledger_lacks_refused(self):
+        # Replicata: a page written beside dreeves's and mister-person's
+        # ledgers; then a ledger the page credits goes missing:
+        # mister-person's deleted (or never committed); dreeves's renamed,
+        # the stores no longer holding its rows; or dreeves's deleted while
+        # the stores still hold them. Expectata: exit 2 naming the ledger
+        # the page credits and a row it lacks, by agent and time; nothing
+        # written. Resultata (v5.5.2): ledgers unknown; rows the stores lost
+        # would vanish from the page.
+        self.populate()
+        theirs = self.theirs()
+        self.ledger("mister-person").write_text(ledger_text(self.repo.name, [theirs]), encoding="utf-8")
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        argv = [str(self.repo), str(out_path)]
+        saved = {login: self.ledger(login).read_bytes() for login in (LOGIN, "mister-person")}
+
+        self.ledger("mister-person").unlink()
+        err = self.refused(argv)
+        self.assertIn(str(self.ledger("mister-person")), err)
+        self.assertIn(f"Codex {theirs.timestamp.isoformat()}", err)
+        self.ledger("mister-person").write_bytes(saved["mister-person"])
+
+        self.ledger().rename(self.ledger("someone"))
+        stores = self.tmp / "stores"
+        stores.mkdir()
+        for root in (self.claude_root, self.codex_root, self.vscode_root):
+            root.rename(stores / root.name)
+        err = self.refused(argv)
+        self.assertIn(str(self.ledger()), err)
+        self.assertIn(f"Claude Code {utc(T0).isoformat()}", err)
+        for root in (self.claude_root, self.codex_root, self.vscode_root):
+            (stores / root.name).rename(root)
+        self.ledger("someone").unlink()
+
+        err = self.refused(argv)
+        self.assertIn(str(self.ledger()), err)
+        self.assertIn(f"Claude Code {utc(T0).isoformat()}", err)
+
+    def test_page_crediting_rows_its_ledgers_lack_refused_listing_every_one(self):
+        # Replicata: a page written beside dreeves's ledger (three rows) and
+        # mister-person's (one); then both ledgers go missing (deleted in
+        # one checkout, say), dreeves's stores still holding his rows.
+        # Expectata: exit 2 listing, under each missing ledger's path with
+        # its count, every row the page credits to it, by agent and time,
+        # and saying how version control brings back a deleted ledger;
+        # nothing written. Resultata (v6.0.0 before the fix): the first
+        # lacking row alone named, and deleting the page offered with no
+        # word that it drops every human's credits; taken, it turned the
+        # missing ledger into a silent loss for its owner.
+        self.populate()
+        theirs = self.theirs()
+        self.ledger("mister-person").write_text(ledger_text(self.repo.name, [theirs]), encoding="utf-8")
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        for login in (LOGIN, "mister-person"):
+            self.ledger(login).unlink()
+        err = self.refused([str(self.repo), str(out_path)])
+        mine = "".join(
+            f"\n    {provider} {utc(when).isoformat()}"
+            for provider, when in (("Claude Code", T0), ("Codex", T1), ("Copilot Chat", T2))
+        )
+        self.assertIn(f"\n  {self.ledger()}: 3{mine}\n", err)
+        self.assertIn(f"\n  {self.ledger('mister-person')}: 1\n    Codex {theirs.timestamp.isoformat()}\n", err)
+        self.assertIn("git log --diff-filter=D -- ", err)
+
+    def test_page_sourcery_5_wrote_refused_pointing_to_adopt(self):
+        # Replicata: the output path holds a page sourcery 5.5.2 wrote: its
+        # articles credit no one, and its exchanges ride in an embedded
+        # snapshot; or a page some of whose articles credit no one.
+        # Expectata: exit 2 naming the page and the adopt.py command that
+        # imports it, its LOGIN left for the human to give (the login of
+        # whoever's sourcery 5 wrote the page, perhaps not the runner's);
+        # nothing written, no ledger created. Resultata (v5.5.2): the page
+        # read back and rewritten. Resultata (v6.0.0 before the fix):
+        # adopt.py named with no word on whose login it takes, and a second
+        # human, so refused, adopted the first human's page as his own.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        current = ace.render(self.repo, {LOGIN: [exchange(), exchange(timestamp=utc(T1), prompt="b")]})
+        five = five_page(self.repo, [exchange(), exchange(timestamp=utc(T1), prompt="b")])
+        self.assertEqual((count_scripts(five), five.count("data-login")), (2, 0))
+        partly = current.replace(' data-login="dreeves"', "", 1)
+        for page in (five, partly):
+            out_path.write_text(page, encoding="utf-8")
+            with self.subTest(page=page[-300:]):
+                err = self.refused([str(self.repo), str(out_path)])
+                self.assertIn(str(out_path), err)
+                self.assertIn(f"\n  python3 adopt.py REPODIR {out_path} {out_path} LOGIN\n", err)
+
+    def test_file_named_like_a_ledger_for_no_lowercase_login_refused(self):
+        # Replicata: beside the page, a file named sourcery.*.jsonl, ignoring
+        # case, that is no lowercase login's ledger: its login in capitals
+        # (GitHub logins ignore case, and so do macOS file names, so it
+        # would be the lowercase login's ledger too), its own prefix or
+        # suffix in capitals, or a middle that is no login. Expectata: exit
+        # 2 naming the file; nothing written. Files that merely share the
+        # prefix or the suffix are no ledgers, and pass. Resultata (v5.5.2):
+        # ledgers ignored.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        for name in (
+            "sourcery.DReeves.jsonl", "Sourcery.someone.jsonl", "sourcery.someone.JSONL",
+            "sourcery.foo.bar.jsonl", "sourcery.-x.jsonl", "sourcery.x-.jsonl", "sourcery.dree--ves.jsonl",
+            "sourcery.dree_ves.jsonl", "sourcery..jsonl", f"sourcery.{'x' * 40}.jsonl",
+        ):
+            path = self.tmp / name
+            path.write_text(ledger_text(self.repo.name, []), encoding="utf-8")
+            with self.subTest(name=name):
+                err = self.refused([str(self.repo), str(out_path)])
+                self.assertIn(str(path), err)
+            path.unlink()
+        for name in ("sourcery.html", "sourcery.jsonl", "notes.jsonl", f"sourcery.{LOGIN}.jsonl.orig"):
+            (self.tmp / name).write_text("no ledger", encoding="utf-8")
+        out, _ = self.generate(out_path)
+        self.assertIn(f"Prompts: 3\n  {LOGIN}: 3\n", out)
+
+    def refusing_render(self):
+        """A stand-in for render that refuses, as no input makes the real
+        one refuse today. Returns the real one."""
+        render = ace.render
+
+        def refusing(*args, **kwargs):
+            raise ace.UserError("render refused")
+
+        ace.render = refusing
+        return render
+
+    def test_refusal_found_while_rendering_writes_no_ledger(self):
+        # Replicata: a first run, then a rerun after the stores gained a
+        # prompt, each refused as its page is rendered (render replaced by
+        # a stand-in that refuses, as no input makes the real one refuse
+        # today), every check made before rendering passing. Expectata:
+        # exit 2 with the stand-in's refusal, and every file beside the page
+        # as it was: no ledger written or rewritten, no page. Resultata
+        # (v6.0.0): as expected; this guards the page's rendering before
+        # anything is written, against writing the runner's ledger first.
+        # Resultata (v6.0.0 before the fix): the qual made the repo's
+        # remotes refuse, which they now do before anything is read, so it
+        # no longer guarded the order its name states.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        argv = [str(self.repo), str(out_path)]
+        render = self.refusing_render()
+        try:
+            self.assertIn("render refused", self.refused(argv))
+            ace.render = render
+            self.generate(out_path)
+            write_jsonl(self.claude_root / "p" / "later.jsonl", [cu("later prompt", ts=T3, cwd=str(self.repo), session="cs9")])
+            self.refusing_render()
+            self.assertIn("render refused", self.refused(argv))
+        finally:
+            ace.render = render
+
+    def test_failed_ledger_write_leaves_the_page_as_it_was(self):
+        # Replicata: a run; then the stores gain a prompt, and the rerun's
+        # write of the runner's ledger fails (os.replace refusing the
+        # ledger's path, as on a full disk). Expectata: the failure
+        # surfaces, and the page is left as it was, never crediting a
+        # prompt its ledger lacks: once writing works again, the next run
+        # succeeds, showing the new prompt. Resultata (v6.0.0): as expected;
+        # this guards the write order, the runner's ledger before the page,
+        # against writing the page first, which left the page crediting a
+        # prompt the ledger lacked, so that every later run was refused.
+        self.populate()
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        page = out_path.read_bytes()
+        write_jsonl(self.claude_root / "p" / "later.jsonl", [cu("later prompt", ts=T3, cwd=str(self.repo), session="cs9")])
+        replace = ace.os.replace
+
+        def failing(source, target):
+            if Path(target) == self.ledger():
+                raise OSError(28, "No space left on device", str(target))
+            return replace(source, target)
+
+        ace.os.replace = failing
+        try:
+            with self.assertRaises(OSError):
+                self.run_cli([str(self.repo), str(out_path)])
+        finally:
+            ace.os.replace = replace
+        self.assertEqual(out_path.read_bytes(), page)
+        out, page = self.generate(out_path)
+        self.assertIn(f"Prompts: 4\n  {LOGIN}: 4\n", out)
+        self.assertIn('<pre class="prompt">later prompt</pre>', page)
+
+    def test_run_without_a_usable_gh_login_writes_nothing(self):
+        # Replicata: a run where gh is missing, or not logged in.
+        # Expectata: exit 2, the error saying to run "gh auth login", and
+        # neither page nor ledger written. Resultata (v5.5.2): the page
+        # written, crediting no one.
+        self.populate()
+        for seam in (gh_missing, gh_says("", 1, 'could not find key "user"\n')):
+            ace.gh_user = seam
+            with self.subTest(seam=seam):
+                err = self.refused([str(self.repo), str(self.tmp / "out.html")])
+                self.assertIn("gh auth login", err)
+
+    # ------------------------------------------------------------ adopt.py
+
+    def adopt_cli(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = adopt.run(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def adopted(self, page, output, login=LOGIN):
+        """Adopt page into the ledgers beside output as login, expecting
+        success. Returns stdout."""
+        code, out, err = self.adopt_cli([str(self.repo), str(page), str(output), login])
+        self.assertEqual(code, 0, err)
+        return out
+
+    def test_adopt_moves_a_sourcery_5_pages_snapshot_into_the_logins_ledger(self):
+        # Replicata: out.html is a page sourcery 5.5.2 wrote, its snapshot
+        # holding a seeded claude.ai exchange and a Claude Code exchange; it
+        # is adopted in place as dreeves. Expectata: exit 0; beside it,
+        # sourcery.dreeves.jsonl holds the header naming the ledger format,
+        # 1, and the project, then the snapshot's exchanges in freeze()
+        # form, in time order; out.html is the page sourcery 6 renders from
+        # that ledger, crediting every row to dreeves, its snapshot gone;
+        # stdout names the ledger, then the page, as written, and counts the
+        # prompts the page held, those the ledger gained, and those each
+        # human's ledger holds. Resultata (v6.0.0 before adopt.py): sourcery
+        # 6 refused the page, and nothing could bring it past the refusal.
+        rows = [
+            exchange(provider="claude.ai", model="claude-opus-5-5", session="chat-1", prompt="chat prompt"),
+            exchange(timestamp=utc(T1), prompt="claude prompt", reply="claude reply"),
+        ]
+        out_path = self.tmp / "out.html"
+        out_path.write_text(five_page(self.repo, rows), encoding="utf-8")
+        out = self.adopted(out_path, out_path)
+        header, *lines = ledger_rows(self.ledger())
+        self.assertEqual(header, ledger_header(self.repo.name))
+        self.assertEqual(lines, [jsonable(e) for e in rows])
+        self.assertEqual(out_path.read_text(encoding="utf-8"), ace.render(self.repo, {LOGIN: rows}))
+        self.assertEqual(ace.page_credits(out_path), {(LOGIN, ace.holding(e)) for e in rows})
+        self.assertEqual(re.findall(r"^Scriptum: (.*)$", out, re.MULTILINE), [str(self.ledger()), str(out_path)])
+        self.assertIn(f"Rogationes paginae: 2; tabulae additae: 2\nRogationes: 2\n  {LOGIN}: 2\n", out)
+
+    def test_adopted_page_then_sourcery_merges_the_stores(self):
+        # Replicata: a page sourcery 5 wrote holds a prompt the stores have
+        # since lost and a superseded reading of the Claude prompt they
+        # still hold; it is adopted in place as dreeves, then sourcery runs
+        # as dreeves. Expectata: the run exits 0; the page shows the lost
+        # prompt, kept from the ledger, the store's reading of the Claude
+        # prompt and not the superseded one, and the stores' other prompts;
+        # stdout counts them all as dreeves's. Resultata (v6.0.0 before
+        # adopt.py): the run refused the page, pointing to adopt.py.
+        self.populate()
+        lost = exchange(timestamp=utc("2026-03-01T09:00:00.000Z"), prompt="lost prompt", reply="lost reply")
+        superseded = exchange(prompt="superseded reading", reply="superseded reply")
+        out_path = self.tmp / "out.html"
+        out_path.write_text(five_page(self.repo, [lost, superseded]), encoding="utf-8")
+        self.adopted(out_path, out_path)
+        out, page = self.generate(out_path)
+        self.assertIn(f"Prompts: 4\n  {LOGIN}: 4\nPrompts deleted: 0\n", out)
+        for text in ("lost prompt", "lost reply", "claude prompt", "codex prompt", "copilot prompt"):
+            self.assertIn(text, page)
+        self.assertNotIn("superseded", page)
+
+    def fold_tallybee(self):
+        """tallybee's migration: out.html is dreeves's page and logan.html
+        mister-person's, both written by sourcery 5; out.html is adopted in
+        place as dreeves, then logan.html is folded into out.html as
+        mister-person. Checks that the second adoption leaves dreeves's
+        ledger and logan.html as they were. Returns both pages' paths."""
+        out_path, logan = self.tmp / "out.html", self.tmp / "logan.html"
+        out_path.write_text(
+            five_page(self.repo, [exchange(prompt="dreev one"), exchange(timestamp=utc(T2), prompt="dreev two")]),
+            encoding="utf-8",
+        )
+        theirs = [self.theirs(), exchange(timestamp=utc(T3), provider="Codex", session="lg1", prompt="logan two")]
+        logan.write_text(five_page(self.repo, theirs, version="5.5.0"), encoding="utf-8")
+        before = logan.read_bytes()
+        self.adopted(out_path, out_path)
+        mine = (self.ledger().stat().st_ino, self.ledger().read_bytes())
+        self.adopted(logan, out_path, "mister-person")
+        self.assertEqual((self.ledger().stat().st_ino, self.ledger().read_bytes()), mine)
+        self.assertEqual(logan.read_bytes(), before)
+        return out_path, logan
+
+    def test_second_humans_page_folded_into_their_own_ledger(self):
+        # Replicata: tallybee's migration (see fold_tallybee), then a
+        # sourcery run as dreeves with empty stores. Expectata: both
+        # adoptions exit 0; mister-person's rows land in
+        # sourcery.mister-person.jsonl and dreeves's ledger is untouched by
+        # the second adoption; logan.html is left as it was; out.html, as
+        # adopted and as rerun, shows both humans' prompts in time order,
+        # each credited to its login and named by its display name; the run
+        # counts the prompts per human. Resultata (v6.0.0 before adopt.py):
+        # sourcery 6 refused both pages, and nothing could bring them past
+        # the refusal.
+        out_path, _ = self.fold_tallybee()
+        self.assertEqual(
+            [row["prompt"] for row in ledger_rows(self.ledger("mister-person"))[1:]], ["logan prompt", "logan two"]
+        )
+        folded = out_path.read_text(encoding="utf-8")
+        out, rerun = self.generate(out_path)
+        self.assertIn("Prompts: 4\n  dreeves: 2\n  mister-person: 2\nPrompts deleted: 0\n", out)
+        for page in (folded, rerun):
+            self.assertEqual(
+                re.findall(
+                    r'data-login="([a-z-]+)">.*?<pre class="prompt">([a-z ]+)</pre>.*?<span class="human">(\w+)</span>',
+                    page,
+                    re.DOTALL,
+                ),
+                [
+                    ("mister-person", "logan prompt", "logan"),
+                    ("dreeves", "dreev one", "dreev"),
+                    ("dreeves", "dreev two", "dreev"),
+                    ("mister-person", "logan two", "logan"),
+                ],
+            )
+
+    def test_adoption_names_whom_the_pages_prompts_are_credited_to(self):
+        # Replicata: a page sourcery 5 wrote, adopted as mister-person (as a
+        # second human might adopt the first's page as himself), and the
+        # same page adopted beside another output as dreeves. Expectata:
+        # each adoption's stdout names the human the page's prompts are now
+        # credited to, by display name and login, so a wrong login shows at
+        # once. Resultata (v6.0.0 before the fix): prompts counted by login
+        # alone, nothing naming whom the page's prompts went to.
+        old = self.tmp / "old.html"
+        old.write_text(five_page(self.repo, [exchange()]), encoding="utf-8")
+        for login, named in (("mister-person", "logan (mister-person)"), (LOGIN, "dreev (dreeves)")):
+            output = self.tmp / login / "out.html"
+            output.parent.mkdir()
+            with self.subTest(login=login):
+                self.assertIn(f": {named}\n", self.adopted(old, output, login))
+
+    def test_adopting_again_changes_nothing(self):
+        # Replicata: after tallybee's migration (see fold_tallybee) and a
+        # sourcery run, logan.html is folded into out.html as mister-person
+        # again; then out.html, now a page sourcery 6 wrote, is adopted in
+        # place as dreeves again. Expectata: the first exits 0, every file
+        # byte-identical, stdout counting no prompt added; the second is
+        # refused naming the page, which carries no snapshot, and saying a
+        # page sourcery 6 wrote needs only sourcery.py; every file
+        # byte-identical. Resultata (v6.0.0 before adopt.py): no adopt.py.
+        out_path, logan = self.fold_tallybee()
+        self.generate(out_path)
+        before = {path.name: path.read_bytes() for path in self.tmp.iterdir() if path.is_file()}
+        out = self.adopted(logan, out_path, "mister-person")
+        self.assertIn("Rogationes paginae: 2; tabulae additae: 0\n", out)
+        self.assertEqual({path.name: path.read_bytes() for path in self.tmp.iterdir() if path.is_file()}, before)
+        err = self.refused_by(self.adopt_cli, [str(self.repo), str(out_path), str(out_path), LOGIN])
+        self.assertIn(str(out_path), err)
+        self.assertIn("sourcery.py", err)
+
+    def test_adoption_keeps_the_ledgers_rows_and_adds_only_holdings_it_lacks(self):
+        # Replicata: dreeves's ledger holds a reading of a Claude prompt at
+        # T0 and a Codex prompt at T1; old.html, a page sourcery 5 wrote,
+        # holds an older reading of the T0 prompt and a Claude prompt at T2;
+        # old.html is adopted into the ledgers beside out.html as dreeves.
+        # Expectata: the ledger holds its own two rows as they were, then
+        # old.html's T2 row; old.html's T0 row, a prompt the ledger holds
+        # already, gives way to the ledger's reading, as a ledger's row
+        # gives way to a store's in a sourcery run; stdout counts 2 prompts
+        # on the page, 1 added. Resultata (v6.0.0 before adopt.py): no
+        # adopt.py.
+        mine = [
+            exchange(prompt="newer reading"),
+            exchange(timestamp=utc(T1), provider="Codex", session="cx1", prompt="codex prompt"),
+        ]
+        self.ledger().write_text(ledger_text(self.repo.name, mine), encoding="utf-8")
+        added = exchange(timestamp=utc(T2), prompt="later prompt")
+        old = self.tmp / "old.html"
+        old.write_text(five_page(self.repo, [exchange(prompt="older reading"), added]), encoding="utf-8")
+        out = self.adopted(old, self.tmp / "out.html")
+        self.assertEqual(ledger_rows(self.ledger())[1:], [jsonable(e) for e in [*mine, added]])
+        self.assertIn("Rogationes paginae: 2; tabulae additae: 1\n", out)
+
+    def test_page_holding_a_prompt_another_ledger_holds_refused_naming_its_owner(self):
+        # Replicata: mister-person's ledger holds a Codex prompt; old.html,
+        # a page sourcery 5 wrote, holds that prompt (its agent and time)
+        # beside a prompt of its own, and is adopted as dreeves. Expectata:
+        # exit 2 naming mister-person's ledger and the prompt's agent and
+        # time; nothing written. Adopted as mister-person, the page is
+        # theirs: exit 0, the prompt their ledger held staying as it was and
+        # the other added. Resultata (v6.0.0 before adopt.py): no adopt.py.
+        theirs = self.theirs()
+        self.ledger("mister-person").write_text(ledger_text(self.repo.name, [theirs]), encoding="utf-8")
+        old = self.tmp / "old.html"
+        old.write_text(five_page(self.repo, [theirs, exchange(prompt="own prompt")]), encoding="utf-8")
+        out_path = self.tmp / "out.html"
+        err = self.refused_by(self.adopt_cli, [str(self.repo), str(old), str(out_path), LOGIN])
+        self.assertIn(str(self.ledger("mister-person")), err)
+        self.assertIn(f"Codex {theirs.timestamp.isoformat()}", err)
+        out = self.adopted(old, out_path, "mister-person")
+        self.assertIn("Rogationes paginae: 2; tabulae additae: 1\n", out)
+
+    def test_adoption_refuses_two_readings_of_one_prompt_citing_each(self):
+        # Replicata: old.html, a page sourcery 5 wrote, adopted beside
+        # out.html as dreeves, where (a) mister-person's ledger holds two
+        # readings of one Codex prompt at lines 2 and 3, as a merge keeping
+        # both sides' lines leaves them, or (b) the snapshot itself holds
+        # two readings of one Claude Code prompt, as sourcery 5 wrote them
+        # when two transcripts disagreed. Expectata: exit 2, the refusal
+        # naming the prompt by agent, time, and session, citing each reading
+        # where adoption read it, a ledger's row by the ledger's line, the
+        # snapshot's by the page, and saying to delete the stale line (the
+        # ledger's, or the snapshot's in the page), then rerun; nothing
+        # written. Resultata (v6.0.0): exit 0, the ledger and the page
+        # written, the page showing the prompt twice, a page sourcery then
+        # refused.
+        held = self.theirs()
+        own = exchange(prompt="own prompt")
+        old = self.tmp / "old.html"
+        argv = [str(self.repo), str(old), str(self.tmp / "out.html"), LOGIN]
+        advice = "Lineam obsoletam dele (tabulae, aut memoriae paginae), deinde iterum curre.\nNihil scriptum est."
+        old.write_text(five_page(self.repo, [own]), encoding="utf-8")
+        reading = dataclasses.replace(held, reply="logan reply, then more")
+        self.ledger("mister-person").write_text(ledger_text(self.repo.name, [held, reading]), encoding="utf-8")
+        err = self.refused_by(self.adopt_cli, argv)
+        self.assertIn(
+            f"Rogationis Codex {held.timestamp.isoformat()} (sessio lg1) duae lectiones sunt:\n"
+            f"  {self.ledger('mister-person')}:2\n  {self.ledger('mister-person')}:3\n{advice}",
+            err,
+        )
+        self.ledger("mister-person").unlink()
+        old.write_text(five_page(self.repo, [own, dataclasses.replace(own, reply="r, then more")]), encoding="utf-8")
+        err = self.refused_by(self.adopt_cli, argv)
+        self.assertIn(
+            f"Rogationis Claude Code {own.timestamp.isoformat()} (sessio s) duae lectiones sunt:\n"
+            f"  {old}\n  {old}\n{advice}",
+            err,
+        )
+
+    def test_page_of_another_project_refused(self):
+        # Replicata: a page sourcery 5 wrote, its snapshot naming another
+        # project (elsewhere), is adopted for this repo. Expectata: exit 2
+        # naming both projects, the page, and this checkout's directory, the
+        # one to rename if it is that project after all; nothing written.
+        # Resultata (v6.0.0 before adopt.py): no adopt.py. Resultata (v6.0.0
+        # before the fix): the directory unnamed.
+        old = self.tmp / "old.html"
+        old.write_text(five_page(self.repo, [exchange()], name="elsewhere"), encoding="utf-8")
+        err = self.refused_by(self.adopt_cli, [str(self.repo), str(old), str(self.tmp / "out.html"), LOGIN])
+        for text in (str(old), "'elsewhere'", f"'{self.repo.name}'", str(self.repo)):
+            self.assertIn(text, err)
+
+    def test_adoption_checks_the_snapshot_by_directory_and_writes_the_project_name(self):
+        # Replicata: a checkout named repo whose origin is
+        # github.com/dreeves/blog. old.html, a page sourcery 5 wrote there,
+        # its snapshot naming blog, the repository, is adopted beside
+        # out.html as dreeves; then out.html, a page sourcery 5 wrote, its
+        # snapshot naming repo, the directory, as sourcery 5 named projects,
+        # is adopted in place as dreeves; then sourcery runs as dreeves.
+        # Expectata: the first adoption refused as another project's page,
+        # naming both projects; nothing written. The second exits 0, the
+        # ledger's first line naming the project blog, not the directory;
+        # the run reads that ledger and exits 0. Resultata (v6.0.0): the
+        # ledger's first line named the directory, repo.
+        self.origin("git@github.com:dreeves/blog.git")
+        old, out_path = self.tmp / "old.html", self.tmp / "out.html"
+        old.write_text(five_page(self.repo, [exchange()], name="blog"), encoding="utf-8")
+        err = self.refused_by(self.adopt_cli, [str(self.repo), str(old), str(out_path), LOGIN])
+        self.assertIn("'blog', non 'repo'", err)
+        old.unlink()
+        out_path.write_text(five_page(self.repo, [exchange()]), encoding="utf-8")
+        self.adopted(out_path, out_path)
+        self.assertEqual(ledger_rows(self.ledger())[0], ledger_header("blog"))
+        out, _ = self.generate(out_path)
+        self.assertIn(f"Prompts: 1\n  {LOGIN}: 1\nPrompts deleted: 0\n", out)
+
+    def test_adoption_reads_ledgers_naming_the_project_in_a_checkout_named_otherwise(self):
+        # Replicata: a checkout named repo whose origin is
+        # github.com/dreeves/blog; beside out.html, a page sourcery 5 wrote
+        # there, its snapshot naming repo, lies mister-person's ledger, its
+        # first line naming blog; out.html is adopted in place as dreeves.
+        # Expectata: exit 0; mister-person's ledger left as it was; the page
+        # shows both humans' prompts, and stdout counts one prompt for each.
+        # Resultata (v6.0.0): as expected; this guards adoption's reading of
+        # the ledgers by the project's name, against reading them by the
+        # directory's.
+        self.origin("git@github.com:dreeves/blog.git")
+        self.ledger("mister-person").write_text(ledger_text("blog", [self.theirs()]), encoding="utf-8")
+        before = self.ledger("mister-person").read_bytes()
+        out_path = self.tmp / "out.html"
+        out_path.write_text(five_page(self.repo, [exchange()]), encoding="utf-8")
+        out = self.adopted(out_path, out_path)
+        self.assertIn(f"Rogationes: 2\n  {LOGIN}: 1\n  mister-person: 1", out)
+        self.assertEqual(self.ledger("mister-person").read_bytes(), before)
+        page = out_path.read_text(encoding="utf-8")
+        for text in ("p", "logan prompt"):
+            self.assertIn(f'<pre class="prompt">{text}</pre>', page)
+
+    def test_page_without_exactly_one_snapshot_refused(self):
+        # Replicata: adopted as dreeves: a page sourcery 6 wrote, carrying no
+        # snapshot; a page carrying two snapshots; a file that is no
+        # sourcery page. Expectata: exit 2 naming the page and saying a page
+        # sourcery 6 wrote needs only sourcery.py; nothing written.
+        # Resultata (v6.0.0 before adopt.py): no adopt.py.
+        five = five_page(self.repo, [exchange()])
+        block = re.search(r'<script type="application/json" id="snapshot">\n.*?\n</script>\n', five, re.DOTALL)[0]
+        old = self.tmp / "old.html"
+        for text in (ace.render(self.repo, {LOGIN: [exchange()]}), five.replace(block, block * 2), "no sourcery page"):
+            old.write_text(text, encoding="utf-8")
+            with self.subTest(text=text[-200:]):
+                err = self.refused_by(self.adopt_cli, [str(self.repo), str(old), str(self.tmp / "out.html"), LOGIN])
+                self.assertIn(str(old), err)
+                self.assertIn("sourcery.py", err)
+
+    def test_unreadable_page_refused_cleanly(self):
+        # Replicata: adopted as dreeves: a page path where no file is, a
+        # directory, a file that is no UTF-8 text. Expectata: exit 2 naming
+        # the page; nothing written. Resultata (v6.0.0 before adopt.py): no
+        # adopt.py.
+        old = self.tmp / "old.html"
+        argv = [str(self.repo), str(old), str(self.tmp / "out.html"), LOGIN]
+        self.assertIn(str(old), self.refused_by(self.adopt_cli, argv))
+        old.mkdir()
+        self.assertIn(str(old), self.refused_by(self.adopt_cli, argv))
+        old.rmdir()
+        old.write_bytes(five_page(self.repo, [exchange()]).encode("utf-8") + b"\xff\xfe")
+        self.assertIn(str(old), self.refused_by(self.adopt_cli, argv))
+
+    def test_damaged_snapshot_refused(self):
+        # Replicata: adopted as dreeves, a page sourcery 5 wrote whose
+        # snapshot is damaged: no JSON; no JSON object; its repo key
+        # missing; a key extra; its exchanges no list; a row with a field
+        # unknown; a row whose timestamp is unreadable; a row that is no
+        # object. Expectata: exit 2 naming the page; nothing written.
+        # Resultata (v6.0.0 before adopt.py): no adopt.py.
+        five = five_page(self.repo, [exchange()])
+        row = ace.freeze(exchange())
+        name = json.dumps(self.repo.name)
+        old = self.tmp / "old.html"
+        for snapshot in (
+            "{not json",
+            "[1, 2]",
+            '{"sourcery": "5.5.2", "exchanges": []}',
+            f'{{"sourcery": "5.5.2", "repo": {name}, "exchanges": [], "author": "someone"}}',
+            f'{{"sourcery": "5.5.2", "repo": {name}, "exchanges": {{}}}}',
+            f'{{"sourcery": "5.5.2", "repo": {name}, "exchanges": [{json.dumps({**row, "author": "someone"})}]}}',
+            f'{{"sourcery": "5.5.2", "repo": {name}, "exchanges": [{json.dumps({**row, "timestamp": "yesterday"})}]}}',
+            f'{{"sourcery": "5.5.2", "repo": {name}, "exchanges": ["just text"]}}',
+            f'{{"sourcery": "5.5.2", "repo": {name}, "exchanges": [5]}}',
+        ):
+            old.write_text(with_snapshot(five, snapshot), encoding="utf-8")
+            with self.subTest(snapshot=snapshot):
+                err = self.refused_by(self.adopt_cli, [str(self.repo), str(old), str(self.tmp / "out.html"), LOGIN])
+                self.assertIn(str(old), err)
+
+    def test_output_page_whose_rows_would_be_lost_refused(self):
+        # Replicata: old.html, a page sourcery 5 wrote, is adopted into an
+        # output path holding a page adoption would replace without its
+        # rows: another page sourcery 5 wrote, whose snapshot is not the one
+        # adopted; a file that is no sourcery page; a page sourcery 6 wrote
+        # crediting a row to mister-person, whose ledger is missing (deleted,
+        # or never committed). Expectata: exit 2 naming the output page, or
+        # the missing ledger; nothing written. Resultata (v6.0.0 before
+        # adopt.py): no adopt.py.
+        old = self.tmp / "old.html"
+        old.write_text(five_page(self.repo, [exchange(timestamp=utc(T1), prompt="old prompt")]), encoding="utf-8")
+        out_path = self.tmp / "out.html"
+        argv = [str(self.repo), str(old), str(out_path), LOGIN]
+        for text in (five_page(self.repo, [exchange()]), "no sourcery page"):
+            out_path.write_text(text, encoding="utf-8")
+            with self.subTest(text=text[-200:]):
+                self.assertIn(str(out_path), self.refused_by(self.adopt_cli, argv))
+        out_path.write_text(ace.render(self.repo, {"mister-person": [self.theirs()]}), encoding="utf-8")
+        self.assertIn(str(self.ledger("mister-person")), self.refused_by(self.adopt_cli, argv))
+
+    def test_ledger_lands_beside_the_output_page(self):
+        # Replicata: old.html, a page sourcery 5 wrote, is adopted as dreeves
+        # into an output page in a subdirectory, pub/sourcery.html, where
+        # molecall keeps its page. Expectata: exit 0; the ledger is
+        # pub/sourcery.dreeves.jsonl, beside the output page, which is
+        # written there; old.html is left as it was. Resultata (v6.0.0
+        # before adopt.py): no adopt.py.
+        old = self.tmp / "old.html"
+        old.write_text(five_page(self.repo, [exchange()]), encoding="utf-8")
+        before = old.read_bytes()
+        pub = self.tmp / "pub"
+        pub.mkdir()
+        self.adopted(old, pub / "sourcery.html")
+        self.assertEqual(sorted(path.name for path in pub.iterdir()), ["sourcery.dreeves.jsonl", "sourcery.html"])
+        self.assertFalse(self.ledger().exists())
+        self.assertEqual(old.read_bytes(), before)
+
+    def test_login_given_in_capitals_names_the_lowercase_ledger_and_no_login_refused(self):
+        # Replicata: a page sourcery 5 wrote, adopted under a string that is
+        # no GitHub login, or as "Mister-Person" (GitHub keeps the capitals
+        # a human registered with, but ignores case). Expectata: no login is
+        # refused, exit 2, quoting it, nothing written; capitals name the
+        # lowercase login's ledger, sourcery.mister-person.jsonl, as sourcery
+        # lowercases the login gh reports. Resultata (v6.0.0 before
+        # adopt.py): no adopt.py.
+        old, out_path = self.tmp / "old.html", self.tmp / "out.html"
+        old.write_text(five_page(self.repo, [exchange()]), encoding="utf-8")
+        for login in ("", "dree ves", "-x", "x-", "dree--ves", "dree_ves", "../x", "x" * 40):
+            with self.subTest(login=login):
+                err = self.refused_by(self.adopt_cli, [str(self.repo), str(old), str(out_path), login])
+                self.assertIn(repr(login), err)
+        self.adopted(old, out_path, "Mister-Person")
+        self.assertEqual([path.name for path in self.tmp.glob("sourcery.*.jsonl")], ["sourcery.mister-person.jsonl"])
+
+    def test_adopt_usage_refused_and_nothing_written(self):
+        # Replicata: adopt.py run with too few or too many arguments, or
+        # naming a project directory that does not exist. Expectata: exit 2
+        # with the usage text, or naming the missing directory; nothing
+        # written. Resultata (v6.0.0 before adopt.py): no adopt.py.
+        old, out_path = self.tmp / "old.html", self.tmp / "out.html"
+        old.write_text(five_page(self.repo, [exchange()]), encoding="utf-8")
+        for argv in ([], [str(self.repo), str(old), str(out_path)], [str(self.repo), str(old), str(out_path), LOGIN, "x"]):
+            with self.subTest(argv=argv):
+                self.assertIn("adopt.py REPODIR", self.refused_by(self.adopt_cli, argv))
+        absent = self.tmp / "absent"
+        self.assertIn(str(absent), self.refused_by(self.adopt_cli, [str(absent), str(old), str(out_path), LOGIN]))
+
+    def test_refusal_found_while_rendering_writes_nothing_on_adoption(self):
+        # Replicata: a page sourcery 5 wrote, adopted in place as dreeves,
+        # refused as the new page is rendered (render replaced by a stand-in
+        # that refuses, as no input makes the real one refuse today), every
+        # check made before rendering passing. Expectata: exit 2 with the
+        # stand-in's refusal, with neither ledger nor page written.
+        # Resultata (v6.0.0): as expected; this guards the page's rendering
+        # before anything is written, against writing the ledger first.
+        # Resultata (v6.0.0 before the fix): the qual made the repo's
+        # remotes refuse, which they now do before anything is read, so it
+        # no longer guarded the order its name states.
+        out_path = self.tmp / "out.html"
+        out_path.write_text(five_page(self.repo, [exchange()]), encoding="utf-8")
+        render = self.refusing_render()
+        try:
+            err = self.refused_by(self.adopt_cli, [str(self.repo), str(out_path), str(out_path), LOGIN])
+        finally:
+            ace.render = render
+        self.assertIn("render refused", err)
+
+    def test_adoption_refuses_a_home_under_a_remote_not_named_origin(self):
+        # Replicata: a page sourcery 5 wrote, adopted in place as dreeves,
+        # in a checkout whose one remote, efme, names its public home, no
+        # remote being named origin. Expectata: exit 2 naming efme and
+        # origin, as sourcery refuses such a checkout, with neither ledger
+        # nor page written. Resultata (v6.0.0): as expected; this guards
+        # adopt.py against reading such a home as none, which would name
+        # the project after the checkout's directory and write a ledger and
+        # a page in a checkout sourcery refuses. The scenario is the one
+        # test_refusal_found_while_rendering_writes_nothing_on_adoption
+        # used before its rewrite, kept as its own qual.
+        git = self.repo / ".git"
+        git.mkdir()
+        (git / "config").write_text('[remote "efme"]\n\turl = git@github.com:beeminder/efme.git\n', encoding="utf-8")
+        out_path = self.tmp / "out.html"
+        out_path.write_text(five_page(self.repo, [exchange()]), encoding="utf-8")
+        err = self.refused_by(self.adopt_cli, [str(self.repo), str(out_path), str(out_path), LOGIN])
+        self.assertIn("efme (https://github.com/beeminder/efme)", err)
+        self.assertIn("'origin'", err)
+
+    def test_failed_ledger_write_leaves_the_page_as_it_was_on_adoption(self):
+        # Replicata: a page sourcery 5 wrote, adopted in place as dreeves,
+        # the ledger's write failing (os.replace refusing the ledger's path,
+        # as on a full disk). Expectata: the failure surfaces, and the page
+        # is left as it was, its snapshot intact, so that once writing works
+        # again, adopting it succeeds. Resultata (v6.0.0): as expected; this
+        # guards the write order, the ledger before the page, against
+        # writing the page first, which replaced the page sourcery 5 wrote,
+        # and with it its snapshot, the only copy of its rows.
+        out_path = self.tmp / "out.html"
+        out_path.write_text(five_page(self.repo, [exchange()]), encoding="utf-8")
+        page = out_path.read_bytes()
+        argv = [str(self.repo), str(out_path), str(out_path), LOGIN]
+        replace = ace.os.replace
+
+        def failing(source, target):
+            if Path(target) == self.ledger():
+                raise OSError(28, "No space left on device", str(target))
+            return replace(source, target)
+
+        ace.os.replace = failing
+        try:
+            with self.assertRaises(OSError):
+                self.adopt_cli(argv)
+        finally:
+            ace.os.replace = replace
+        self.assertEqual(out_path.read_bytes(), page)
+        self.assertFalse(self.ledger().exists())
+        self.assertIn("Rogationes paginae: 1; tabulae additae: 1\n", self.adopted(out_path, out_path))
+
+
+class IdentityQuals(unittest.TestCase):
+    def setUp(self):
+        self.gh_user = ace.gh_user
+
+    def tearDown(self):
+        ace.gh_user = self.gh_user
+
+    def test_login_is_ghs_saved_github_login_lowercased(self):
+        # Replicata: gh's saved login for github.com is "Mister-Person"
+        # (GitHub keeps the capitals a human registered with but ignores
+        # case), or all lowercase, or one letter, or 39 characters.
+        # Expectata: the login, lowercased, so a human's ledger has one file
+        # name on every file system. Resultata (v5.5.2): no identity.
+        for said, login in (
+            ("Mister-Person\n", "mister-person"), ("dreeves\n", "dreeves"), ("a\n", "a"),
+            ("A1-b2-C3\n", "a1-b2-c3"), ("x" * 39 + "\n", "x" * 39),
+        ):
+            ace.gh_user = gh_says(said)
+            with self.subTest(said=said):
+                self.assertEqual(ace.github_login(), login)
+
+    def test_identity_lookup_is_one_local_gh_config_call(self):
+        # Replicata: the seam's own body, run with subprocess.run replaced
+        # by a recorder. Expectata: one call, of "gh config get user -h
+        # github.com", which reads gh's saved configuration (never "gh api",
+        # so no network). Resultata (v5.5.2): no identity.
+        calls = []
+        original = ace.subprocess.run
+
+        def recorder(args, **options):
+            calls.append(tuple(args))
+            return subprocess.CompletedProcess(args, 0, "dreeves\n", "")
+
+        ace.subprocess.run = recorder
+        try:
+            self.assertEqual(ace.github_login(), "dreeves")
+        finally:
+            ace.subprocess.run = original
+        self.assertEqual(calls, [("gh", "config", "get", "user", "-h", "github.com")])
+
+    def test_real_seam_reads_the_gh_on_path(self):
+        # Replicata: the seam itself, unreplaced, with PATH holding nothing
+        # but a stand-in executable named gh (quals never call the real
+        # gh): asked for gh's saved login, it prints one in capitals; or
+        # prints bytes that are no UTF-8; or exits 1, as gh does when no one
+        # is signed in; or PATH holds no gh at all. Expectata: the login,
+        # lowercased; each of the others a UserError saying to run "gh auth
+        # login". Resultata with the seam's output not captured, or captured
+        # undecoded: an AttributeError or TypeError traceback on every real
+        # run, while every qual that replaces the seam stayed green.
+        stand_in = Path(tempfile.mkdtemp()).resolve()
+        gh = stand_in / "gh"
+        asked = '#!/bin/sh\n[ "$*" = "config get user -h github.com" ] || exit 9\n'
+        path = os.environ["PATH"]
+        os.environ["PATH"] = str(stand_in)
+        try:
+            gh.write_text(asked + "printf 'Mister-Person\\n'\n", encoding="utf-8")
+            gh.chmod(0o755)
+            self.assertEqual(ace.github_login(), "mister-person")
+            refusals = []
+            for said in ("printf '\\377dreeves\\n'\n", "printf 'could not find key \"user\"\\n' >&2; exit 1\n"):
+                gh.write_text(asked + said, encoding="utf-8")
+                with self.assertRaises(ace.UserError, msg=said) as ctx:
+                    ace.github_login()
+                refusals.append(str(ctx.exception))
+            gh.unlink()
+            with self.assertRaises(ace.UserError, msg="no gh") as ctx:
+                ace.github_login()
+            refusals.append(str(ctx.exception))
+        finally:
+            os.environ["PATH"] = path
+        for refusal in refusals:
+            self.assertIn("gh auth login", refusal)
+
+    def test_unusable_gh_identity_refused_saying_to_run_gh_auth_login(self):
+        # Replicata: gh not installed or not runnable; gh run but failing,
+        # as when not logged in; or gh's saved login empty or no GitHub
+        # login (letters, digits, and single hyphens, 1 to 39 characters,
+        # no hyphen at either end). Expectata: a UserError telling the human
+        # to run "gh auth login". Resultata (v5.5.2): no identity.
+        def unrunnable():
+            raise PermissionError(13, "Permission denied", "gh")
+
+        seams = [gh_missing, unrunnable, gh_says("", 1, 'could not find key "user"\n'), gh_says("dreeves\n", 1)]
+        seams += [
+            gh_says(said)
+            for said in (
+                "", "\n", "-dreeves\n", "dreeves-\n", "dree--ves\n", "x" * 40 + "\n", "dree ves\n",
+                "dreeves \n", " dreeves\n", "dreeves\n\n", "dree_ves\n", "dréeves\n", "dree.ves\n", "../x\n",
+            )
+        ]
+        for seam in seams:
+            ace.gh_user = seam
+            with self.subTest(seam=seam):
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.github_login()
+                self.assertIn("gh auth login", str(ctx.exception))
 
 
 class RemoteQuals(Fixture):
@@ -4064,6 +6150,34 @@ class RemoteQuals(Fixture):
 
     def test_no_git_directory_means_no_link(self):
         self.assertEqual(ace.repo_remote(self.repo), "")
+
+    def test_project_name_is_the_public_homes_last_segment_else_the_directorys_name(self):
+        # Replicata: the project name of a checkout whose directory is named
+        # repo, given the public home repo_remote found there: a repository
+        # (blog, beemblog's repository), one named in capitals (TagTime,
+        # tagtime's), one under nested groups, one whose name holds a dot or
+        # an "@", or no public home at all (""). Expectata: the last path
+        # segment of the home, exactly as written, or the directory's name
+        # when there is no home; a home whose path names no repository (no
+        # path at all, or one ending in "/") refused, naming the home and
+        # the checkout. Resultata (v6.0.0): no project_name; a ledger named
+        # its project by the directory alone. Resultata (v6.0.0 before the
+        # fix): a home whose path names no repository failed an assertion.
+        for remote, expected in (
+            ("https://github.com/dreeves/blog", "blog"),
+            ("https://github.com/dreeves/TagTime", "TagTime"),
+            ("https://gitlab.com/group/subgroup/project", "project"),
+            ("https://github.com/beeminder/beeminder.github.io", "beeminder.github.io"),
+            ("https://github.com/a/b@2", "b@2"),
+            ("", "repo"),
+        ):
+            with self.subTest(remote=remote):
+                self.assertEqual(ace.project_name(self.repo, remote), expected)
+        for remote in ("https://github.com", "https://github.com/", "https://github.com/dreeves/"):
+            with self.subTest(remote=remote):
+                with self.assertRaises(ace.UserError) as caught:
+                    ace.project_name(self.repo, remote)
+                self.assertIn(f"{remote!r} ({self.repo})", str(caught.exception))
 
 
 # ---------------------------------------------------------------- Antigravity
@@ -4216,7 +6330,7 @@ class AntigravityQuals(Fixture):
 
     def test_key_literal_appears_nowhere_in_the_sources(self):
         # The key belongs to the application; only its digest is recorded.
-        for name in ("sourcery.py", "quals.py", "unrender.py", "README.md"):
+        for name in ("sourcery.py", "adopt.py", "quals.py", "README.md"):
             source = (Path(ace.__file__).parent / name).read_bytes()
             for run in re.finditer(rb"[A-Za-z]{32,}", source):
                 letters = run.group()
@@ -4307,7 +6421,7 @@ class AntigravityQuals(Fixture):
         # Replicata: the application compacted the conversation, leaving its
         # early steps with status 5 and no content, then a live prompt.
         # Expectata: the live prompt alone, and a holding for it alone — a
-        # page copy of the emptied prompt must survive the merge, since the
+        # ledger copy of the emptied prompt must survive the merge, since the
         # store no longer holds its words.
         ws = self.repo.as_uri()
         steps = [
@@ -4367,7 +6481,7 @@ class AntigravityQuals(Fixture):
         self.assertEqual(ace.PROVIDER_SLUGS["Antigravity"], "antigravity")
 
 
-# ------------------------------------------------------------------ snapshot
+# ------------------------------------------------------------------- ledgers
 
 MAXIMAL = dict(
     timestamp=utc("2026-03-01T10:00:00.123456Z"),
@@ -4404,7 +6518,7 @@ def count_scripts(page):
     return tally.scripts
 
 
-class SnapshotQuals(Fixture):
+class LedgerQuals(Fixture):
     def test_freeze_thaw_round_trips_every_field(self):
         given = maximal_exchange()
         thawed = ace.thaw(json.loads(json.dumps(ace.freeze(given))), self.tmp / "page.html")
@@ -4418,7 +6532,7 @@ class SnapshotQuals(Fixture):
         self.assertNotIn("source", ace.freeze(maximal_exchange()))
 
     def test_claude_ai_exchange_thaws(self):
-        # Replicata: a snapshot seeded with a claude.ai chat exchange, the
+        # Replicata: a ledger seeded with a claude.ai chat exchange, the
         # only way such an exchange enters a page. Expectata: it thaws back
         # exactly. Resultata (v5.5.0): ValueError, claude.ai being no known
         # provider.
@@ -4436,7 +6550,7 @@ class SnapshotQuals(Fixture):
                 ace.thaw({k: v for k, v in frozen.items() if k != missing}, page)
 
     def test_thaw_rejects_wrong_types_and_ranges(self):
-        # A hand-edited snapshot must not thaw into a guess: every field's
+        # A hand-edited ledger row must not thaw into a guess: every field's
         # JSON type and range is checked before an Exchange is built.
         frozen = ace.freeze(maximal_exchange())
         page = self.tmp / "page.html"
@@ -4464,7 +6578,7 @@ class SnapshotQuals(Fixture):
 
     def test_bare_tool_result_is_no_holding(self):
         # Tool plumbing that carries no typing was never rendered, so it must
-        # never purge a page copy that merely shares its millisecond.
+        # never purge a ledger copy that merely shares its millisecond.
         claude = write_jsonl(
             self.tmp / "claude" / "p" / "s.jsonl",
             [
@@ -4481,38 +6595,44 @@ class SnapshotQuals(Fixture):
         self.assertEqual([e.prompt for e in exchanges], ["typed"])
         self.assertEqual(holdings, {("Claude Code", utc(T0))})
 
-    def test_snapshot_block_is_inert_json_without_angle_brackets(self):
+    def test_page_holds_no_data_block_and_ledger_text_round_trips(self):
+        # Replicata: the maximal exchange, its reply holding a closing
+        # script tag and a comment around a script. Expectata: its page
+        # holds one script element, the page's own, with the reply's markup
+        # inert; its ledger text gives the exchange back. Resultata
+        # (v5.5.2): a second script, the JSON snapshot.
         given = maximal_exchange()
-        page = ace.render(self.repo, [given], "")
-        found = ace.SNAPSHOT.findall(page)
-        self.assertEqual(len(found), 1)
-        self.assertNotIn("<", found[0])
-        data = json.loads(found[0])
-        self.assertEqual(data["repo"], self.repo.name)
-        self.assertEqual(data["sourcery"], ace.VERSION)
-        thawed = [ace.thaw(f, given.source) for f in data["exchanges"]]
-        self.assertEqual(thawed, [given])
+        page = ace.render(self.repo, {LOGIN: [given]}, "")
         self.assertNotIn("<script>alert(1)", page)
-        self.assertEqual(count_scripts(page), 2)
+        self.assertEqual(count_scripts(page), 1)
+        header, row = ace.ledger_text(self.repo.name, [given]).removesuffix("\n").split("\n")
+        self.assertEqual(json.loads(header), ledger_header(self.repo.name))
+        self.assertEqual(ace.thaw(json.loads(row), given.source), given)
 
-    def test_snapshot_one_exchange_per_line_last_in_body(self):
+    def test_ledger_text_is_a_header_then_one_exchange_per_line(self):
+        # Replicata: a ledger's text for two exchanges whose prompts hold
+        # line breaks. Expectata: the header line, then one line per
+        # exchange, each its freeze() form as json.dumps writes it with
+        # non-ASCII characters kept, every line ending in a newline.
+        # Resultata (v5.5.2): no ledgers; the snapshot was one JSON value.
         first = maximal_exchange()
-        second = maximal_exchange(timestamp=utc(T1), prompt="second")
-        page = ace.render(self.repo, [first, second], "")
-        lines = ace.SNAPSHOT.search(page).group(1).split("\n")
-        self.assertEqual(len(lines), 4)
-        self.assertTrue(lines[0].endswith("["))
-        self.assertEqual(json.loads(lines[1].rstrip(","))["prompt"], first.prompt)
-        self.assertEqual(json.loads(lines[2])["prompt"], "second")
-        self.assertEqual(lines[3], "]}")
-        opener = page.index(ace.SNAPSHOT_OPEN)
-        self.assertGreater(opener, page.rindex("</article>"))
-        self.assertGreater(opener, page.index("<script>"))
-        self.assertLess(opener, page.index("</body>"))
+        second = maximal_exchange(timestamp=utc(T1), prompt="second\nline   é")
+        text = ace.ledger_text(self.repo.name, [first, second])
+        self.assertTrue(text.endswith("\n"))
+        lines = text.removesuffix("\n").split("\n")
+        self.assertEqual(
+            lines,
+            [
+                json.dumps(ledger_header(self.repo.name)),
+                json.dumps(ace.freeze(first), ensure_ascii=False),
+                json.dumps(ace.freeze(second), ensure_ascii=False),
+            ],
+        )
+        self.assertEqual(json.loads(lines[2])["prompt"], second.prompt)
 
     def test_parsers_report_holdings_for_records_they_drop(self):
         # A record the store still holds is reported even when the parser
-        # drops it as machine text, so a page's stale copy of it gets purged.
+        # drops it as machine text, so a ledger's stale copy of it gets purged.
         claude = write_jsonl(
             self.tmp / "claude" / "p" / "s.jsonl",
             [
@@ -4581,381 +6701,6 @@ class ParseTimeQuals(unittest.TestCase):
         for bad in (None, "yesterday", [], {}):
             with self.assertRaises(ace.UserError):
                 ace.parse_time(bad)
-
-
-# ------------------------------------------------------------------ unrender
-
-SNAPSHOT_BLOCK = re.compile(re.escape(ace.SNAPSHOT_OPEN) + r"\n.*?\n</script>\n", re.DOTALL)
-
-
-def legacy(page: str) -> str:
-    """The page as sourcery wrote it before snapshots: the block removed."""
-    assert page.count(ace.SNAPSHOT_OPEN) == 1, page[-400:]
-    return SNAPSHOT_BLOCK.sub("", page)
-
-
-# A reply in the canonical form unrender writes back, exercising every
-# construct markdown_html emits: a heading per level it distinguishes,
-# paragraphs with hard line breaks, strong, code spans, links, bullets,
-# numbered items, blockquotes, fenced code with and without a language,
-# a fence holding a fence line, a code span holding backticks, raw HTML
-# in prose, and the quoting characters html.escape rewrites.
-REPLY_EVERYTHING = "\n\n".join(
-    [
-        "# Caput primum",
-        'Paragraphus **fortis** et `codex` et [nexus](https://example.com/?a=1&b=2) et <b>non-tag</b>.'
-        "\nLinea secunda \"citata\" 'apostrophus' & signum.",
-        "## Caput secundum",
-        "### Tertium",
-        "#### Quartum",
-        "##### Quintum",
-        "- primum\n- `secundum` cum **forti**\n- [nexus **fortis**](mailto:x@y.z)",
-        "1. unum\n2. duo\n3. tres",
-        "> citatum\n> alterum citatum",
-        '```python\nprint("salve")\nx = 1 < 2 & 3\n```',
-        "```\nsine lingua\n```",
-        "````\n```\nsaeptum intus\n````",
-        "`` `intus` `` et ``` `` ``` finis.",
-    ]
-)
-
-# The same constructs spelled the ways markdown_html also accepts; the page
-# is identical, so unrender can only give back the canonical spelling.
-REPLY_VARIANT = "\n\n".join(
-    [
-        "__sublineatum__ et `x`",
-        "* stella\n+ plus",
-        "3) tres\n7. septem",
-        "~~~js\nx\n~~~",
-        "## cauda ##",
-        "###### sextum",
-    ]
-)
-REPLY_VARIANT_CANONICAL = "\n\n".join(
-    [
-        "**sublineatum** et `x`",
-        "- stella\n- plus",
-        "1. tres\n2. septem",
-        "```js\nx\n```",
-        "## cauda",
-        "##### sextum",
-    ]
-)
-
-
-def maximal() -> list:
-    """Four exchanges covering every field the page shows, on three days,
-    from all three providers."""
-    return [
-        exchange(
-            timestamp=utc("2026-03-01T10:00:00.123456Z"),
-            effort="xhigh",
-            prompt="a<b>&c\n  indented\ttab\n\n",
-            reply=REPLY_EVERYTHING,
-            images=("data:image/png;base64,AA==", "data:image/jpeg;base64,/9j/\"q"),
-            elapsed=327.0,
-            wall=3600.0,
-            ballots=(
-                ace.Ballot("Quid & quo?", ("A & B", "C"), ("A & B",)),
-                ace.Ballot("Plura?", ("X", "Y", "Z"), ("X", "Z")),
-                ace.Ballot("Scriptum?", ("P", "Q"), ()),
-            ),
-            added=1234,
-            deleted=5678,
-        ),
-        exchange(
-            timestamp=utc("2026-03-01T10:05:00.000001Z"),
-            provider="Codex",
-            model="gpt-5.6",
-            prompt="secunda",
-            reply="planum",
-            elapsed=12.6,
-            wall=12.9,
-            deleted=3,
-        ),
-        exchange(
-            timestamp=utc("2026-03-02T12:00:00Z"),
-            provider="Copilot Chat",
-            model="",
-            prompt="",
-            reply="",
-            ballots=(ace.Ballot("Solum scriptum?", ("P",), ()),),
-            elapsed=0.3,
-        ),
-        exchange(
-            timestamp=utc("2026-03-03T23:59:59.999999Z"),
-            model="m",
-            prompt="ultima",
-            reply="",
-            elapsed=5.0,
-            wall=5.0,
-        ),
-    ]
-
-
-class UnrenderQuals(Fixture):
-    def setUp(self):
-        super().setUp()
-        self.page = self.repo / "sourcery.html"
-
-    def render(self, exchanges) -> str:
-        """The page as a legacy sourcery rendered it: no snapshot block."""
-        return legacy(ace.render(self.repo, exchanges, ace.repo_remote(self.repo)))
-
-    def write(self, page: str) -> None:
-        self.page.write_bytes(page.encode("utf-8"))
-
-    def run_cli(self, argv):
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = unrender.run(argv)
-        return code, out.getvalue(), err.getvalue()
-
-    def refuse(self, page: str, repo=None) -> str:
-        """Run the CLI on page, expect refusal, prove nothing was written,
-        and return the error text."""
-        self.write(page)
-        before = sorted(p.name for p in self.page.parent.iterdir())
-        code, out, err = self.run_cli([str(repo or self.repo), str(self.page)])
-        self.assertEqual((code, out), (2, ""), err)
-        self.assertTrue(err.startswith("Error:\n"), err)
-        self.assertEqual(self.page.read_bytes(), page.encode("utf-8"))
-        self.assertEqual(sorted(p.name for p in self.page.parent.iterdir()), before)
-        return err
-
-    def expected(self, originals) -> list:
-        """What unrender can recover: session and source replaced, elapsed
-        at display precision, wall only when the page showed it."""
-        recovered = dict(session="unrendered", source=self.page)
-        e1, e2, e3, e4 = originals
-        return [
-            dataclasses.replace(e1, **recovered),
-            dataclasses.replace(e2, **recovered, elapsed=13.0, wall=0.0),
-            dataclasses.replace(e3, **recovered, elapsed=0.0),
-            dataclasses.replace(e4, **recovered, wall=0.0),
-        ]
-
-    def test_maximal_page_recovers_every_shown_field(self):
-        originals = maximal()
-        page = self.render(originals)
-        self.write(page)
-        got, rendered = unrender.recover(self.repo, self.page)
-        self.assertEqual(got, self.expected(originals))
-        self.assertEqual(legacy(rendered), page)
-        self.assertEqual(self.render(got), page)
-
-    def test_cli_rewrites_page_through_render_and_reports_count(self):
-        originals = maximal()
-        self.write(self.render(originals))
-        code, out, err = self.run_cli([str(self.repo), str(self.page)])
-        self.assertEqual((code, err), (0, ""), out)
-        self.assertIn("4", out)
-        self.assertIn(str(self.page), out)
-        rewritten = self.page.read_text(encoding="utf-8")
-        self.assertIn(ace.SNAPSHOT_OPEN, rewritten)
-        self.assertEqual(
-            rewritten, ace.render(self.repo, self.expected(originals), ace.repo_remote(self.repo))
-        )
-        # What gets written is exactly the rendering the proof passed on.
-        self.assertEqual(ace.inherit(self.page, self.repo), self.expected(originals))
-
-    def test_variant_markdown_spellings_canonicalize_page_identically(self):
-        original = exchange(reply=REPLY_VARIANT)
-        page = self.render([original])
-        self.write(page)
-        got, _ = unrender.recover(self.repo, self.page)
-        self.assertEqual(got[0].reply, REPLY_VARIANT_CANONICAL)
-        self.assertEqual(self.render(got), page)
-
-    def test_carriage_return_in_legacy_prompt_survives_unrender(self):
-        # Replicata: a legacy page whose prompt holds a lone CR and a CRLF, as
-        # one real page does (a reply's line breaks are canonical already).
-        # Expectata: the prompt is recovered byte-exact and the rewritten
-        # page's snapshot gives the same bytes back. Resultata before the fix:
-        # every CR silently became LF, through universal-newlines reading.
-        original = exchange(prompt="one\r\ntwo\rthree", reply="a\r\nb")
-        page = self.render([original])
-        self.assertIn("\r", page)
-        self.write(page)
-        got, _ = unrender.recover(self.repo, self.page)
-        self.assertEqual(got[0].prompt, original.prompt)
-        self.assertEqual(ace.markdown_html(got[0].reply), ace.markdown_html(original.reply))
-        code, _, err = self.run_cli([str(self.repo), str(self.page)])
-        self.assertEqual(code, 0, err)
-        self.assertEqual([e.prompt for e in ace.inherit(self.page, self.repo)], [original.prompt])
-
-    def test_page_whose_public_home_is_hidden_refused(self):
-        # unrender renders through the same masthead, so a project whose
-        # public home hides under another remote name is refused here too,
-        # before the page it was asked to import is touched.
-        page = self.render([exchange()])
-        self.write(page)
-        git = self.repo / ".git"
-        git.mkdir()
-        (git / "config").write_text(
-            '[remote "elsewhere"]\n\turl = git@github.com:beeminder/efme.git\n', encoding="utf-8"
-        )
-        code, out, err = self.run_cli([str(self.repo), str(self.page)])
-        self.assertEqual((code, out), (2, ""))
-        self.assertIn("elsewhere (https://github.com/beeminder/efme)", err)
-        self.assertEqual(self.page.read_bytes(), page.encode("utf-8"))
-
-    def test_antigravity_exchange_round_trips(self):
-        original = exchange(provider="Antigravity", model="gemini-3-pro-high", reply="Visible **answer**.")
-        page = self.render([original])
-        self.write(page)
-        got, _ = unrender.recover(self.repo, self.page)
-        self.assertEqual(got, [dataclasses.replace(original, session="unrendered", source=self.page)])
-
-    def test_claude_ai_exchange_round_trips_beside_claude_code(self):
-        # Replicata: a page holding a claude.ai exchange and a Claude Code
-        # one, whose slugs are claudeai and its prefix, claude. Expectata:
-        # each comes back as its own provider. Resultata (v5.5.0): KeyError
-        # rendering the page, claude.ai being no known provider.
-        originals = [
-            exchange(provider="claude.ai", model="claude-opus-5-5", reply="Visible **answer**."),
-            exchange(timestamp=utc(T1), prompt="q"),
-        ]
-        self.write(self.render(originals))
-        got, _ = unrender.recover(self.repo, self.page)
-        self.assertEqual(
-            got, [dataclasses.replace(e, session="unrendered", source=self.page) for e in originals]
-        )
-
-    def test_non_utf8_page_refused(self):
-        page = self.render([exchange()]).encode("utf-8") + b"\xff\xfe"
-        self.page.write_bytes(page)
-        code, out, err = self.run_cli([str(self.repo), str(self.page)])
-        self.assertEqual((code, out), (2, ""))
-        self.assertIn(str(self.page), err)
-        self.assertEqual(self.page.read_bytes(), page)
-
-    def test_newer_stylesheet_outside_main_tolerated(self):
-        # Only the <main> region must round-trip: head, styles and the header
-        # comment may legitimately differ between sourcery versions.
-        page = self.render([exchange()])
-        stale = page.replace("<style>", "<style>/* older stylesheet */ body{color:red}", 1)
-        self.assertNotEqual(stale, page)
-        self.write(stale)
-        code, out, err = self.run_cli([str(self.repo), str(self.page)])
-        self.assertEqual((code, err), (0, ""), out)
-        expected = dataclasses.replace(exchange(), session="unrendered", source=self.page)
-        self.assertEqual(
-            self.page.read_text(encoding="utf-8"),
-            ace.render(self.repo, [expected], ace.repo_remote(self.repo)),
-        )
-
-    def test_page_whose_subtitle_differs_from_repo_today_refused(self):
-        # The masthead's where-line sits inside <main>: a page rendered when
-        # the repo had a remote it no longer has is refused, nothing written.
-        page = ace.render(self.repo, [exchange()], "https://github.com/x/y")
-        err = self.refuse(legacy(page))
-        self.assertIn("<main>", err)
-
-    def test_rewrite_then_sourcery_with_empty_stores_byte_identical(self):
-        self.write(self.render(maximal()))
-        code, _, err = self.run_cli([str(self.repo), str(self.page)])
-        self.assertEqual(code, 0, err)
-        first = self.page.read_bytes()
-        env = {
-            "AI_CHAT_CLAUDE_ROOTS": str(self.tmp / "nc"),
-            "AI_CHAT_CODEX_ROOTS": str(self.tmp / "nx"),
-            "AI_CHAT_VSCODE_USER_ROOTS": str(self.tmp / "nv"),
-            "AI_CHAT_ANTIGRAVITY_ROOTS": str(self.tmp / "na"),
-        }
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = ace.run([str(self.repo), str(self.page)], env)
-        self.assertEqual(code, 0, err.getvalue())
-        self.assertIn("Prompts: 4", out.getvalue())
-        self.assertEqual(self.page.read_bytes(), first)
-
-    def test_snapshot_page_refused(self):
-        page = ace.render(self.repo, [exchange()], ace.repo_remote(self.repo))
-        self.assertIn(ace.SNAPSHOT_OPEN, page)
-        err = self.refuse(page)
-        self.assertIn("snapshot", err)
-
-    def test_title_basename_mismatch_refused(self):
-        other = self.tmp / "alius"
-        other.mkdir()
-        err = self.refuse(self.render([exchange()]), repo=other)
-        self.assertIn("repo", err)
-        self.assertIn("alius", err)
-
-    def test_tampered_deck_count_refused(self):
-        page = self.render([exchange(), exchange(timestamp=utc("2026-03-01T11:00:00Z"))])
-        self.assertIn("2 prompts", page)
-        self.refuse(page.replace("2 prompts", "3 prompts"))
-
-    def test_tampered_deck_totals_refused(self):
-        page = self.render([exchange(added=10, deleted=2)])
-        self.assertIn("+10 −2", page)
-        self.refuse(page.replace("+10 −2</p>", "+11 −2</p>"))
-
-    def test_unknown_span_class_refused(self):
-        page = self.render([exchange()])
-        err = self.refuse(
-            page.replace('<span class="chip"></span>', '<span class="chip"></span> <span class="arcanum">x</span>')
-        )
-        self.assertIn("arcanum", err)
-
-    def test_unexpected_element_in_reply_refused(self):
-        page = self.render([exchange(reply="r")])
-        err = self.refuse(page.replace("<p>r</p>", "<table><tr><td>r</td></tr></table>"))
-        self.assertIn("<table>", err)
-
-    def test_unknown_inline_tag_in_reply_refused(self):
-        page = self.render([exchange(reply="r")])
-        err = self.refuse(page.replace("<p>r</p>", "<p><em>r</em></p>"))
-        self.assertIn("<em>", err)
-
-    def test_non_sourcery_html_refused(self):
-        self.refuse("<!doctype html>\n<html><head><title>repo</title></head><body>salve</body></html>\n")
-
-    def test_markup_without_provider_class_refused(self):
-        # The article shape sourcery wrote before provider classes existed.
-        page = self.render([exchange()])
-        err = self.refuse(page.replace('<article class="exchange claude" id="p1">', '<article class="exchange" id="p1">'))
-        self.assertIn('<article class="exchange" id="p1">', err)
-
-    def test_day_header_without_id_refused(self):
-        page = self.render([exchange()])
-        day = utc(T0).astimezone().date().isoformat()
-        self.assertIn(f'<h2 class="day" id="d{day}">', page)
-        self.refuse(page.replace(f'<h2 class="day" id="d{day}">', '<h2 class="day">'))
-
-    def test_inexact_round_trip_refused(self):
-        # Every span is well-formed but the displayed clock time is wrong.
-        page = self.render([exchange()])
-        local = utc(T0).astimezone().strftime("%H:%M")
-        wrong = "23:59" if local != "23:59" else "00:00"
-        self.refuse(page.replace(f">{local}</time>", f">{wrong}</time>"))
-
-    def test_unrecognized_duration_refused(self):
-        page = self.render([exchange(elapsed=30.0)])
-        self.assertIn("thought for 30s", page)
-        self.refuse(page.replace("thought for 30s", "thought for 90s"))
-
-    def test_missing_page_refused(self):
-        code, out, err = self.run_cli([str(self.repo), str(self.page)])
-        self.assertEqual((code, out), (2, ""))
-        self.assertIn(str(self.page), err)
-
-    def test_missing_repo_refused(self):
-        self.write(self.render([exchange()]))
-        code, out, err = self.run_cli([str(self.tmp / "nusquam"), str(self.page)])
-        self.assertEqual((code, out), (2, ""))
-        self.assertIn("nusquam", err)
-
-    def test_wrong_argument_count_refused(self):
-        self.write(self.render([exchange()]))
-        for argv in ([], [str(self.repo)], [str(self.repo), str(self.page), "--open"]):
-            code, out, err = self.run_cli(argv)
-            self.assertEqual((code, out), (2, ""), argv)
-            self.assertIn("unrender.py", err)
-        self.assertEqual(self.page.read_bytes(), self.render([exchange()]).encode("utf-8"))
-
 
 
 if __name__ == "__main__":
