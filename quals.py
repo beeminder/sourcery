@@ -22,7 +22,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+import unittest.mock
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -33,10 +35,36 @@ T0 = "2026-03-01T10:00:00.000Z"
 T1 = "2026-03-01T10:05:00.000Z"
 T2 = "2026-03-01T10:10:00.000Z"
 T3 = "2026-03-01T10:15:00.000Z"
+# Two instants either side of a UTC midnight: 23:30 on 2026-03-01 and 05:00
+# on 2026-03-02. One calendar day in Los Angeles (15:30 and 21:00 on the
+# 1st, PST), one in Tokyo (08:30 and 14:00 on the 2nd), two in UTC.
+NIGHT = "2026-03-01T23:30:00.000Z"
+DAWN = "2026-03-02T05:00:00.000Z"
 
 
 def utc(iso: str) -> dt.datetime:
     return dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+
+@contextlib.contextmanager
+def runner_zone(zone):
+    """The process in the time zone a human running sourcery there would
+    have: TZ set to the IANA name and the C library told (time.tzset), so
+    datetime.astimezone() with no zone reads it; restored after."""
+    try:
+        with unittest.mock.patch.dict(os.environ, {"TZ": zone}):
+            time.tzset()
+            yield
+    finally:
+        time.tzset()
+
+
+def markup(page):
+    """The page's markup alone: everything before its one script, whose
+    templates (the clock rebuilds day headers and day marks) repeat
+    markup a count over the whole page would see twice."""
+    assert page.count("<script>") == 1, page.count("<script>")
+    return page[: page.index("<script>")]
 
 
 def write_jsonl(path: Path, records: list) -> Path:
@@ -113,7 +141,11 @@ def five_page(repo, exchanges, version="5.5.2", name=None):
     naming no human, and before </body> its snapshot, the block 5.5.2's
     snapshot() wrote (every exchange in freeze() form, one per line, every
     "<" escaped), naming the repo `name`, or repo's own name."""
-    bare = re.sub(r' data-login="[^"]*"| <span class="human">[^<]*</span>', "", ace.render(repo, {LOGIN: exchanges}))
+    bare = re.sub(
+        r' data-login="[^"]*"|\n<header><p class="speaker">[^<]*</p>((?:\n<div class="diffstat">.*?</div>)?)</header>',
+        r"\1",
+        ace.render(repo, {LOGIN: exchanges}),
+    )
     rows = ",\n".join(json.dumps(ace.freeze(e), ensure_ascii=False) for e in exchanges)
     named = json.dumps(repo.name if name is None else name)
     snapshot = f'{{"sourcery": {json.dumps(version)}, "repo": {named}, "exchanges": [\n{rows}\n]}}'
@@ -2740,22 +2772,26 @@ class RenderQuals(Fixture):
         self.assertLess(prompt_at, details_at)
 
     def test_meta_line_carries_time_provider_model(self):
+        # The time is the prompt's instant written in UTC (T0 is 10:00
+        # UTC), whatever zone the runner is in; see RenderQuals' clock quals.
         page = ace.render(self.repo, {LOGIN: [exchange()]})
-        local = utc(T0).astimezone().strftime("%H:%M")
         summary = page[page.index("<summary") : page.index("</summary>")]
-        self.assertIn(local, summary)
+        self.assertIn(">10:00</time>", summary)
         self.assertIn("Claude Code", summary)
         self.assertIn("claude-opus-4-8", summary)
         self.assertNotIn("(", summary)
 
-    def test_meta_line_names_each_prompts_human_by_display_name(self):
+    def test_speaker_label_names_each_prompts_human_by_display_name(self):
         # Replicata: a page rendered from three humans' ledgers, given in no
         # particular order: dreeves and mister-person, whom the display
         # table names, and a login it does not name. Expectata: the rows
         # interleave by time; each article records its login invisibly, in
-        # a data-login attribute; each meta line shows its human's display
-        # name (the table's, else the login itself) right after the time.
+        # a data-login attribute, and opens with a header holding its
+        # human's display name (the table's, else the login itself) as a
+        # speaker label, the way a play script names whoever speaks next;
+        # the meta line names no human, its chip following the time.
         # Resultata (v5.5.2): render took no humans, and no line named one.
+        # Resultata (v6.0.0): the name in the meta line, after the time.
         page = ace.render(
             self.repo,
             {
@@ -2766,24 +2802,63 @@ class RenderQuals(Fixture):
         )
         articles = re.findall(
             r'<article class="exchange claude" id="p(\d)" data-login="([a-z-]+)">'
+            r'\n<header><p class="speaker">([^<]+)</p></header>'
             r'.*?<pre class="prompt">(\w)</pre>.*?<summary>(.*?)</summary>',
             page,
             re.DOTALL,
         )
         self.assertEqual(
-            [(number, login, prompt) for number, login, prompt, _ in articles],
-            [("1", "dreeves", "a"), ("2", "mister-person", "b"), ("3", "someone-else", "c"), ("4", "dreeves", "d")],
+            [(number, login, name, prompt) for number, login, name, prompt, _ in articles],
+            [
+                ("1", "dreeves", "dreev", "a"),
+                ("2", "mister-person", "logan", "b"),
+                ("3", "someone-else", "someone-else", "c"),
+                ("4", "dreeves", "dreev", "d"),
+            ],
         )
-        for (_, _, _, summary), name in zip(articles, ("dreev", "logan", "someone-else", "dreev")):
-            self.assertIn(f'</time></a> <span class="human">{name}</span> <span class="chip"></span>', summary)
+        for *_, summary in articles:
+            self.assertIn('</time></a> <span class="chip"></span> <span class="agent">', summary)
+        self.assertNotIn('class="human"', page)
 
     def test_single_human_page_names_its_human_too(self):
-        # Replicata: a page rendered from one ledger. Expectata: its meta
-        # line still shows the human's display name. Resultata (v5.5.2): no
-        # human named.
+        # Replicata: a page rendered from one ledger. Expectata: its
+        # speaker label still shows the human's display name. Resultata
+        # (v5.5.2): no human named.
         page = ace.render(self.repo, {"dreeves": [exchange()]})
         self.assertIn('data-login="dreeves">', page)
-        self.assertIn('<span class="human">dreev</span>', page)
+        self.assertIn('<p class="speaker">dreev</p>', page)
+
+    def test_every_prompt_carries_its_speaker_label(self):
+        # Replicata: a page where dreeves prompts twice in a row, then
+        # mister-person once; the second prompt touched code. Expectata:
+        # every article opens with its label, the consecutive prompts by
+        # one human included (no suppression: a reader landing mid-page
+        # always sees who is speaking), the diffstat in the header row
+        # after the label; and the page still credits every row (CREDIT
+        # reads each article's provider, login and time as before, the
+        # header holding no time element). Resultata (v6.0.0): no labels.
+        page = ace.render(
+            self.repo,
+            {
+                "dreeves": [exchange(prompt="a"), exchange(timestamp=utc(T1), prompt="b", added=3, deleted=1)],
+                "mister-person": [exchange(timestamp=utc(T2), prompt="c")],
+            },
+        )
+        self.assertEqual(
+            re.findall(r'<article [^>]*>\n<header><p class="speaker">([^<]+)</p>(.*?)</header>\n<pre class="prompt">', page, re.DOTALL),
+            [("dreev", ""), ("dreev", '\n<div class="diffstat">+3 −1 <span class="blocks" aria-hidden="true">'
+                             '<span class="add"></span><span class="add"></span><span class="add"></span>'
+                             '<span class="del"></span><span class="nil"></span></span></div>'), ("logan", "")],
+        )
+        self.assertEqual(page.count('<p class="speaker">'), page.count("<article "))
+        self.assertEqual(
+            ace.CREDIT.findall(page),
+            [
+                ("claude", "dreeves", "2026-03-01T10:00:00+00:00"),
+                ("claude", "dreeves", "2026-03-01T10:05:00+00:00"),
+                ("claude", "mister-person", "2026-03-01T10:10:00+00:00"),
+            ],
+        )
 
     def test_display_names_are_the_approved_table(self):
         # Replicata: the display table, an expedient stand-in for names
@@ -2803,14 +2878,15 @@ class RenderQuals(Fixture):
         self.assertIn("(xhigh)", summary)
         self.assertLess(summary.index("claude-opus-4-8"), summary.index("(xhigh)"))
 
-    def test_one_day_header_per_local_day_with_weekday(self):
-        page = ace.render(
+    def test_one_day_header_per_utc_day_with_weekday(self):
+        # The day is the prompt's calendar day in UTC (T0 and T1 fall on
+        # Sunday 2026-03-01), whatever zone the runner is in.
+        page = markup(ace.render(
             self.repo,
             {LOGIN: [exchange(prompt="x"), exchange(timestamp=utc(T1), prompt="y")]},
-        )
+        ))
         self.assertEqual(page.count('class="day"'), 1)
-        local = utc(T0).astimezone().date()
-        self.assertIn(f"{local.isoformat()} {ace.WEEKDAYS[local.weekday()]}<", page)
+        self.assertIn("2026-03-01 Sunday<", page)
 
     def test_thought_duration_shown_when_known(self):
         page = ace.render(self.repo, {LOGIN: [exchange(elapsed=327.0)]})
@@ -2853,14 +2929,29 @@ class RenderQuals(Fixture):
         rule = rule[: rule.index("}")]
         self.assertIn("\n  flex-wrap: wrap;\n", rule)
 
-    def test_display_name_wears_the_agent_names_ink(self):
-        # Replicata: a meta line, where the human's display name (span.human)
-        # sits beside the agent's name (span.agent). Expectata: the
-        # stylesheet gives .human the ink .agent wears, var(--muted), and
-        # not .agent's weight. Resultata (v6.0.0): no rule for .human, so the
-        # name wore the summary's faint ink.
-        self.assertIn("\n.human { color: var(--muted); }\n", ace.CSS)
+    def test_speaker_label_wears_the_agent_names_ink_in_small_capitals(self):
+        # Replicata: the stylesheet, where the speaker label (p.speaker)
+        # heads each exchange and the agent's name (span.agent) sits in the
+        # meta line. Expectata: .speaker takes the ink .agent wears,
+        # var(--muted), and not .agent's weight; its lowercase is set as
+        # small capitals through font-variant-caps, so capitals in a name
+        # keep their size (the name is data, and its case must survive);
+        # the exchange's header lays the label and the diffstat out as one
+        # flex row on a baseline; no rule remains for the meta line's
+        # .human, which is gone. Resultata (v6.0.0): no .speaker and no
+        # header rule; .human wore the ink in the meta line.
+        rule = ace.CSS[ace.CSS.index("\n.speaker {") :]
+        rule = rule[: rule.index("}")]
+        for declaration in ("\n  color: var(--muted);\n", "\n  font-variant-caps: small-caps;\n", "\n  overflow-wrap: anywhere;\n"):
+            self.assertIn(declaration, rule)
+        self.assertNotIn("font-weight", rule)
+        self.assertNotIn("text-transform", rule)
+        header = ace.CSS[ace.CSS.index("\n.exchange > header {") :]
+        header = header[: header.index("}")]
+        for declaration in ("\n  display: flex;\n", "\n  align-items: baseline;\n", "\n  justify-content: space-between;\n"):
+            self.assertIn(declaration, header)
         self.assertIn("\n.agent { color: var(--muted); font-weight: 600; }\n", ace.CSS)
+        self.assertNotIn(".human", ace.CSS)
 
     def test_unknown_provider_fails_loudly(self):
         with self.assertRaises(KeyError):
@@ -2916,11 +3007,36 @@ class RenderQuals(Fixture):
         self.assertEqual(page.count('<span class="add"></span>'), 4)  # round(5·1234/1279)
         self.assertEqual(page.count('<span class="del"></span>'), 1)
         self.assertEqual(page.count('<span class="nil"></span>'), 0)
-        # The stat precedes the prompt so it floats beside the prompt's top.
+        # The stat precedes the prompt, in the exchange's header row.
         self.assertLess(page.index('class="diffstat"'), page.index('class="prompt"'))
         # A prompt that touched no code gets no diffstat at all.
         page = ace.render(self.repo, {LOGIN: [exchange()]})
         self.assertNotIn('<div class="diffstat">', page)
+
+    def test_diffstat_closes_the_header_row_and_nothing_floats(self):
+        # Replicata: a prompt that touched code, and one that did not.
+        # Expectata: the diffstat sits inside the exchange's header, after
+        # the speaker label and before the prompt, and the stylesheet keeps
+        # it a flex item that never shrinks under a long label (flex:
+        # none); a prompt that touched no code has a header holding the
+        # label alone. Nothing on the page floats any more, so nothing
+        # clears (a ballot opening the exchange sits under the label with
+        # its own small margin). Resultata (v6.0.0): the diffstat floated
+        # right of the prompt's first lines, and three rules cleared it.
+        page = ace.render(self.repo, {LOGIN: [exchange(added=3, deleted=1, prompt="hi")]})
+        self.assertRegex(
+            page,
+            r'<header><p class="speaker">dreev</p>\n<div class="diffstat">\+3 −1 [^\n]*</div></header>\n<pre class="prompt">hi</pre>',
+        )
+        page = ace.render(self.repo, {LOGIN: [exchange()]})
+        self.assertIn('<header><p class="speaker">dreev</p></header>\n<pre class="prompt">p</pre>', page)
+        rule = ace.CSS[ace.CSS.index("\n.diffstat {") :]
+        rule = rule[: rule.index("}")]
+        self.assertIn("\n  flex: none;\n", rule)
+        self.assertNotIn("margin", rule)
+        self.assertNotIn("float", ace.CSS)
+        self.assertNotIn("clear", ace.CSS)
+        self.assertIn("\n.exchange > header + .ballot { margin-top: .3rem; }\n", ace.CSS)
 
     def test_diffstat_tiny_and_onesided_ratios(self):
         page = ace.render(self.repo, {LOGIN: [exchange(added=1, deleted=1)]})
@@ -2946,10 +3062,13 @@ class RenderQuals(Fixture):
             self.repo,
             {LOGIN: [exchange(added=2, deleted=1), exchange(timestamp=utc(T1), prompt="b", added=3)]},
         )
-        local = utc(T0).astimezone().date().isoformat()
-        deck = f"2 prompts · {local} · +5 −1"
-        self.assertIn(f'<p class="deck">{deck}</p>', page)
-        self.assertIn(f'<meta name="description" content="{deck}">', page)
+        # The day is UTC's (see the clock quals); on the page the range is
+        # time elements in a span of its own, in the meta tags plain text.
+        self.assertIn(
+            '<p class="deck">2 prompts · <span class="range"><time datetime="2026-03-01">2026-03-01</time></span> · +5 −1</p>',
+            page,
+        )
+        self.assertIn('<meta name="description" content="2 prompts · 2026-03-01 · +5 −1">', page)
         page = ace.render(self.repo, {LOGIN: [exchange()]})
         self.assertNotIn("+0 −0", page)
 
@@ -2975,8 +3094,8 @@ class RenderQuals(Fixture):
         # and every sliver has a full-height hit target.
         self.assertIn('class="nil"', svg)
         self.assertEqual(svg.count('class="hit"'), 3)
-        tick_time = utc(T2).astimezone().strftime("%H:%M")
-        self.assertIn(f"<title>{tick_time}</title>", svg)
+        # Its title is the prompt's time in UTC (T2 is 10:10 UTC).
+        self.assertIn("<title>10:10</title>", svg)
 
     def test_elapsed_text_formats(self):
         for seconds, expected in ((327, "5m27s"), (45, "45s"), (300, "5m"), (3661, "1h1m1s"), (0.4, "0s")):
@@ -3054,6 +3173,31 @@ class RenderQuals(Fixture):
         article = page[page.index("<article") : page.index("</article>")]
         self.assertLess(article.index('<div class="ballot machine">'), article.index("<details>"))
 
+    def test_ballot_is_the_headers_next_sibling(self):
+        # Replicata: an exchange opening with a ballot, once beside typed
+        # words and once as a click-only answer. Expectata: the article's
+        # first child is the header and the ballot its next sibling, before
+        # any prompt and before <details>, so the stylesheet's
+        # `.exchange > header + .ballot` rule (the small margin a ballot
+        # keeps under the label) matches it. Resultata (ballots emitted
+        # before the header): the ballot opens the article with its full
+        # margin, the label sits between ballot and prompt, and the rule
+        # is inert.
+        ballot = ace.Ballot("Q?", ("A label", "B label"), ("A label",))
+        for prompt, tail in (("typed words", '\n<pre class="prompt">typed words</pre>'), ("", "")):
+            page = ace.render(self.repo, {LOGIN: [exchange(prompt=prompt, ballots=(ballot,))]})
+            article = page[page.index("<article") : page.index("</article>")]
+            self.assertEqual(
+                article[: article.index("<details>")],
+                '<article class="exchange claude" id="p1" data-login="dreeves">'
+                '\n<header><p class="speaker">dreev</p></header>'
+                '\n<div class="ballot machine">'
+                '\n<div class="ballot-question">Q?</div>'
+                '\n<div class="option picked">✓ A label</div>'
+                '\n<div class="option">· B label</div>'
+                f"\n</div>{tail}\n",
+            )
+
     def test_click_only_answer_renders_without_prompt_block(self):
         ballot = ace.Ballot("Q?", ("Delete it", "Keep it"), ("Delete it",))
         page = ace.render(self.repo, {LOGIN: [exchange(prompt="", ballots=(ballot,))]})
@@ -3066,17 +3210,19 @@ class RenderQuals(Fixture):
         # the Asterisk-style reading-progress rail — a fixed bar plus one
         # clickable day mark per day header, each mark's label the header's
         # exact text and its target an anchor the header itself carries.
-        page = ace.render(
+        page = markup(ace.render(
             self.repo,
             {LOGIN: [exchange(prompt="a"), exchange(timestamp=utc("2026-03-05T10:00:00.000Z"), prompt="b")]},
-        )
+        ))
         self.assertIn('<div id="progress">', page)
         self.assertIn('class="progress-bar"', page)
+        # Each header names its zone after the date (see the clock quals);
+        # the mark's label is the date and weekday alone.
         days = re.findall(
-            r'<h2 class="day" id="([^"]+)"><time datetime="[0-9-]+">([^<]+)</time></h2>', page
+            r'<h2 class="day" id="([^"]+)"><time datetime="[0-9-]+">([^<]+)</time> <span class="zone">UTC</span></h2>', page
         )
         self.assertEqual(len(days), 2)
-        self.assertEqual(days[0][0], f"d{utc(T0).astimezone().date().isoformat()}")
+        self.assertEqual(days[0][0], "d2026-03-01")
         marks = re.findall(
             r'<a class="daymark" href="#([^"]+)">'
             r'<span class="tick"></span><span class="text">([^<]+)</span></a>',
@@ -3084,9 +3230,9 @@ class RenderQuals(Fixture):
         )
         self.assertEqual(marks, days)
         # Two prompts on one day are one day header, so one mark.
-        page = ace.render(
+        page = markup(ace.render(
             self.repo, {LOGIN: [exchange(prompt="a"), exchange(timestamp=utc(T1), prompt="b")]}
-        )
+        ))
         self.assertEqual(page.count('class="daymark"'), 1)
 
     def test_progress_rail_revealed_and_driven_by_script(self):
@@ -3108,6 +3254,145 @@ class RenderQuals(Fixture):
         # Scroll progress means nothing on paper; the print stylesheet drops
         # the whole rail.
         self.assertLess(ace.CSS.index("@media print"), ace.CSS.index("#progress { display: none; }"))
+
+    # The clock: the file is written in UTC, whoever runs sourcery, and the
+    # page's script re-renders it in the viewer's own zone.
+
+    def test_page_is_the_same_whoever_renders_it(self):
+        # Replicata: one ledger, prompts at 23:30 and 05:00 UTC either side
+        # of a UTC midnight, rendered three times, as a runner in Los
+        # Angeles, one in Tokyo and one in UTC would render it (one
+        # calendar day in Los Angeles, another single day in Tokyo, two
+        # days in UTC). Expectata: the three pages are byte-identical: the
+        # file is a function of the ledgers alone, never of the runner's
+        # zone. Resultata (v6.0.0): every time, day header, day mark,
+        # minimap title and the deck's range written in the runner's zone,
+        # so the three pages differed.
+        ledgers = {LOGIN: [exchange(prompt="a", timestamp=utc(NIGHT)), exchange(prompt="b", timestamp=utc(DAWN))]}
+        pages = {}
+        for zone in ("America/Los_Angeles", "Asia/Tokyo", "UTC"):
+            with runner_zone(zone):
+                pages[zone] = ace.render(self.repo, ledgers)
+        self.assertEqual(pages["America/Los_Angeles"], pages["Asia/Tokyo"])
+        self.assertEqual(pages["America/Los_Angeles"], pages["UTC"])
+
+    def test_times_and_days_are_written_in_utc(self):
+        # Replicata: a runner in Tokyo renders prompts at 2026-03-01 23:30
+        # and 2026-03-02 05:00 UTC (both 2026-03-02 in Tokyo, at 08:30 and
+        # 14:00). Expectata: the page reads in UTC: two day headers, with
+        # ids d2026-03-01 and d2026-03-02, headed "2026-03-01 Sunday" and
+        # "2026-03-02 Monday", and a day mark for each; the meta lines'
+        # times 23:30 and 05:00 on time elements carrying the UTC
+        # instants; the deck's range 2026-03-01 – 2026-03-02; the
+        # minimap's titles 23:30 and 05:00. Resultata (v6.0.0): one day,
+        # 2026-03-02 Monday, and the times 08:30 and 14:00.
+        with runner_zone("Asia/Tokyo"):
+            page = markup(ace.render(
+                self.repo, {LOGIN: [exchange(prompt="a", timestamp=utc(NIGHT)), exchange(prompt="b", timestamp=utc(DAWN))]}
+            ))
+        self.assertEqual(
+            re.findall(r'<h2 class="day" id="([^"]+)"><time datetime="([^"]+)">([^<]+)</time>', page),
+            [("d2026-03-01", "2026-03-01", "2026-03-01 Sunday"), ("d2026-03-02", "2026-03-02", "2026-03-02 Monday")],
+        )
+        self.assertEqual(
+            re.findall(r'<a class="daymark" href="#([^"]+)"><span class="tick"></span><span class="text">([^<]+)</span>', page),
+            [("d2026-03-01", "2026-03-01 Sunday"), ("d2026-03-02", "2026-03-02 Monday")],
+        )
+        self.assertEqual(
+            re.findall(r'<a class="anchor" href="#p\d+"><time datetime="([^"]+)">(\d\d:\d\d)</time>', page),
+            [("2026-03-01T23:30:00+00:00", "23:30"), ("2026-03-02T05:00:00+00:00", "05:00")],
+        )
+        self.assertIn('<meta name="description" content="2 prompts · 2026-03-01 – 2026-03-02">', page)
+        svg = page[page.index('<svg class="minimap"') : page.index("</svg>")]
+        self.assertEqual(re.findall(r"<title>([^<]+)</title>", svg), ["23:30", "05:00"])
+
+    def test_day_headers_name_their_zone(self):
+        # Replicata: a two-day page. Expectata: each day header reads its
+        # date and weekday, then a zone span saying UTC, and nothing else
+        # on the page carries a zone span; the stylesheet lays the header
+        # out as a flex row with the zone at the far end of its rule, in
+        # the agent name's ink at regular weight (quieter than the date,
+        # never as faint as the meta line: it is there to stop a
+        # misreading). Resultata (v6.0.0): no zone named anywhere.
+        page = markup(ace.render(self.repo, {LOGIN: [exchange(prompt="a"), exchange(prompt="b", timestamp=utc(DAWN))]}))
+        headers = re.findall(r'<h2 class="day" id="d[^"]+">(.*?)</h2>', page)
+        self.assertEqual(len(headers), 2)
+        shape = r'<time datetime="(\d{4}-\d\d-\d\d)">\1 [A-Z][a-z]+day</time> <span class="zone">UTC</span>'
+        for header in headers:
+            self.assertTrue(re.fullmatch(shape, header), header)
+        self.assertEqual(page.count('class="zone"'), 2)
+        self.assertEqual(ace.ZONE, "UTC")
+        rule = ace.CSS[ace.CSS.index("\n.day {") :]
+        rule = rule[: rule.index("}")]
+        for declaration in ("\n  display: flex;\n", "\n  justify-content: space-between;\n", "\n  align-items: baseline;\n"):
+            self.assertIn(declaration, rule)
+        self.assertIn("\n.day .zone { color: var(--muted); font-weight: 400; }\n", ace.CSS)
+
+    def test_deck_range_is_time_elements_the_clock_can_rewrite(self):
+        # Replicata: a two-day page, and a one-day page. Expectata: on the
+        # page, the deck's date range sits in a span of its own, each date
+        # a time element carrying itself, so the clock script can rewrite
+        # it in the viewer's zone, the one day written once; the two
+        # description meta tags carry the deck as plain text. Resultata
+        # (v6.0.0): plain text on the page too.
+        page = ace.render(self.repo, {LOGIN: [exchange(prompt="a"), exchange(prompt="b", timestamp=utc(DAWN), added=2)]})
+        self.assertIn(
+            '<p class="deck">2 prompts · <span class="range"><time datetime="2026-03-01">2026-03-01</time>'
+            ' – <time datetime="2026-03-02">2026-03-02</time></span> · +2 −0</p>',
+            page,
+        )
+        self.assertEqual(page.count('content="2 prompts · 2026-03-01 – 2026-03-02 · +2 −0"'), 2)
+        page = ace.render(self.repo, {LOGIN: [exchange()]})
+        self.assertIn(
+            '<p class="deck">1 prompt · <span class="range"><time datetime="2026-03-01">2026-03-01</time></span></p>', page
+        )
+        self.assertEqual(page.count('content="1 prompt · 2026-03-01"'), 2)
+
+    def test_clock_script_rerenders_the_page_in_the_viewers_zone(self):
+        # Replicata: the page's script, and a page whose prompt times carry
+        # microseconds and none. Expectata: the page's one script opens
+        # with the clock, ahead of the rail code that collects the day
+        # marks the clock rebuilds. The clock formats each instant with
+        # Intl in en-US (long weekdays, as WEEKDAYS; a 23-hour clock, as
+        # %H:%M; the zone's short name for the day headers), rewrites
+        # every prompt time, removes the day headers under main and
+        # rebuilds them (and the rail's day marks, the deck's range and the
+        # minimap's titles) under the viewer's own days, and reads each
+        # instant off its time element's datetime with a pattern (lifted
+        # here from the script) that accepts exactly the UTC instants
+        # isoformat() writes, microseconds or none, and rejects any other
+        # zone, so a time it cannot read fails loudly, in Latin. Resultata
+        # (v6.0.0): no clock; the page read in the runner's zone, with
+        # scripts or without.
+        self.assertLess(
+            ace.JS.index('const clock = new Intl.DateTimeFormat("en-US", {'),
+            ace.JS.index('document.getElementById("progress")'),
+        )
+        for fragment in (
+            'weekday: "long", year: "numeric", month: "2-digit", day: "2-digit",',
+            'hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short",',
+            'for (const header of document.querySelectorAll("main > h2.day")) header.remove();',
+            'for (const article of document.querySelectorAll("main > article.exchange")) {',
+            'const time = article.querySelector("summary time");',
+            "time.textContent = `${at.hour}:${at.minute}`;",
+            'const title = document.querySelector(`.minimap a[href="#${article.id}"] title`);',
+            '`<h2 class="day" id="d${date}"><time datetime="${date}">${date} ${at.weekday}</time>`',
+            '+ ` <span class="zone">${at.timeZoneName}</span></h2>`',
+            'document.querySelector("#progress .daymarks").innerHTML = days.map(([date, text]) =>',
+            'document.querySelector(".deck .range").innerHTML = [...new Set([days[0][0], days.at(-1)[0]])]',
+            "throw new Error(`Instans UTC formae sourcery non est: ${text}`)",
+        ):
+            self.assertIn(fragment, ace.JS)
+        lifted = re.search(r"const utc = /(.*)/\.exec\(text\);", ace.JS)
+        instant = re.compile(lifted.group(1))
+        page = ace.render(self.repo, {LOGIN: [maximal_exchange(), exchange(timestamp=utc(T1), prompt="b")]})
+        self.assertEqual(count_scripts(page), 1)
+        stamps = re.findall(r'<a class="anchor" href="#p\d+"><time datetime="([^"]+)">', page)
+        self.assertEqual(stamps, ["2026-03-01T10:00:00.123456+00:00", "2026-03-01T10:05:00+00:00"])
+        for stamp in stamps:
+            self.assertTrue(instant.search(stamp), stamp)
+        for other in ("2026-03-01T10:00:00Z", "2026-03-01T19:00:00+09:00", "2026-03-01T10:00:00", "2026-03-01"):
+            self.assertIsNone(instant.search(other), other)
 
     def test_reply_markdown_subset(self):
         html = ace.markdown_html("intro `x` **b** [l](https://e.com)\n\n```py\nx = 1 < 2\n```\n- item")
@@ -4406,15 +4691,15 @@ class CliQuals(Fixture):
     def test_page_holds_no_snapshot_and_credits_each_row_invisibly(self):
         # Replicata: a run. Expectata: the page holds one script, its own,
         # and no data block; each article records the login whose ledger
-        # holds its row, and its meta line shows that human's display name.
-        # Resultata (v5.5.2): a second script, the JSON snapshot of every
-        # exchange, and no human named.
+        # holds its row, and its speaker label shows that human's display
+        # name. Resultata (v5.5.2): a second script, the JSON snapshot of
+        # every exchange, and no human named.
         self.populate()
         _, page = self.generate(self.tmp / "out.html")
         self.assertEqual(count_scripts(page), 1)
         self.assertNotIn("application/json", page)
         self.assertEqual(len(re.findall(r'<article class="exchange \w+" id="p\d" data-login="dreeves">', page)), 3)
-        self.assertEqual(page.count('<span class="human">dreev</span>'), 3)
+        self.assertEqual(page.count('<p class="speaker">dreev</p>'), 3)
 
     def test_ledger_not_page_remembers_what_the_stores_lost(self):
         # Replicata: a run; then the page is deleted and the Claude session
@@ -4455,15 +4740,15 @@ class CliQuals(Fixture):
         self.assertEqual((other.stat().st_ino, other.read_bytes()), before)
         self.assertEqual(
             re.findall(
-                r'data-login="([a-z-]+)">.*?<pre class="prompt">([a-z ]+)</pre>.*?<span class="human">(\w+)</span>',
+                r'data-login="([a-z-]+)">\n<header><p class="speaker">(\w+)</p>.*?<pre class="prompt">([a-z ]+)</pre>',
                 page,
                 re.DOTALL,
             ),
             [
-                ("mister-person", "logan prompt", "logan"),
-                ("dreeves", "claude prompt", "dreev"),
-                ("dreeves", "codex prompt", "dreev"),
-                ("dreeves", "copilot prompt", "dreev"),
+                ("mister-person", "logan", "logan prompt"),
+                ("dreeves", "dreev", "claude prompt"),
+                ("dreeves", "dreev", "codex prompt"),
+                ("dreeves", "dreev", "copilot prompt"),
             ],
         )
         self.assertEqual(
@@ -5557,15 +5842,15 @@ class CliQuals(Fixture):
         for page in (folded, rerun):
             self.assertEqual(
                 re.findall(
-                    r'data-login="([a-z-]+)">.*?<pre class="prompt">([a-z ]+)</pre>.*?<span class="human">(\w+)</span>',
+                    r'data-login="([a-z-]+)">\n<header><p class="speaker">(\w+)</p>.*?<pre class="prompt">([a-z ]+)</pre>',
                     page,
                     re.DOTALL,
                 ),
                 [
-                    ("mister-person", "logan prompt", "logan"),
-                    ("dreeves", "dreev one", "dreev"),
-                    ("dreeves", "dreev two", "dreev"),
-                    ("mister-person", "logan two", "logan"),
+                    ("mister-person", "logan", "logan prompt"),
+                    ("dreeves", "dreev", "dreev one"),
+                    ("dreeves", "dreev", "dreev two"),
+                    ("mister-person", "logan", "logan two"),
                 ],
             )
 

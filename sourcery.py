@@ -3,9 +3,10 @@
 
 Reads the local transcript stores of four coding agents and produces a
 single self-contained HTML document, ordered by timestamp. The human's
-prompts are the only text visible by default; everything machine-generated
-is collapsed behind a quiet disclosure line that names the human, agent,
-model, and time. Supported stores:
+prompts are the only text visible by default, each under a label naming
+the human who typed it; everything machine-generated is collapsed behind a
+quiet disclosure line that names the agent, model, and time. Supported
+stores:
 
 - Claude Code:  ~/.claude/projects/**/*.jsonl
 - Codex:        ~/.codex/{sessions,archived_sessions}/**/*.jsonl
@@ -66,7 +67,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "6.0.0"
+VERSION = "6.1.0"
 UTC = dt.timezone.utc
 
 
@@ -2412,8 +2413,17 @@ summary a.anchor:hover { text-decoration: underline; }
   padding: 1.1rem 1.25rem;
   margin: 2.6rem -1.25rem 0;
 }
+/* The clock. Every time and date on the page is written in UTC, so the
+   file reads the same whoever runs sourcery, and each day header names
+   that zone at the far end of its rule (the script swaps in the viewer's
+   own zone, see JS): the agent name's ink at regular weight, quieter than
+   the date but never as faint as the meta line, since it is there to
+   stop a misreading. */
 .day {
-  clear: both;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
   margin: 3.8rem 0 0;
   padding-bottom: .4rem;
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
@@ -2424,21 +2434,45 @@ summary a.anchor:hover { text-decoration: underline; }
   letter-spacing: .14em;
   font-variant-numeric: tabular-nums;
 }
-.exchange { margin: 2.6rem 0 0; clear: both; border-left: 3px solid var(--provider); padding-left: 0.85rem; }
+.day .zone { color: var(--muted); font-weight: 400; }
+.exchange { margin: 2.6rem 0 0; border-left: 3px solid var(--provider); padding-left: 0.85rem; }
 .exchange.claude { --provider: var(--claude); }
 .exchange.codex { --provider: var(--codex); }
 .exchange.copilot { --provider: var(--copilot); }
 .exchange.antigravity { --provider: var(--antigravity); }
 .exchange.claudeai { --provider: var(--claude); }
-/* The prompt's diffstat floats right of the prompt's first lines. Numbers
+/* The exchange's header: the speaker label — the human's display name
+   set above their turn, the way a play script or an interview transcript
+   names whoever speaks next — and across from it, on the label's
+   baseline, the diffstat. The label is in the human's own serif, its
+   lowercase as small capitals and any capitals kept full size (the
+   name is data, so its case must survive), in the agent name's ink;
+   the meta line no longer repeats the name. */
+.exchange > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1.1rem;
+  margin: 0 0 .1rem;
+}
+.speaker {
+  margin: 0;
+  color: var(--muted);
+  font-size: 1.06rem;
+  font-variant-caps: small-caps;
+  letter-spacing: .08em;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+/* The prompt's diffstat closes the header row, never squeezed by a long
+   label. Numbers
    wear the metadata ink; polarity lives in the blocks (and in the signs and
    the fixed added-first order). */
 .diffstat {
-  float: right;
+  flex: none;
   display: inline-flex;
   align-items: center;
   gap: .5rem;
-  margin: .25rem 0 .5rem 1.1rem;
   color: var(--faint);
   font-family: var(--sans);
   font-size: .68rem;
@@ -2502,8 +2536,6 @@ summary:hover { color: var(--muted); }
    color, so the reading survives any color deficiency. */
 .chip { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 2px; background: var(--provider); }
 .agent { color: var(--muted); font-weight: 600; }
-/* The human's display name wears the agent name's ink, not its weight. */
-.human { color: var(--muted); }
 /* INVIOLABLE: machine-generated prose renders only inside a .machine
    container, in the phosphor-terminal style — monospace green on
    near-black, in both color schemes — for maximal distinction from the
@@ -2524,7 +2556,6 @@ summary:hover { color: var(--muted); }
   color: var(--m-ink);
 }
 .ballot {
-  clear: right; /* its filled box must not run under a floated diffstat */
   margin: 1rem 0 .6rem;
   padding: .65rem .85rem;
   border-radius: .3rem;
@@ -2540,7 +2571,7 @@ summary:hover { color: var(--muted); }
 }
 .ballot .option { color: var(--m-dim); }
 .ballot .option.picked { color: var(--m-bright); }
-.exchange > .ballot:first-child { margin-top: 0; }
+.exchange > header + .ballot { margin-top: .3rem; }
 .reply {
   margin-top: .8rem;
   padding: 1rem 1.15rem;
@@ -2598,6 +2629,55 @@ summary:hover { color: var(--muted); }
 
 
 JS = r"""
+/* The clock. sourcery writes every time and date on this page in UTC, so
+   the file reads the same whoever runs it; this block re-renders each in
+   the viewer's own zone: every prompt's time, the day headers (regrouping
+   the prompts under the viewer's own calendar days, each header naming
+   the zone as the browser names it), the rail's day marks, the deck's
+   date range and the minimap's titles. With scripts off the page reads in
+   UTC, as written. It runs before the rail code below, which collects the
+   day marks rebuilt here. */
+{
+  const clock = new Intl.DateTimeFormat("en-US", {
+    weekday: "long", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short",
+  });
+  /* An instant as sourcery writes it (ISO 8601 in UTC, to the
+     microsecond), as the parts of the viewer's clock and calendar. */
+  const local = (text) => {
+    const utc = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.\d+)?\+00:00$/.exec(text);
+    // TODO: Says the text is not a UTC instant in the form sourcery writes.
+    if (!utc) throw new Error(`Instans UTC formae sourcery non est: ${text}`);
+    const [, year, month, day, hour, minute, second] = utc.map(Number);
+    const instant = Date.UTC(year, month - 1, day, hour, minute, second);
+    return Object.fromEntries(clock.formatToParts(instant).map((part) => [part.type, part.value]));
+  };
+  const days = []; // [date, header text], one per day header, in page order
+  for (const header of document.querySelectorAll("main > h2.day")) header.remove();
+  for (const article of document.querySelectorAll("main > article.exchange")) {
+    const time = article.querySelector("summary time");
+    const at = local(time.dateTime);
+    const date = `${at.year}-${at.month}-${at.day}`;
+    time.textContent = `${at.hour}:${at.minute}`;
+    const title = document.querySelector(`.minimap a[href="#${article.id}"] title`);
+    title.textContent = [time.textContent, ...title.textContent.split(" ").slice(1)].join(" ");
+    if (date !== days.at(-1)?.[0]) {
+      days.push([date, `${date} ${at.weekday}`]);
+      article.insertAdjacentHTML(
+        "beforebegin",
+        `<h2 class="day" id="d${date}"><time datetime="${date}">${date} ${at.weekday}</time>`
+          + ` <span class="zone">${at.timeZoneName}</span></h2>`,
+      );
+    }
+  }
+  document.querySelector("#progress .daymarks").innerHTML = days.map(([date, text]) =>
+    `\n<a class="daymark" href="#d${date}"><span class="tick"></span><span class="text">${text}</span></a>`,
+  ).join("") + "\n";
+  /* The first and last day, or the one day when they are the same (the
+     Set drops the repeat), as render() writes the deck's range. */
+  document.querySelector(".deck .range").innerHTML = [...new Set([days[0][0], days.at(-1)[0]])]
+    .map((date) => `<time datetime="${date}">${date}</time>`).join(" – ");
+}
 for (const control of document.querySelectorAll("[data-omnia]"))
   control.addEventListener("click", (event) => {
     event.preventDefault();
@@ -2638,6 +2718,12 @@ sync();
 
 
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+# TODO: The zone marker on each day header, saying the day and the times
+# under it are in Coordinated Universal Time. UTC is the international
+# abbreviation, the same in every language, so it is kept as is rather
+# than put in Latin. The script replaces it with the browser's own name
+# for the viewer's zone (data, like the times).
+ZONE = "UTC"
 
 
 def elapsed_text(seconds: float) -> str:
@@ -2676,7 +2762,7 @@ def diffstat(added: int, deleted: int) -> str:
 # All rendered copy here is human-written or human-specified; everything
 # else on the page (repository name/path/remote, provider, model, effort,
 # timestamps, weekdays, prompts, ballots, replies) is source data.
-def minimap(exchanges: Sequence[Exchange], locals_: Sequence[dt.datetime]) -> str:
+def minimap(exchanges: Sequence[Exchange], instants: Sequence[dt.datetime]) -> str:
     """A clickable map of the whole dialog: one sliver per prompt, in order,
     linking to its permalink anchor. Added lines rise from the midline and
     deleted lines hang below it, on a square-root scale against the peak so
@@ -2686,9 +2772,9 @@ def minimap(exchanges: Sequence[Exchange], locals_: Sequence[dt.datetime]) -> st
     peak = max(max(e.added, e.deleted) for e in exchanges)
     unit = lambda v: f"{round(v, 1):g}"  # 30.0 -> "30"
     slots: list[str] = []
-    for i, (e, local) in enumerate(zip(exchanges, locals_)):
+    for i, (e, at) in enumerate(zip(exchanges, instants)):
         x = 3 * i
-        stamp = local.strftime("%H:%M")
+        stamp = at.strftime("%H:%M")
         title = f"{stamp} +{e.added:,} −{e.deleted:,}" if e.added or e.deleted else stamp
         bars = f'<rect class="hit" x="{x}" y="0" width="3" height="64"/>'
         if e.added:
@@ -2734,26 +2820,34 @@ def render(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = 
     )
     assert rows, "render() requires at least one exchange"
     exchanges = [exchange for _, exchange in rows]
-    locals_ = [e.timestamp.astimezone() for e in exchanges]
-    first, last = locals_[0].date().isoformat(), locals_[-1].date().isoformat()
+    # Every time and date on the page is written in UTC, so the file is a
+    # function of the ledgers alone, whoever runs sourcery; the page's
+    # script (JS) re-renders them in the viewer's own zone.
+    instants = [e.timestamp.astimezone(UTC) for e in exchanges]
+    first, last = instants[0].date().isoformat(), instants[-1].date().isoformat()
     count = len(exchanges)
     noun = "prompt" if count == 1 else "prompts"
-    range_text = first if first == last else f"{first} – {last}"
+    dates = (first,) if first == last else (first, last)
     total_added = sum(e.added for e in exchanges)
     total_deleted = sum(e.deleted for e in exchanges)
-    deck = f"{count} {noun} · {range_text}"
-    if (total_added, total_deleted) != (0, 0):
-        deck += f" · +{total_added:,} −{total_deleted:,}"
+    totals = f" · +{total_added:,} −{total_deleted:,}" if (total_added, total_deleted) != (0, 0) else ""
+    deck = f"{count} {noun} · {' – '.join(dates)}{totals}"
+    # On the page, the deck's date range is time elements in a span of its
+    # own, for the script to rewrite; the description meta tags carry the
+    # deck as plain text.
+    range_html = " – ".join(f'<time datetime="{day}">{day}</time>' for day in dates)
+    deck_html = f'{count} {noun} · <span class="range">{range_html}</span>{totals}'
 
     chunks: list[str] = []
     days: list[tuple[str, str]] = []  # (day, header text), one per day header
     current_day = None
-    for number, ((login, exchange), local) in enumerate(zip(rows, locals_), start=1):
-        day = local.date().isoformat()
+    for number, ((login, exchange), at) in enumerate(zip(rows, instants), start=1):
+        day = at.date().isoformat()
         if day != current_day:
-            weekday = WEEKDAYS[local.date().weekday()]
+            weekday = WEEKDAYS[at.date().weekday()]
             chunks.append(
-                f'<h2 class="day" id="d{day}"><time datetime="{day}">{day} {weekday}</time></h2>'
+                f'<h2 class="day" id="d{day}"><time datetime="{day}">{day} {weekday}</time>'
+                f' <span class="zone">{ZONE}</span></h2>'
             )
             days.append((day, f"{day} {weekday}"))
             current_day = day
@@ -2790,8 +2884,7 @@ def render(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = 
         )
         summary = (
             f'<a class="anchor" href="#p{number}">'
-            f'<time datetime="{exchange.timestamp.isoformat()}">{local.strftime("%H:%M")}</time></a>'
-            f' <span class="human">{html.escape(display_name(login))}</span>'
+            f'<time datetime="{exchange.timestamp.isoformat()}">{at.strftime("%H:%M")}</time></a>'
             f' <span class="chip"></span>'
             f' <span class="agent">{html.escape(exchange.provider)}</span>{model}{effort}{thought}'
         )
@@ -2819,7 +2912,8 @@ def render(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = 
         chunks.append(
             f'<article class="exchange {PROVIDER_SLUGS[exchange.provider]}" id="p{number}"'
             f' data-login="{html.escape(login, quote=True)}">'
-            f"{diffstat(exchange.added, exchange.deleted)}{ballots}{prompt}{attachments}\n"
+            f'\n<header><p class="speaker">{html.escape(display_name(login))}</p>'
+            f"{diffstat(exchange.added, exchange.deleted)}</header>{ballots}{prompt}{attachments}\n"
             f"<details>\n<summary>{summary}</summary>\n{reply}\n</details>\n"
             "</article>"
         )
@@ -2877,10 +2971,10 @@ def render(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = 
 <header class="masthead">
   <p class="generator"><a href="https://github.com/beeminder/sourcery">generated by sourcery</a></p>
   <h1>{title}</h1>
-  <p class="deck">{deck}</p>
+  <p class="deck">{deck_html}</p>
   <p class="repo-path">{where}</p>
   <p class="controls"><a href="#" data-omnia="open">expand all</a> · <a href="#" data-omnia="close">collapse all</a></p>
-  {minimap(exchanges, locals_)}
+  {minimap(exchanges, instants)}
 </header>
 {body}
 </main>

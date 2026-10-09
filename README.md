@@ -16,18 +16,18 @@ Part of the idea is that this the closest analog to actual source code that a vi
 
 See how this tool itself came to life at [sourcery.html][sourcery.html].
 
-## Notes to self
+## Multiple Humans
 
-later: have this work for multiple people. maybe get all the agent transcript data as a JSON file for each person, commit them all to version control, and then this utility makes sure the JSON file for the person running it is up to date and then generates the sourcery.html file from the set of JSON files?
+It should work now with any number of humans talking to any number of coding agents.
+Run sourcery.py and it saves all your transcripts into a JSON file for you, named with your username, and merges it into a master sourcery.html which has everyone's transcripts.
 
-sooner: speaking of JSON files, if you switch computers or something, you don't want to lose any of the transcript.
+## Up Next
 
-request: better favicon.
+* [TIM] Hovering over a time of day should show the full date/time with timezone
+* [CON] One of the mockups Claude showed had a summary of contributions from each human. Let's get that implemented.
+* [FAV] Better favicon. A wizard hat or magic wand or something. Or that overlaid on some ones and zeros, as in source code.
+* [WHO] Check what happens if you don't have gh installed, which it might need for getting your GitHub username. Maybe fall back to `whoami`?
 
-
-It's time to generalize this to multiple users. check out tallybee where we currently just have two separate html files. so we need to merge those and then make sure merging happens correctly in the future automatically. note that we'll need the html file to indicate which human wrote which prompt. an overhaul of the design/css is probably worthwhile
-
----
 
 ## Other name ideas and scratch notes
 
