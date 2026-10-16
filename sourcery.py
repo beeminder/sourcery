@@ -1269,7 +1269,7 @@ VSCODE_MUTE_KINDS = frozenset({
     "undoStop", "textEditGroup", "workspaceEdit", "codeblockUri", "mcpServersStarting",
     "progressTaskSerialized", "progressTask", "progressMessage", "confirmation",
     "elicitationSerialized", "elicitation", "warning", "markdownVuln", "command",
-    "treeData", "extensions", "hook", "systemNotification",
+    "treeData", "extensions", "hook", "systemNotification", "questionCarousel",
 })
 
 
@@ -1330,7 +1330,8 @@ def vscode_reply(response: Any, path: Path) -> tuple[str, str]:
         elif kind == "inlineReference":
             parts.append(vscode_reference_name(item))
         elif kind == "autoModeResolution":
-            resolutions.append(item.get("resolvedModel"))
+            resolved = item.get("resolved")
+            resolutions.append(resolved.get("id") if isinstance(resolved, dict) else item.get("resolvedModel"))
         elif kind not in VSCODE_MUTE_KINDS:
             # TODO: Says a response item has an unrecognized kind and to add
             # it deliberately in VSCODE_MUTE_KINDS or vscode_reply.

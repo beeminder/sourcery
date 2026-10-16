@@ -2504,6 +2504,7 @@ class VscodeQuals(Fixture):
             {"kind": "elicitation"},
             {"kind": "warning", "content": md("w")},
             {"kind": "markdownVuln"},
+            {"kind": "questionCarousel", "questions": []},
         ]
         path = self.write_session(vssession([vsreq("do the  thing", response)]))
         got = ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
@@ -2527,6 +2528,15 @@ class VscodeQuals(Fixture):
         path = self.write_session(vssession([vsreq("q", response, model="copilot/auto")]))
         got = ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
         self.assertEqual([(e.reply, e.model) for e in got], [("done", "gpt-5.4")])
+
+    def test_auto_mode_resolution_nested_resolved_object(self):
+        response = [
+            {"kind": "autoModeResolution", "resolved": {"id": "gpt-6-luna", "name": "GPT-6 Luna"}},
+            md("done"),
+        ]
+        path = self.write_session(vssession([vsreq("q", response, model="copilot/auto")]))
+        got = ace.vscode_exchanges(path, (self.repo,), self.repo)[0]
+        self.assertEqual([(e.reply, e.model) for e in got], [("done", "gpt-6-luna")])
 
     def test_malformed_or_duplicate_auto_mode_resolution_fails_loudly(self):
         malformed = {"kind": "autoModeResolution"}
