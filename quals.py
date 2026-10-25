@@ -2370,6 +2370,77 @@ class CodexQuals(Fixture):
         ]
         self.assertEqual(ace.codex_exchanges(self.path(records), self.repo)[0], [])
 
+    # Replicata: Codex asks via request_user_input_async; the human answers
+    # in the question panel, which Codex logs as a user_message wrapping a
+    # JSON list of {questionItemId, question, answer}. Expectata: the answer
+    # renders like a Claude AskUserQuestion answer — a ballot plus any typed
+    # words. Resultata: the raw wrapper and JSON rendered as the prompt.
+    def asked(self, questions, call="call_q1", ts=T0):
+        arguments = json.dumps({"questions": questions})
+        return {"type": "response_item", "timestamp": ts, "payload": {
+            "type": "function_call", "name": "request_user_input_async",
+            "arguments": arguments, "call_id": call}}
+
+    def answered(self, items, ts=T1):
+        rows = [
+            {"questionItemId": json.dumps(["request_user_input_async", call, index]),
+             "question": question, "answer": answer}
+            for call, index, question, answer in items
+        ]
+        return cxuser("<send_user_message_question_reply>\n" + json.dumps(rows)
+                      + "\n</send_user_message_question_reply>\n", ts=ts)
+
+    def test_typed_question_reply_becomes_prompt_and_ballot(self):
+        records = [
+            cxmeta(str(self.repo)),
+            cxuser("go", ts=T0),
+            self.asked([{"title": "Q1?", "options": ["Keep", "Restore"]}]),
+            self.answered([("call_q1", 0, "Q1?", "my own  words\nhere")]),
+            cxagent("ok", ts=T2),
+        ]
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual(
+            [(e.prompt, e.ballots, e.reply) for e in got],
+            [("go", (), ""),
+             ("my own  words\nhere", (ace.Ballot("Q1?", ("Keep", "Restore"), ()),), "ok")],
+        )
+
+    def test_clicked_question_reply_is_a_pure_ballot_exchange(self):
+        records = [
+            cxmeta(str(self.repo)),
+            self.asked([{"title": "Q1?", "options": ["Keep", "Restore"]},
+                        {"title": "Q2?"}]),
+            self.answered([("call_q1", 0, "Q1?", "Restore"), ("call_q1", 1, "Q2?", "typed")]),
+            cxagent("ok", ts=T2),
+        ]
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual(
+            [(e.prompt, e.ballots, e.reply) for e in got],
+            [("typed", (ace.Ballot("Q1?", ("Keep", "Restore"), ("Restore",)),
+                        ace.Ballot("Q2?", (), ())), "ok")],
+        )
+
+    def test_question_reply_to_unknown_call_fails_loudly(self):
+        records = [cxmeta(str(self.repo)), self.answered([("call_nope", 0, "Q1?", "x")])]
+        with self.assertRaises(ace.UserError):
+            ace.codex_exchanges(self.path(records), self.repo)[0]
+
+    def test_question_reply_with_mismatched_question_fails_loudly(self):
+        records = [
+            cxmeta(str(self.repo)),
+            self.asked([{"title": "Q1?", "options": ["Keep"]}]),
+            self.answered([("call_q1", 0, "Q-other?", "Keep")]),
+        ]
+        with self.assertRaises(ace.UserError):
+            ace.codex_exchanges(self.path(records), self.repo)[0]
+
+    def test_question_reply_with_trailing_text_fails_loudly(self):
+        reply = self.answered([("call_q1", 0, "Q1?", "Keep")])
+        reply["payload"]["message"] += "surprise"
+        records = [cxmeta(str(self.repo)), self.asked([{"title": "Q1?", "options": ["Keep"]}]), reply]
+        with self.assertRaises(ace.UserError):
+            ace.codex_exchanges(self.path(records), self.repo)[0]
+
 
 # ---------------------------------------------------- paths under /home
 

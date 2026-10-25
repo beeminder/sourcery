@@ -1102,9 +1102,98 @@ def cut_canned_tail(prompt: str) -> str:
     return prompt[: match.start()].rstrip("\n") if match else prompt
 
 
-def codex_prompt(message: str, path: Path) -> str:
+# Codex asks the human multiple-choice questions through a
+# request_user_input_async tool call and logs the human's answers as a
+# user_message: this wrapper around a JSON list of {questionItemId, question,
+# answer}, where questionItemId is itself JSON naming the tool, its call_id,
+# and the question's index in that call.
+CODEX_REPLY_OPEN = "<send_user_message_question_reply>\n"
+CODEX_REPLY_CLOSE = "\n</send_user_message_question_reply>\n"
+CODEX_ASK_TOOL = "request_user_input_async"
+
+# A "quiz" is one request_user_input_async call's questions as (title, option
+# labels) pairs; options are absent for free-text questions.
+Quiz = tuple[tuple[str, tuple[str, ...]], ...]
+
+
+def codex_quiz(arguments: Any, path: Path, line_number: int) -> Quiz:
+    try:
+        decoded = json.loads(arguments)
+    except (TypeError, json.JSONDecodeError):
+        decoded = None
+    match decoded:
+        case {"questions": list() as questions}:
+            pass
+        case _:
+            questions = [None]
+    quiz = []
+    for question in questions:
+        match question:
+            case {"title": str() as title, "options": list() as options} if all(
+                isinstance(option, str) for option in options
+            ):
+                quiz.append((title, tuple(options)))
+            case {"title": str() as title} if "options" not in question:
+                quiz.append((title, ()))
+            case _:
+                # TODO: Says a question Codex asked the human is in an
+                # unrecognized form and to update codex_quiz.
+                raise UserError(
+                    f"Interrogatio Codex in forma ignota: {path}:{line_number}\n"
+                    "Forma mutata videtur; codex_quiz renovandum est."
+                )
+    return tuple(quiz)
+
+
+def codex_answers(
+    message: str, quizzes: Mapping[str, Quiz], path: Path, line_number: int
+) -> tuple[str, tuple[Ballot, ...]]:
+    """Return (typed, ballots) for a question reply, like claude_recovered:
+    an answer equal to one option label is a click; anything else is typing
+    and the ballot's picked set stays empty."""
+    # TODO: Says a reply to Codex's questions is in an unrecognized form or
+    # answers a question this transcript never asked, and to update
+    # codex_answers.
+    malformed = UserError(
+        f"Responsum interrogationis Codex in forma ignota: {path}:{line_number}\n"
+        "Forma mutata videtur; codex_answers renovandum est."
+    )
+    if not message.endswith(CODEX_REPLY_CLOSE):
+        raise malformed
+    try:
+        items = json.loads(message.removeprefix(CODEX_REPLY_OPEN).removesuffix(CODEX_REPLY_CLOSE))
+        if not isinstance(items, list):
+            raise malformed
+        typed: list[str] = []
+        ballots: list[Ballot] = []
+        for item in items:
+            match item:
+                case {"questionItemId": str() as item_id, "question": str() as asked, "answer": str() as answer}:
+                    pass
+                case _:
+                    raise malformed
+            match json.loads(item_id):
+                case [str() as tool, str() as call, int() as index] if (
+                    tool == CODEX_ASK_TOOL and 0 <= index < len(quizzes.get(call, ())) and quizzes[call][index][0] == asked
+                ):
+                    labels = quizzes[call][index][1]
+                case _:
+                    raise malformed
+            picked = (answer,) if answer in labels else ()
+            typed.extend(() if picked else (answer,))
+            ballots.append(Ballot(question=asked, options=labels, picked=picked))
+    except json.JSONDecodeError as exc:
+        raise malformed from exc
+    return "\n\n".join(typed), tuple(ballots)
+
+
+def codex_prompt(
+    message: str, quizzes: Mapping[str, Quiz], path: Path, line_number: int
+) -> tuple[str, tuple[Ballot, ...]]:
+    if message.startswith(CODEX_REPLY_OPEN):
+        return codex_answers(message, quizzes, path, line_number)
     if not message.startswith(CODEX_WRAP_PREFIX):
-        return message
+        return message, ()
     _, found, request = message.partition(CODEX_REQUEST_HEADING)
     if not found:
         # TODO: Says an IDE context wrapper was found without its request
@@ -1114,7 +1203,7 @@ def codex_prompt(message: str, path: Path) -> str:
             f"Involucrum IDE sine rogatione inventum est: {path}\n"
             "Forma transcripti Codex mutata videtur; fasciculum inspice."
         )
-    return request.removesuffix("\n")
+    return request.removesuffix("\n"), ()
 
 
 def codex_include_session(payload: Mapping[str, Any], path: Path) -> bool:
@@ -1192,6 +1281,7 @@ def codex_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holding
     previous: dt.datetime | None = None
     pending = 0.0
     tally = (0, 0)  # repo lines (added, deleted) since the last message
+    quizzes: dict[str, Quiz] = {}  # call_id -> questions asked of the human
     for line_number, record in read_jsonl(path):
         payload = record.get("payload")
         payload = payload if isinstance(payload, dict) else {}
@@ -1216,6 +1306,8 @@ def codex_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holding
                 cwd = payload.get("cwd") or cwd
                 model = payload.get("model") if isinstance(payload.get("model"), str) else model
                 effort = payload.get("effort") if isinstance(payload.get("effort"), str) else effort
+            case "response_item" if payload.get("type") == "function_call" and payload.get("name") == CODEX_ASK_TOOL:
+                quizzes[payload.get("call_id")] = codex_quiz(payload.get("arguments"), path, line_number)
             case "event_msg":
                 kind = payload.get("type")
                 # A patch that failed to apply changed nothing, so only a
@@ -1239,11 +1331,12 @@ def codex_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holding
                 timestamp = parse_time(record["timestamp"])
                 if kind == "user_message":
                     holdings.add(("Codex", timestamp))
-                    prompt = cut_canned_tail(codex_prompt(text, path))
+                    typed, ballots = codex_prompt(text, quizzes, path, line_number)
+                    prompt = cut_canned_tail(typed)
                     images = codex_images(payload, path, line_number)
-                    if (prompt == "" and images == ()) or prompt.startswith(CODEX_CANNED_PREFIX):
+                    if (prompt == "" and images == () and ballots == ()) or prompt.startswith(CODEX_CANNED_PREFIX):
                         continue  # not an exchange boundary: the tally rides on
-                    messages.append(Message("user", timestamp, prompt, images=images,
+                    messages.append(Message("user", timestamp, prompt, images=images, ballots=ballots,
                                             active=pending, added=tally[0], deleted=tally[1]))
                     pending = 0.0
                     tally = (0, 0)
