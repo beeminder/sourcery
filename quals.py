@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-"""Quals for sourcery.py. Run: python3 quals.py
+#!/usr/bin/env python3.14
+"""Quals for sourcery.py. Run: python3.14 quals.py
 
 Each qual replicates a transcript shape observed in the real stores (Claude
 Code, Codex, VS Code / Copilot Chat), states the expected extraction, and
@@ -25,6 +25,7 @@ import tempfile
 import time
 import unittest
 import unittest.mock
+from compression import zstd
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -2048,6 +2049,200 @@ class ClaudeQuals(Fixture):
         self.assertIn(str(path), str(ctx.exception))
         self.assertIn(":2", str(ctx.exception))
 
+    def refused_at(self, records, line, name="odd"):
+        """records written to a session file, read for the repo: refused,
+        citing that file and the line given."""
+        path = write_jsonl(self.tmp / "claude" / "p1" / f"{name}.jsonl", records)
+        with self.assertRaises(ace.UserError) as ctx:
+            ace.claude_exchanges(path, self.repo)
+        self.assertIn(f"{path}:{line}\n", str(ctx.exception))
+        return str(ctx.exception)
+
+    def test_records_of_unseen_types_refused_in_files_read_for_the_repo(self):
+        # Replicata: a session file holding records read for the repo also
+        # holds, anywhere, a record of a type no store has shown, or one with
+        # no type. Expectata: refused, citing the file and that record's
+        # line, since it may hold the human's words, as the attachment
+        # records nobody had classified once held 95 typed prompts; the same
+        # record in a file holding nothing read for the repo (another
+        # project's session, or a workflow's own log) is ignored. Resultata
+        # (v6.2.0): every record but user, assistant, and attachment skipped
+        # in silence.
+        cwd = str(self.repo)
+        for name, odd in {
+            "unseen type": {"type": "prompt_draft", "sessionId": "cs1", "text": "words"},
+            "no type": {"sessionId": "cs1", "text": "words"},
+        }.items():
+            with self.subTest(name):
+                error = self.refused_at([odd, cu("go", cwd=cwd), ca([{"type": "text", "text": "done"}], cwd=cwd)], 1, name)
+                self.assertIn("claude_exchanges", error)
+                elsewhere = write_jsonl(self.tmp / "claude" / "p1" / f"{name}-elsewhere.jsonl",
+                                        [odd, cu("go", cwd="/elsewhere")])
+                self.assertEqual(ace.claude_exchanges(elsewhere, self.repo), ([], set()))
+
+    def test_record_types_the_stores_show_pass(self):
+        # Every record type the stores show in session files read for a repo,
+        # beside user, assistant, and attachment, is harness bookkeeping:
+        # system notices, the prompt queue, titles, the last prompt's echo,
+        # request logs, file-history snapshots, the session's mode, bridge,
+        # frame, artifact, and cost state. None changes what a file yields.
+        cwd = str(self.repo)
+        quiet = [
+            {"type": kind, "sessionId": "cs1"}
+            for kind in ["system", "queue-operation", "ai-title", "last-prompt", "api-request", "api-request-blob",
+                         "api-request-shape", "atis-latch", "file-history-snapshot", "file-history-delta",
+                         "bridge-session", "mode", "frame-link", "artifact-autoreact-ledger",
+                         "artifact-comment-monitor", "cost-state"]
+        ]
+        got = ace.claude_exchanges(
+            self.path([*quiet, cu("go", cwd=cwd), ca([{"type": "text", "text": "done"}], cwd=cwd)]), self.repo
+        )[0]
+        self.assertEqual([(e.prompt, e.reply) for e in got], [("go", "done")])
+
+    def test_attachments_of_unseen_types_refused_for_the_repo(self):
+        # Replicata: an attachment record of a type no store has shown, its
+        # cwd in the repo. Expectata: refused, citing the file and line,
+        # since typed words once arrived in an attachment type nobody had
+        # classified (queued_command); its cwd elsewhere, ignored. Resultata
+        # (v6.2.0): every attachment type but queued_command skipped in
+        # silence.
+        def odd(cwd):
+            return {"type": "attachment", "attachment": {"type": "typed_note", "text": "words"},
+                    "cwd": cwd, "sessionId": "cs1", "timestamp": T0}
+        self.refused_at([odd(str(self.repo))], 1)
+        elsewhere = write_jsonl(self.tmp / "claude" / "p1" / "elsewhere.jsonl", [odd("/elsewhere")])
+        self.assertEqual(ace.claude_exchanges(elsewhere, self.repo), ([], set()))
+
+    def test_attachment_types_the_stores_show_pass(self):
+        # Every attachment type the stores show beside queued_command is
+        # harness bookkeeping: reminders, tool and skill listings, prompt
+        # and context snapshots, mode switches, file notices. None changes
+        # what a file yields.
+        cwd = str(self.repo)
+        quiet = [
+            {"type": "attachment", "attachment": {"type": kind}, "cwd": cwd, "sessionId": "cs1", "timestamp": T0}
+            for kind in [
+                "total_tokens_reminder", "deferred_tools_record", "batching_reminder_sent", "deferred_tools_delta",
+                "skill_listing", "prompt_snapshot", "remote_session_change", "auto_mode", "date", "session_context",
+                "environment", "instructions", "structured_output", "model", "edited_text_file",
+                "mcp_instructions_delta", "credential_org", "todo_reminder", "silent_turn_reminder",
+                "ultra_effort_enter", "date_change", "agent_listing_delta", "read_truncation_notice",
+                "hook_additional_context", "file", "command_permissions", "thinking_drop", "compact_file_reference",
+                "invoked_skills", "auto_mode_exit", "ultra_effort_exit", "task_status", "plan_mode",
+                "plan_mode_exit", "hook_non_blocking_error", "plan_mode_reentry",
+            ]
+        ]
+        got = ace.claude_exchanges(
+            self.path([*quiet, cu("go", ts=T1, cwd=cwd), ca([{"type": "text", "text": "done"}], ts=T2, cwd=cwd)]),
+            self.repo,
+        )[0]
+        self.assertEqual([(e.prompt, e.reply) for e in got], [("go", "done")])
+
+    def test_user_content_of_unseen_forms_refused(self):
+        # Replicata: a user record read for the repo holds a content piece of
+        # a type no such record has shown (a pasted document, seen only in a
+        # subagent's records), a piece that is no JSON object, a text piece
+        # whose text is no string, or content that is neither text nor a list
+        # of pieces. Expectata: refused, citing the file and line. Resultata
+        # (v6.2.0): such pieces dropped, and such content read as nothing
+        # typed, in silence.
+        cwd = str(self.repo)
+        for name, content in {
+            "document": [{"type": "text", "text": "see attached"},
+                         {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBE"}}],
+            "not an object": [{"type": "text", "text": "words"}, "stray"],
+            "text not a string": [{"type": "text", "text": ["words"]}],
+            "neither text nor list": {"text": "words"},
+        }.items():
+            with self.subTest(name):
+                self.refused_at([cu(content, cwd=cwd)], 1, name)
+
+    def test_assistant_blocks_of_unseen_types_refused(self):
+        # Replicata: an assistant record read for the repo holds a block of a
+        # type no store has shown (an output_text block, which might carry
+        # the reply). Expectata: refused, citing the file and line; the
+        # types the stores show beside text (thinking, a tool call, a model
+        # fallback notice) still add nothing to the reply. Resultata
+        # (v6.2.0): every unknown block skipped in silence, and its words, if
+        # any, lost from the reply.
+        cwd = str(self.repo)
+        self.refused_at([cu("go", cwd=cwd), ca([{"type": "output_text", "text": "words"}], cwd=cwd)], 2)
+        known = [
+            {"type": "thinking", "thinking": "mull", "signature": "s"},
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+            {"type": "fallback", "from": "claude-opus-5-5", "to": "claude-sonnet-5-5"},
+            {"type": "text", "text": "done"},
+        ]
+        got = ace.claude_exchanges(self.path([cu("go", cwd=cwd), ca(known, cwd=cwd)]), self.repo)[0]
+        self.assertEqual([(e.prompt, e.reply) for e in got], [("go", "done")])
+
+    def test_question_answers_of_unseen_forms_refused(self):
+        # Replicata: an AskUserQuestion result read for the repo holds a
+        # question that is no JSON object, whose text is no string, whose
+        # options are missing or hold one with no label, or whose answer is
+        # missing. Expectata: refused, citing the file and line. Resultata
+        # (v6.2.0): such a question or option skipped in silence, and a
+        # typed answer with it.
+        cwd = str(self.repo)
+        good = {"question": "Q1", "header": "h", "options": [{"label": "A", "description": "d"}]}
+        for name, (questions, answers) in {
+            "question not an object": (["Q1"], {"Q1": "typed"}),
+            "text not a string": ([{**good, "question": 7}], {"Q1": "typed"}),
+            "options missing": ([{"question": "Q1", "header": "h"}], {"Q1": "typed"}),
+            "option without a label": ([{**good, "options": [{"description": "d"}]}], {"Q1": "typed"}),
+            "answer missing": ([good], {}),
+        }.items():
+            with self.subTest(name):
+                record = cu([{"type": "tool_result", "tool_use_id": "t1", "content": "answered"}], cwd=cwd,
+                            toolUseResult={"questions": questions, "answers": answers})
+                self.refused_at([record], 1, name)
+
+    def test_coordinators_message_to_a_subagent_skipped(self):
+        # Replicata: a subagent's transcript holds a queued command from
+        # the coordinating agent, with no commandMode and origin
+        # "coordinator", the agent relaying in its own words what the human
+        # approved in the main session. Expectata: skipped, like all
+        # subagent traffic, never classified as a queued prompt. Resultata
+        # (v6.2.0): refused as a queued command of unknown mode, which
+        # stopped every export of the project whose session spawned it.
+        record = cq("the human approved the update; run the theorem step", T0, str(self.repo))
+        del record["attachment"]["commandMode"]
+        record["attachment"]["origin"] = {"kind": "coordinator"}
+        record["isSidechain"] = True
+        self.assertEqual(ace.claude_exchanges(self.path([record]), self.repo), ([], set()))
+
+    def test_machine_flagged_record_claiming_a_human_origin_refused(self):
+        # Replicata: a record flagged as subagent traffic, a meta record, or
+        # a compaction summary states a human origin: words the human typed
+        # into a subagent, say. Expectata: refused, citing the file and line,
+        # since the flag and the origin disagree about who wrote it. No store
+        # shows one. Resultata (v6.2.0): skipped with the flagged record, in
+        # silence.
+        cwd = str(self.repo)
+        for name, record in {
+            "subagent prompt": cu("typed to a subagent", cwd=cwd, isSidechain=True, origin={"kind": "human"}),
+            "subagent queued prompt": {**cq("typed to a subagent", T0, cwd), "isSidechain": True},
+            "meta record": cu("typed", cwd=cwd, isMeta=True, origin={"kind": "human"}),
+        }.items():
+            with self.subTest(name):
+                self.refused_at([record], 1, name)
+
+    def test_records_without_a_cwd_refused(self):
+        # Replicata: a user, assistant, or queued-prompt record with no cwd,
+        # which sourcery attributes every record by. Expectata: refused,
+        # citing the file and line, whatever repo is exported: a record that
+        # cannot be attributed may be this repo's. Resultata (v6.2.0): read
+        # as outside every repo, so a Claude Code that stopped recording cwd
+        # would have emptied every page in silence.
+        for name, record in {
+            "user": cu("go"),
+            "assistant": ca([{"type": "text", "text": "done"}]),
+            "queued prompt": cq("typed mid-turn", T0, None),
+            "user, cwd absent": {key: value for key, value in cu("go").items() if key != "cwd"},
+        }.items():
+            with self.subTest(name):
+                self.refused_at([record], 1, name)
+
 
 # --------------------------------------------------------------------- Codex
 
@@ -2087,6 +2282,48 @@ def cxpatch(changes, success=True, ts=T1):
         "changes": changes,
     }
     return {"type": "event_msg", "timestamp": ts, "payload": payload}
+
+
+def cxitem(item, ts=T0):
+    """An item_completed event, the form a rewritten rollout records each
+    event sourcery reads in."""
+    return {"type": "event_msg", "timestamp": ts, "payload": {
+        "type": "item_completed", "thread_id": "th1", "turn_id": "tu1", "item": item,
+        "completed_at_ms": int(utc(ts).timestamp() * 1000)}}
+
+
+def rewritten(records):
+    """records as Codex rewrites a rollout some time after writing it: each
+    line numbered by an ordinal, and each user_message, agent_message,
+    agent_reasoning, and applied patch_apply_end event replaced by the
+    item_completed event standing for it."""
+    out = []
+    for ordinal, record in enumerate(records):
+        payload = record.get("payload", {})
+        match record["type"], payload.get("type"):
+            case "event_msg", "user_message":
+                images = [{"type": "image", "image_url": uri} for uri in payload.get("images", ())]
+                record = cxitem({"type": "UserMessage", "id": f"i{ordinal}", "content": [
+                    {"type": "text", "text": payload["message"], "text_elements": []}, *images]}, record["timestamp"])
+            case "event_msg", "agent_message":
+                record = cxitem({"type": "AgentMessage", "id": f"i{ordinal}", "phase": "final_answer",
+                                 "content": [{"type": "Text", "text": payload["message"]}]}, record["timestamp"])
+            case "event_msg", "agent_reasoning":
+                record = cxitem({"type": "Reasoning", "id": f"i{ordinal}", "summary_text": [payload["text"]],
+                                 "raw_content": []}, record["timestamp"])
+            case "event_msg", "patch_apply_end":
+                assert payload["success"]  # no store shows how a failed patch is rewritten
+                record = cxitem({"type": "FileChange", "id": f"i{ordinal}", "status": "completed",
+                                 "stdout": "", "changes": payload["changes"]}, record["timestamp"])
+        out.append({**record, "ordinal": ordinal})
+    return out
+
+
+def sourceless(parsed):
+    """A parser's (exchanges, holdings) with each exchange's source path
+    blanked, for comparing readings of one session from two files."""
+    exchanges, holdings = parsed
+    return [dataclasses.replace(e, source=None) for e in exchanges], holdings
 
 
 class CodexQuals(Fixture):
@@ -2147,6 +2384,18 @@ class CodexQuals(Fixture):
         titler = [cxmeta(str(self.repo), source="exec"), cxuser("Generate a concise UI title")]
         self.assertEqual(ace.codex_exchanges(self.path(subagent, "a.jsonl"), self.repo)[0], [])
         self.assertEqual(ace.codex_exchanges(self.path(titler, "b.jsonl"), self.repo)[0], [])
+
+    def test_session_without_a_cwd_refused(self):
+        # Replicata: a rollout whose session_meta names no cwd, which
+        # sourcery attributes every session by. Expectata: refused, citing
+        # the file, whatever repo is exported. Resultata (v6.2.0): read as
+        # outside every repo, in silence.
+        meta = cxmeta(str(self.repo))
+        del meta["payload"]["cwd"]
+        path = self.path([meta, cxuser("go")])
+        with self.assertRaises(ace.UserError) as ctx:
+            ace.codex_exchanges(path, self.repo)
+        self.assertIn(f"{path}:1\n", str(ctx.exception))
 
     def test_unknown_source_fails_loudly(self):
         path = self.path([cxmeta(str(self.repo), source="quantum"), cxuser("hi")])
@@ -2441,6 +2690,167 @@ class CodexQuals(Fixture):
         with self.assertRaises(ace.UserError):
             ace.codex_exchanges(self.path(records), self.repo)[0]
 
+    def test_rewritten_rollout_reads_as_first_written(self):
+        # Replicata: Codex rewrites each rollout some time after writing it
+        # (seen from 2026-09 on, sometimes mid-session): every line gains an
+        # ordinal, and each user_message, agent_message, agent_reasoning,
+        # and patch_apply_end event becomes an item_completed event carrying
+        # a UserMessage, AgentMessage, Reasoning, or FileChange item.
+        # Expectata: the rewritten rollout reads exactly as it did when first
+        # written, every field of every exchange and every holding alike, so
+        # a ledger row read from either form is the row the other form
+        # yields. Resultata (v6.1.0): no exchanges and no holdings; the
+        # prompts of every rewritten rollout were missing from the page, and
+        # their ledger rows were kept as last read, however stale.
+        repo = str(self.repo)
+        wrapped = "# Context from my IDE setup:\n\n## Active file: a.js\n\n## My request for Codex:\nbuild it\n"
+        changes = {
+            str(self.repo / "a.js"): {
+                "type": "update", "move_path": None, "unified_diff": "@@ -1,2 +1,3 @@\n ctx\n-old\n+new one\n+new two",
+            },
+            str(self.repo / "b.js"): {"type": "add", "content": "one\ntwo\nthree"},
+            str(self.repo / "c.js"): {"type": "delete", "content": "bye\nbye"},
+        }
+        scenarios = {
+            "turns": [
+                cxmeta(repo),
+                cxturn("gpt-5.3-codex", repo, effort="xhigh"),
+                cxuser(wrapped, ts=T0),
+                {"type": "event_msg", "timestamp": T1, "payload": {"type": "agent_reasoning", "text": "mull"}},
+                {"type": "response_item", "timestamp": T1, "payload": {"type": "function_call", "name": "shell"}},
+                {"type": "response_item", "timestamp": T2, "payload": {"type": "function_call_output", "output": "x"}},
+                cxpatch(changes, ts=T2),
+                cxagent("built", ts=T3),
+                cxuser("see image", ts="2026-03-01T10:20:00.000Z", images=["data:image/png;base64,QUJD"]),
+                cxagent("seen", ts="2026-03-01T10:21:00.000Z"),
+                cxuser("The following is the Codex agent history added since your last message.",
+                       ts="2026-03-01T10:22:00.000Z"),
+                cxuser("I get the following error. Please fix the error.\n\n$ x\nboom", ts="2026-03-01T10:23:00.000Z"),
+                cxuser("last, interrupted", ts="2026-03-01T10:24:00.000Z"),
+                {"type": "response_item", "timestamp": "2026-03-01T10:25:00.000Z",
+                 "payload": {"type": "function_call", "name": "apply_patch"}},
+                cxpatch({str(self.repo / "d.js"): {"type": "add", "content": "x"}}, ts="2026-03-01T10:26:00.000Z"),
+            ],
+            "questions": [
+                cxmeta(repo),
+                cxuser("go", ts=T0),
+                self.asked([{"title": "Q1?", "options": ["Keep", "Restore"]}, {"title": "Q2?"}]),
+                self.answered([("call_q1", 0, "Q1?", "Restore"), ("call_q1", 1, "Q2?", "typed")]),
+                cxagent("ok", ts=T2),
+            ],
+        }
+        for name, records in scenarios.items():
+            with self.subTest(name):
+                first = sourceless(ace.codex_exchanges(self.path(records, f"{name}-first.jsonl"), self.repo))
+                again = sourceless(ace.codex_exchanges(self.path(rewritten(records), f"{name}-again.jsonl"), self.repo))
+                self.assertTrue(first[0])
+                self.assertEqual(again, first)
+
+    def test_machine_items_of_a_rewritten_rollout_carry_nothing(self):
+        # Every item type the stores show beside UserMessage, AgentMessage,
+        # Reasoning, and FileChange is tool or agent bookkeeping: between a
+        # prompt and its reply such items add no words and no lines, and a
+        # gap ending at one is not working time.
+        machine = [
+            cxitem({"type": kind, "id": f"m{n}"}, ts=T1)
+            for n, kind in enumerate(["SubAgentActivity", "McpToolCall", "CommandExecution", "Extension",
+                                      "WebSearch", "ContextCompaction", "ImageView", "CollabAgentToolCall"])
+        ]
+        records = rewritten([cxmeta(str(self.repo)), cxuser("go", ts=T0), *machine, cxagent("done", ts=T2)])
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual(
+            [(e.prompt, e.reply, e.added, e.deleted, e.elapsed) for e in got],
+            [("go", "done", 0, 0, 300.0)],
+        )
+
+    def test_rewritten_items_of_unseen_forms_refused_in_sessions_read_for_the_repo(self):
+        # Replicata: a rewritten rollout holds an item_completed event in a
+        # form no store has shown in a session of this machine's repos: a
+        # UserMessage whose image is a local file path (seen only in
+        # sessions elsewhere), or with two text pieces, or with
+        # text_elements filled; an AgentMessage in two pieces; a FileChange
+        # not completed; an item of an unseen type. Expectata: refused,
+        # citing the file and line, in a session read for the repo, where it
+        # may hold the human's words; ignored in a session elsewhere.
+        # Resultata (v6.1.0): every item_completed event skipped in
+        # silence, whatever it held.
+        text = {"type": "text", "text": "words", "text_elements": []}
+        items = {
+            "local image": {"type": "UserMessage", "id": "u1", "content": [
+                text, {"type": "local_image", "path": "/var/folders/x/T/shot.png"}]},
+            "two texts": {"type": "UserMessage", "id": "u1", "content": [text, text]},
+            "text elements": {"type": "UserMessage", "id": "u1", "content": [
+                {**text, "text_elements": [{"byte_range": {"start": 0, "end": 5}}]}]},
+            "agent pieces": {"type": "AgentMessage", "id": "a1", "phase": "final_answer", "content": [
+                {"type": "Text", "text": "a"}, {"type": "Text", "text": "b"}]},
+            "change declined": {"type": "FileChange", "id": "f1", "status": "declined", "stdout": "", "changes": {}},
+            "unseen type": {"type": "Hologram", "id": "h1"},
+        }
+        for name, item in items.items():
+            with self.subTest(name):
+                path = self.path([cxmeta(str(self.repo)), cxitem(item)], f"{name}.jsonl")
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.codex_exchanges(path, self.repo)
+                self.assertIn(f"{path}:2\n", str(ctx.exception))
+                self.assertIn("codex_exchanges", str(ctx.exception))
+                elsewhere = self.path([cxmeta("/elsewhere"), cxitem(item)], f"{name}-elsewhere.jsonl")
+                self.assertEqual(ace.codex_exchanges(elsewhere, self.repo), ([], set()))
+
+    def test_unseen_event_kinds_and_record_types_refused_in_sessions_read_for_the_repo(self):
+        # Replicata: a rollout holds an event_msg of a kind, or a record of
+        # a type, that no store has shown in a session of this machine's
+        # repos: realtime_item, say, the record a voice session elsewhere
+        # keeps the human's speech in. Expectata: refused, citing the file
+        # and line, in a session read for the repo; ignored in a session
+        # elsewhere. Resultata (v6.1.0): skipped in silence, as
+        # item_completed was when Codex began to record prompts in it.
+        records = {
+            "event kind": {"type": "event_msg", "timestamp": T0, "payload": {"type": "user_input", "message": "words"}},
+            "record type": {"type": "realtime_item", "timestamp": T0,
+                            "payload": {"type": "message", "role": "user", "text": "words"}},
+        }
+        for name, record in records.items():
+            with self.subTest(name):
+                path = self.path([cxmeta(str(self.repo)), record], f"{name}.jsonl")
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.codex_exchanges(path, self.repo)
+                self.assertIn(f"{path}:2\n", str(ctx.exception))
+                self.assertIn("codex_exchanges", str(ctx.exception))
+                elsewhere = self.path([cxmeta("/elsewhere"), record], f"{name}-elsewhere.jsonl")
+                self.assertEqual(ace.codex_exchanges(elsewhere, self.repo), ([], set()))
+
+    def test_compressed_rollout_reads_as_plain(self):
+        # Replicata: Codex compresses older rollouts, each to a .jsonl.zst
+        # file. Expectata: one reads exactly as the plain file it was.
+        # Resultata (v6.1.0): never opened; its prompts were missing from
+        # the page.
+        records = [
+            cxmeta(str(self.repo)),
+            cxturn("gpt-5.3-codex", str(self.repo), effort="xhigh"),
+            cxuser("go", ts=T0),
+            cxagent("done", ts=T1),
+        ]
+        plain = self.path(records)
+        packed = plain.with_name(plain.name + ".zst")
+        packed.write_bytes(zstd.compress(plain.read_bytes()))
+        first = sourceless(ace.codex_exchanges(plain, self.repo))
+        self.assertTrue(first[0])
+        self.assertEqual(sourceless(ace.codex_exchanges(packed, self.repo)), first)
+
+    def test_damaged_compressed_rollout_refused(self):
+        # A .jsonl.zst file that is no zstd archive, or one cut short, is
+        # refused, naming the file, instead of reading as fewer prompts.
+        whole = zstd.compress(b"".join(
+            json.dumps(r).encode() + b"\n" for r in [cxmeta(str(self.repo)), cxuser("go"), cxagent("done")]))
+        for name, data in {"not zstd": b"not zstd at all", "cut short": whole[:-6]}.items():
+            with self.subTest(name):
+                packed = self.tmp / "codex" / "sessions" / "2026" / f"{name}.jsonl.zst"
+                packed.parent.mkdir(parents=True, exist_ok=True)
+                packed.write_bytes(data)
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.codex_exchanges(packed, self.repo)
+                self.assertIn(str(packed), str(ctx.exception))
+
 
 # ---------------------------------------------------- paths under /home
 
@@ -2556,6 +2966,65 @@ class VscodeQuals(Fixture):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(state), encoding="utf-8")
         return path
+
+    def test_requests_of_unseen_forms_refused(self):
+        # Replicata: a request whose response is no list, whose variableData
+        # or its variables are malformed, that names a variable of a kind no
+        # store has shown (a new kind of pasted picture, say), that is
+        # marked hiddenFromTranscript, or whose message parts hold text its
+        # message.text lacks (the prompt moving out of message.text).
+        # Expectata: refused, naming the file. Resultata (v6.2.0): read as an
+        # empty reply, as no attachments, as shown, and the parts never
+        # compared, all in silence.
+        base = vsreq("q", [md("a")])
+        for name, request in {
+            "response not a list": {**base, "response": {"value": "a"}},
+            "variableData not an object": {**base, "variableData": ["x"]},
+            "variables not a list": {**base, "variableData": {"variables": {"kind": "file"}}},
+            "unseen variable kind": {**base, "variableData": {"variables": [
+                {"kind": "screenshot", "id": "s", "name": "Screen", "value": "AA"}]}},
+            "hidden from transcript": {**base, "hiddenFromTranscript": True},
+            "parts beyond the text": {**base, "message": {"text": "q", "parts": [{"kind": "text", "text": "q and more"}]}},
+            "part of an unseen kind": {**base, "message": {"text": "q", "parts": [
+                {"kind": "text", "text": "q"}, {"kind": "pastedImage", "data": "AA"}]}},
+            "parts missing": {**base, "message": {"text": "q"}},
+        }.items():
+            with self.subTest(name):
+                path = self.write_session(vssession([request]), f"{name}.json")
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.vscode_exchanges(path, (self.repo,), self.repo)
+                self.assertIn(str(path), str(ctx.exception))
+
+    def test_request_forms_the_stores_show_pass(self):
+        # Every variable kind the stores show (prompt and instruction files,
+        # attached files, auto-added instruction text, tools, the workspace,
+        # and the kind-less implicit editor context), hiddenFromTranscript
+        # false, and parts whose words message.text holds (text parts, and
+        # mentions of an agent, a slash subcommand, or a prompt file, which
+        # carry no text of their own) change nothing a request yields.
+        variables = [
+            {"kind": "promptFile", "id": "p", "name": "prompt:AGENTS.md", "value": {"path": "/x/AGENTS.md"}},
+            {"kind": "file", "id": "f", "name": "x.py", "value": {"path": "/x.py"}},
+            {"kind": "promptText", "id": "t", "name": "prompt:instructionsList", "value": "<skills>"},
+            {"kind": "tool", "id": "tool", "name": "search", "value": {}},
+            {"kind": "workspace", "id": "w", "name": "workspace", "value": "x"},
+            {"id": "vscode.implicit.viewport", "name": "file:x.py", "value": {"path": "/x.py"}, "isFile": True},
+        ]
+        span = {"start": 0, "endExclusive": 10}
+        editor = {"startLineNumber": 1, "startColumn": 1, "endLineNumber": 1, "endColumn": 11}
+        request = {
+            **vsreq("@workspace /fix #prompt:p q", [md("a")], variables=variables),
+            "hiddenFromTranscript": False,
+            "message": {"text": "@workspace /fix #prompt:p q", "parts": [
+                {"kind": "agent", "agent": {"id": "github.copilot.workspace"}, "range": span, "editorRange": editor},
+                {"kind": "text", "text": " ", "range": span, "editorRange": editor},
+                {"kind": "subcommand", "command": {"name": "fix"}, "range": span, "editorRange": editor},
+                {"kind": "prompt", "name": "p", "range": span, "editorRange": editor},
+                {"kind": "text", "text": " q", "range": span, "editorRange": editor},
+            ]},
+        }
+        got = ace.vscode_exchanges(self.write_session(vssession([request])), (self.repo,), self.repo)[0]
+        self.assertEqual([(e.prompt, e.reply, e.images) for e in got], [("@workspace /fix #prompt:p q", "a", ())])
 
     def test_prompt_exact_reply_from_markdown_chunks(self):
         response = [
@@ -3572,6 +4041,101 @@ class CliQuals(Fixture):
         for label in ("Claude Code", "Codex", "Copilot Chat"):
             self.assertIn(label, page)
         self.assertIn(str(out_path), out)
+
+    def test_compressed_codex_rollouts_exported(self):
+        # Replicata: the Codex store holds a rollout compressed to
+        # .jsonl.zst. Expectata: its prompt exported like any other.
+        # Resultata (v6.1.0): never read, and absent from the page.
+        plain = write_jsonl(
+            self.codex_root / "sessions" / "2026" / "rollout-1.jsonl",
+            [cxmeta(str(self.repo)), cxuser("codex prompt", ts=T1), cxagent("codex reply", ts=T2)],
+        )
+        plain.with_name(plain.name + ".zst").write_bytes(zstd.compress(plain.read_bytes()))
+        plain.unlink()
+        out, page = self.generate(self.tmp / "out.html")
+        self.assertIn('<pre class="prompt">codex prompt</pre>', page)
+        self.assertIn(f"Prompts: 1\n  {LOGIN}: 1\n", out)
+
+    def test_file_of_unknown_form_among_codex_rollouts_refused(self):
+        # Replicata: a file among the Codex rollouts is neither .jsonl nor
+        # .jsonl.zst: Codex compressing rollouts some other way, say.
+        # Expectata: exit 2 naming the file, nothing written, since sourcery
+        # cannot read it and it may hold the human's words. Resultata
+        # (v6.1.0): skipped in silence, as .jsonl.zst rollouts were.
+        self.populate()
+        stray = self.codex_root / "sessions" / "2026" / "rollout-2.jsonl.gz"
+        stray.write_bytes(b"\x1f\x8b\x08\x00")
+        err = self.refused([str(self.repo), str(self.tmp / "out.html")])
+        self.assertIn(f"{stray}\n", err)
+
+    def test_files_of_unknown_form_in_the_other_stores_refused(self):
+        # Replicata: a file in a transcript store named so that sourcery
+        # reads no transcript from it: a Claude transcript compressed
+        # (s.jsonl.zst), a Copilot session that is neither .json nor .jsonl,
+        # an Antigravity conversation that is not .pb. Expectata: exit 2
+        # naming the file, nothing written, since it may hold the human's
+        # words. Resultata (v6.2.0): skipped in silence, as compressed Codex
+        # rollouts were.
+        self.populate()
+        conversations = self.antigravity_root / "conversations"
+        conversations.mkdir()
+        for name, stray in {
+            "claude": self.claude_root / "p" / "s.jsonl.zst",
+            "copilot": self.vscode_root / "workspaceStorage" / "h1" / "chatSessions" / "a.json.gz",
+            "antigravity": conversations / "c.pb.bak",
+        }.items():
+            with self.subTest(name):
+                stray.write_bytes(b"\x28\xb5\x2f\xfd")
+                err = self.refused([str(self.repo), str(self.tmp / "out.html")])
+                self.assertIn(f"{stray}\n", err)
+                stray.unlink()
+
+    def canary(self, rewrite):
+        """Run once, so the ledger reads the populated stores' prompts; then
+        rewrite a store file in place, the session it holds left in the
+        store; then return the second run's refusal."""
+        self.populate()
+        out_path = self.tmp / "out.html"
+        self.generate(out_path)
+        rewrite()
+        return self.refused([str(self.repo), str(out_path)])
+
+    def test_session_the_store_still_holds_but_yields_no_prompt_refused(self):
+        # Replicata: a run reads a session's prompt into the ledger; then the
+        # store keeps the session (same id, same project) with no prompt
+        # sourcery can read left in it: Codex rewriting a rollout into a
+        # form sourcery cannot read yet, say. Expectata: exit 2, naming the
+        # session and its file, nothing written: a session that kept its
+        # place but lost every prompt the ledger read from it means the
+        # transcript format changed. Resultata (v6.2.0): exit 0, the ledger
+        # copies kept in silence and every later prompt of the session
+        # missing, which is how Codex's rewrite of its store went unseen for
+        # weeks.
+        rollout = self.codex_root / "sessions" / "2026" / "rollout-1.jsonl"
+        err = self.canary(lambda: write_jsonl(rollout, [
+            cxmeta(str(self.repo)),
+            {"type": "response_item", "timestamp": T1, "payload": {
+                "type": "message", "role": "user", "content": [{"type": "input_text", "text": "codex prompt"}]}},
+            cxagent("codex reply", ts=T2),
+        ]))
+        self.assertIn(f"Sessio Codex cx1 in reposito transcriptorum adhuc est ({rollout})", err)
+        self.assertIn("Nihil scriptum est.", err)
+
+    def test_claude_session_left_without_a_prompt_refused(self):
+        # As the qual before, for a Claude session: its file rewritten to
+        # hold only the agent's reply, the session still read for the repo.
+        transcript = self.claude_root / "p" / "s.jsonl"
+        err = self.canary(lambda: write_jsonl(transcript, [
+            ca([{"type": "text", "text": "claude reply"}], cwd=str(self.repo)),
+        ]))
+        self.assertIn(f"Sessio Claude Code cs1 in reposito transcriptorum adhuc est ({transcript})", err)
+
+    def test_copilot_session_left_without_a_prompt_refused(self):
+        # As the quals before, for a Copilot session: its requests emptied,
+        # the session file still in the workspace read for the repo.
+        session = self.vscode_root / "workspaceStorage" / "h1" / "chatSessions" / "a.json"
+        err = self.canary(lambda: session.write_text(json.dumps(vssession([])), encoding="utf-8"))
+        self.assertIn(f"Sessio Copilot Chat v1 in reposito transcriptorum adhuc est ({session})", err)
 
     def test_wrong_arity_and_unknown_arguments_rejected(self):
         out = str(self.tmp / "out.html")
@@ -4718,6 +5282,20 @@ class CliQuals(Fixture):
         with self.assertRaises(SyntaxError):
             ast.parse(source, feature_version=(3, 9))
         ast.parse(source, feature_version=(3, 10))
+
+    def test_python_3_14_required_before_anything_runs(self):
+        # Compressed Codex rollouts are read with compression.zstd, new in
+        # Python 3.14, imported among the script's leading imports: on 3.10
+        # to 3.13, which parse the file, that import fails before anything
+        # runs, so no older interpreter half-runs it. If this qual goes red,
+        # the import moved, and an older interpreter would fail partway
+        # through a run instead.
+        tree = ast.parse(Path(ace.__file__).read_text(encoding="utf-8"))
+        leading = itertools.takewhile(lambda node: isinstance(node, (ast.Expr, ast.Import, ast.ImportFrom)), tree.body)
+        self.assertIn(
+            ("compression", ["zstd"]),
+            [(node.module, [alias.name for alias in node.names]) for node in leading if isinstance(node, ast.ImportFrom)],
+        )
 
     # ------------------------------------------------------------- ledgers
 

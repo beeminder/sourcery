@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Export the human side of a repo's AI coding dialogue to one HTML page.
 
 Reads the local transcript stores of four coding agents and produces a
@@ -9,7 +9,7 @@ quiet disclosure line that names the agent, model, and time. Supported
 stores:
 
 - Claude Code:  ~/.claude/projects/**/*.jsonl
-- Codex:        ~/.codex/{sessions,archived_sessions}/**/*.jsonl
+- Codex:        ~/.codex/{sessions,archived_sessions}/**/*.jsonl{,.zst}
 - Copilot Chat: VS Code User/workspaceStorage/*/chatSessions/*.{json,jsonl}
 - Antigravity:  ~/.gemini/antigravity/conversations/*.pb (sealed protobuf;
                 opened through the system cipher, macOS only)
@@ -64,10 +64,13 @@ import sys
 import tempfile
 import urllib.parse
 import webbrowser
+# New in Python 3.14, which the script therefore needs: Codex compresses
+# older rollouts with zstd.
+from compression import zstd
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "6.1.0"
+VERSION = "6.2.0"
 UTC = dt.timezone.utc
 
 
@@ -409,9 +412,21 @@ def read_json(path: Path) -> Any:
         raise UserError(f"JSON invalidum in {path}: {exc}") from exc
 
 
+def unpacked_lines(fh: Iterable[str], path: Path) -> Iterator[str]:
+    """fh's lines; a compressed file that is no zstd archive, or one cut
+    short, is refused instead of reading as fewer lines."""
+    try:
+        yield from fh
+    except (zstd.ZstdError, EOFError) as exc:
+        # TODO: Says this compressed transcript cannot be decompressed, with
+        # the reason.
+        raise UserError(f"Transcriptum compressum resolvi non potest: {path}\n{exc}") from exc
+
+
 def read_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
     try:
-        fh = path.open("r", encoding="utf-8")
+        # A .jsonl.zst file is a rollout Codex compressed.
+        fh = (zstd.open if path.suffix == ".zst" else open)(path, "rt", encoding="utf-8")
     except PermissionError as exc:
         # TODO: Says read permission is missing for this file and to grant
         # the terminal read access, then rerun.
@@ -423,7 +438,7 @@ def read_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
         # TODO: Says this file cannot be opened.
         raise UserError(f"Fasciculus aperiri non potest: {path}\n{exc}") from exc
     with fh:
-        for line_number, line in enumerate(fh, start=1):
+        for line_number, line in enumerate(unpacked_lines(fh, path), start=1):
             if line == "\n":
                 continue
             try:
@@ -539,6 +554,40 @@ CLAUDE_SKIP_FLAGS = ("isSidechain", "isMeta", "isCompactSummary", "isVisibleInTr
 # interrupt; dropped only when it is the entire prompt.
 CLAUDE_CANNED = re.compile(r"\[Request interrupted by user[^\]]*\]")
 
+# Record types the stores show in session files read for a repo, each read
+# or knowingly passed over: the dialogue (user, assistant, attachment) and
+# harness bookkeeping (system notices, the prompt queue, titles, the last
+# prompt's echo, request logs, file-history snapshots, the session's mode,
+# bridge, frame, artifact, and cost state). Typed prompts once hid in
+# attachment records nobody had classified, so a record of any other type,
+# or of none, in a file holding records read for the repo, is refused: it
+# may hold the human's words.
+CLAUDE_RECORDS = frozenset({
+    "user", "assistant", "attachment", "system", "queue-operation", "ai-title", "last-prompt",
+    "api-request", "api-request-blob", "api-request-shape", "atis-latch", "file-history-snapshot",
+    "file-history-delta", "bridge-session", "mode", "frame-link", "artifact-autoreact-ledger",
+    "artifact-comment-monitor", "cost-state",
+})
+
+# Attachment types the stores show that carry no typing: reminders, tool and
+# skill listings, prompt and context snapshots, mode switches, and file
+# notices. A queued_command attachment, a prompt typed mid-turn, is read;
+# one of any other type is refused like a record of an unseen type.
+CLAUDE_MUTE_ATTACHMENTS = frozenset({
+    "total_tokens_reminder", "deferred_tools_record", "batching_reminder_sent", "deferred_tools_delta",
+    "skill_listing", "prompt_snapshot", "remote_session_change", "auto_mode", "date", "session_context",
+    "environment", "instructions", "structured_output", "model", "edited_text_file", "mcp_instructions_delta",
+    "credential_org", "todo_reminder", "silent_turn_reminder", "ultra_effort_enter", "date_change",
+    "agent_listing_delta", "read_truncation_notice", "hook_additional_context", "file", "command_permissions",
+    "thinking_drop", "compact_file_reference", "invoked_skills", "auto_mode_exit", "ultra_effort_exit",
+    "task_status", "plan_mode", "plan_mode_exit", "hook_non_blocking_error", "plan_mode_reentry",
+})
+
+# Assistant block types the stores show that carry no words for the human:
+# thinking, tool calls (but SendUserMessage, whose message is reply), and
+# model fallback notices.
+CLAUDE_MUTE_BLOCKS = frozenset({"thinking", "tool_use", "fallback"})
+
 # Newer Claude Code stamps user records with an origin kind. Machine origins
 # (background-task notifications, and "peer": another agent's message, e.g.
 # a background agent handing its result back) are never typing; an origin kind
@@ -625,17 +674,24 @@ def claude_recovered(record: Mapping[str, Any], path: Path, line_number: int) ->
             ballots: list[Ballot] = []
             typed: list[str] = []
             for question in questions:
-                if not isinstance(question, dict):
+                match question:
+                    case {"question": str() as prompt_text, "options": list() as options} if isinstance(
+                        answers.get(prompt_text), str
+                    ) and all(isinstance(option, dict) and isinstance(option.get("label"), str) for option in options):
+                        answer = answers[prompt_text]
+                    case _:
+                        # TODO: Says a question the human answered is in an
+                        # unrecognized form (no question text, options
+                        # missing or without labels, or no answer recorded)
+                        # — the answers structure seems to have changed and
+                        # claude_recovered needs updating.
+                        raise UserError(
+                            f"Interrogatio in forma ignota: {path}:{line_number}\n"
+                            "Structura answers mutata videtur; claude_recovered renovandum est."
+                        )
+                if answer == "":
                     continue
-                prompt_text = question.get("question")
-                answer = answers.get(prompt_text)
-                if not isinstance(prompt_text, str) or not isinstance(answer, str) or answer == "":
-                    continue
-                labels = tuple(
-                    option["label"]
-                    for option in question.get("options") or []
-                    if isinstance(option, dict) and isinstance(option.get("label"), str)
-                )
+                labels = tuple(option["label"] for option in options)
                 parts = answer.split(", ")
                 if answer in labels:
                     picked: tuple[str, ...] = (answer,)
@@ -689,6 +745,14 @@ def claude_delivery_key(attachment: Mapping[str, Any] | None, path: Path, line_n
 
 def claude_prompt(content: Any, path: Path, line_number: int) -> str:
     """Return the human-typed text of a user record, or "" if none survives."""
+    # TODO: Says a user record's content, or a piece of it, is in a form no
+    # store had shown (neither text nor a list of text, image, and
+    # tool-result pieces), and may hold the human's words: the format seems
+    # to have changed, so claude_prompt needs updating.
+    unseen = UserError(
+        f"Contentum rogationis in forma ignota, fortasse verba hominis tenens: {path}:{line_number}\n"
+        "Forma mutata videtur; claude_prompt renovandum est."
+    )
     match content:
         case str():
             if command := CLAUDE_COMMAND.fullmatch(content):
@@ -705,17 +769,18 @@ def claude_prompt(content: Any, path: Path, line_number: int) -> str:
                 )
             return content
         case list():
-            items = [item for item in content if isinstance(item, dict)]
-            if any(item.get("type") == "tool_result" for item in items):
+            for item in content:
+                match item:
+                    case {"type": "text", "text": str()} | {"type": "image"} | {"type": "tool_result"}:
+                        pass
+                    case _:
+                        raise unseen
+            if any(item["type"] == "tool_result" for item in content):
                 return ""
-            texts = [
-                item["text"]
-                for item in items
-                if item.get("type") == "text" and isinstance(item.get("text"), str)
-            ]
+            texts = [item["text"] for item in content if item["type"] == "text"]
             return "".join(t for t in texts if not CLAUDE_WRAPPER.fullmatch(t))
         case _:
-            return ""
+            raise unseen
 
 
 def claude_reply_blocks(content: Any, path: Path, line_number: int) -> list[str]:
@@ -725,7 +790,8 @@ def claude_reply_blocks(content: Any, path: Path, line_number: int) -> list[str]
     cloud workspace can speak to the human through that tool alone, writing
     no text block). Every other block stays out of the reply, even one the
     harness also shows the human, such as ExitPlanMode's plan or
-    AskUserQuestion's questions. Empty strings are dropped."""
+    AskUserQuestion's questions; a block of a type no store has shown is
+    refused. Empty strings are dropped."""
     if not isinstance(content, list):
         # TODO: Says an assistant record's content is in an unrecognized
         # form (not a list of blocks) — the format seems to have changed and
@@ -763,8 +829,16 @@ def claude_reply_blocks(content: Any, path: Path, line_number: int) -> list[str]
                     f"Vocatio {name} in forma ignota: {path}:{line_number}\n"
                     "Forma mutata videtur; claude_reply_blocks renovandum est."
                 )
+            case {"type": str() as kind} if kind in CLAUDE_MUTE_BLOCKS:
+                pass  # no words for the human
             case _:
-                pass  # every other block: no words for the human
+                # TODO: Says an assistant block is of a type no store had
+                # shown, and may hold words for the human: the format seems
+                # to have changed, so claude_reply_blocks needs updating.
+                raise UserError(
+                    f"Membrum responsi generis ignoti: {path}:{line_number}\n"
+                    "Forma mutata videtur; claude_reply_blocks renovandum est."
+                )
     return [text for text in words if text != ""]
 
 
@@ -823,13 +897,41 @@ def claude_tool_seconds(record: Mapping[str, Any]) -> float:
     return 0.0
 
 
+def claude_record_known(record: Mapping[str, Any]) -> bool:
+    """Whether a record is of a type the stores show: an attachment of a
+    type they show, or another record of a type in CLAUDE_RECORDS."""
+    match record:
+        case {"type": "attachment", "attachment": {"type": str() as kind}}:
+            return kind == "queued_command" or kind in CLAUDE_MUTE_ATTACHMENTS
+        case {"type": "attachment"}:
+            return False
+        case {"type": str() as kind}:
+            return kind in CLAUDE_RECORDS
+        case _:
+            return False
+
+
 def claude_exchanges(
     path: Path,
     repo: Path,
     session_file: Callable[[str, Path, int, Any], None] = lambda session, path, line_number, timestamp: None,
+    session_seen: Callable[[str, bool], None] = lambda session, held: None,
 ) -> tuple[list[Exchange], set[Holding]]:
     threads: dict[str, list[Message]] = {}
     holdings: set[Holding] = set()
+    # Sessions holding a record read for the repo, and those of them holding
+    # a holding: what session_seen hears, once per session, at the end.
+    sessions_read: set[str] = set()
+    sessions_held: set[str] = set()
+
+    def hold(session: str, timestamp: dt.datetime) -> None:
+        holdings.add(("Claude Code", timestamp))
+        sessions_held.add(session)
+
+    # The lines of records of types no store has shown (see CLAUDE_RECORDS),
+    # and whether one of them names the repo as its own cwd.
+    unseen: list[int] = []
+    unseen_inside = False
     # Agent working time, distinguished from waiting-for-human time by where
     # a timestamp gap ends: a gap ending at an assistant record is generation;
     # a gap ending at a tool_result hides both tool runtime and permission
@@ -875,6 +977,9 @@ def claude_exchanges(
     command_prompt: dict[str, Any] = {}
     for line_number, record in read_jsonl(path):
         role = record.get("type")
+        if not claude_record_known(record):
+            unseen.append(line_number)
+            unseen_inside = unseen_inside or under_dir(record.get("cwd"), repo, path)
         # A message typed while the agent was mid-turn is recorded not as a
         # user record but as a queued_command attachment; other attachment
         # kinds (todo reminders, file-edit notices, ...) are machine chatter.
@@ -883,6 +988,26 @@ def claude_exchanges(
             attachment = attachment if isinstance(attachment, dict) else {}
             if attachment.get("type") != "queued_command":
                 continue
+        elif role not in {"user", "assistant"}:
+            continue
+        # Subagent traffic, meta records, compaction summaries, and
+        # transcript-only notes are never the human's words, whatever form
+        # they take (a coordinating agent's message queued to its subagent
+        # states no commandMode); one stating a human origin is refused, the
+        # flag and the origin disagreeing about who wrote it.
+        if any(record.get(flag) for flag in CLAUDE_SKIP_FLAGS):
+            if claude_origin_kind(attachment if attachment is not None else record) in CLAUDE_HUMAN_ORIGINS:
+                # TODO: Says this record is flagged as machine traffic
+                # (subagent traffic, a meta record, a compaction summary, or a
+                # transcript-only note) yet states a human origin, so who
+                # wrote it is undecided: the format seems to have changed, so
+                # claude_exchanges needs updating.
+                raise UserError(
+                    f"Recordum ut machinae signatum originem humanam fert: {path}:{line_number}\n"
+                    "Quis id scripserit incertum est; claude_exchanges renovandum est."
+                )
+            continue
+        if attachment is not None:
             mode = attachment.get("commandMode")
             if mode == "task-notification":
                 continue  # background-task wakeup queued as a command
@@ -894,10 +1019,6 @@ def claude_exchanges(
                     "Adde hunc modum consulto in claude_exchanges."
                 )
             role = "user"
-        elif role not in {"user", "assistant"}:
-            continue
-        if any(record.get(flag) for flag in CLAUDE_SKIP_FLAGS):
-            continue
         message = record.get("message")
         if attachment is None and not isinstance(message, dict):
             # TODO: Says this record has no message object.
@@ -913,10 +1034,20 @@ def claude_exchanges(
         # attachment, or the record itself.
         typed_source = attachment if attachment is not None else record
         kind = claude_origin_kind(typed_source)
+        if not isinstance(record.get("cwd"), str):
+            # TODO: Says this record names no working directory, by which
+            # sourcery tells which project's page each record belongs on, so
+            # it cannot be attributed: the format seems to have changed, so
+            # claude_exchanges needs updating.
+            raise UserError(
+                f"Recordum sine cwd, cuius pagina incerta est: {path}:{line_number}\n"
+                "Forma transcripti Claude mutata videtur; claude_exchanges renovandum est."
+            )
         inside = under_dir(record.get("cwd"), repo, path)
         first_line, first_inside, first_kind = first_delivery.setdefault(delivery, (line_number, inside, kind))
         if not inside:
             continue
+        sessions_read.add(session)
         if not first_inside:
             # TODO: Says a record was delivered again with its cwd inside
             # this project after its first delivery, in the same file and
@@ -995,10 +1126,10 @@ def claude_exchanges(
                 added, deleted = tallies.get(session, (0, 0))
                 tallies[session] = (added + unsent.added, deleted + unsent.deleted)
                 command_prompt.pop(session, None)
-                holdings.add(("Claude Code", timestamp))
+                hold(session, timestamp)
                 continue
             if claude_origin_is_machine(typed_source, path, line_number):
-                holdings.add(("Claude Code", timestamp))
+                hold(session, timestamp)
                 continue
             text = claude_prompt(content, path, line_number)
             # These two prefixes are harness-serialized or claude_prompt has
@@ -1029,11 +1160,11 @@ def claude_exchanges(
             redelivery = delivery in delivered
             delivered[delivery] = (text, images)
             if CLAUDE_CANNED.fullmatch(text):
-                holdings.add(("Claude Code", timestamp))
+                hold(session, timestamp)
                 continue
             if text == "" and images == () and not any(b.picked for b in ballots):
                 continue  # tool plumbing with no typing: never rendered, so no holding
-            holdings.add(("Claude Code", timestamp))
+            hold(session, timestamp)
             # A redelivery stays held, so a ledger's stale copy of it gets
             # purged, but is no new prompt: the work pending around it rides
             # the exchange in flight.
@@ -1063,6 +1194,17 @@ def claude_exchanges(
             command_prompt[session] = record.get("promptId")
         else:
             command_prompt.pop(session, None)
+    if unseen and (sessions_read or unseen_inside):
+        # TODO: Says this record, in a Claude transcript holding records
+        # read for the project, is of a type no store had shown, and may hold
+        # the human's words: the format seems to have changed, so
+        # claude_exchanges needs updating.
+        raise UserError(
+            f"Recordum Claude generis ignoti, fortasse verba hominis tenens: {path}:{unseen[0]}\n"
+            "Forma transcripti Claude mutata videtur; claude_exchanges renovandum est."
+        )
+    for session in sessions_read:
+        session_seen(session, session in sessions_held)
     return [
         exchange
         for session, messages in threads.items()
@@ -1270,11 +1412,87 @@ CODEX_WORKING = frozenset({
     "agent_message", "agent_reasoning", "token_count", "task_complete",
 })
 
+# Codex rewrites each rollout some time after writing it (seen from 2026-09
+# on, sometimes mid-session, the rest of the session then written the new
+# way): every line gains an "ordinal", and each event sourcery reads becomes
+# an item_completed event carrying one item, a UserMessage for a
+# user_message, an AgentMessage for an agent_message, a Reasoning for an
+# agent_reasoning, a FileChange for an applied patch_apply_end. Jargon: a
+# rollout's "first form" is the one Codex writes it in, its "rewritten form"
+# the one Codex rewrites it into. codex_payload reads each item back as the
+# first-form event it replaced, so one reading serves both forms and a
+# session reads alike in either.
 
-def codex_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holding]]:
+# Item types of the rewritten form that carry nothing sourcery reads: tool
+# runs, subagent and collaboration bookkeeping, search, image views, and
+# history compaction.
+CODEX_MUTE_ITEMS = frozenset({
+    "SubAgentActivity", "McpToolCall", "CommandExecution", "Extension", "WebSearch",
+    "ContextCompaction", "ImageView", "CollabAgentToolCall",
+})
+
+# The record types, and the first form's event kinds, that the stores show,
+# each one read or knowingly passed over. Codex began to record prompts in
+# an event kind sourcery passed over in silence (item_completed, the
+# rewritten form's), and a voice session keeps the human's speech in a
+# record type sourcery does not read (realtime_item), so a record of any
+# other type or kind, in a session read for the repo, is refused: it may
+# hold the human's words.
+CODEX_RECORDS = frozenset({
+    "session_meta", "turn_context", "response_item", "event_msg", "compacted", "world_state",
+    "token_usage_record", "inter_agent_communication_metadata",
+})
+CODEX_EVENTS = frozenset({
+    "user_message", "agent_message", "agent_reasoning", "patch_apply_end", "item_completed",
+    "token_count", "task_started", "task_complete", "thread_settings_applied", "turn_aborted",
+    "sub_agent_activity", "web_search_end", "context_compacted",
+})
+
+
+def codex_payload(record: Mapping[str, Any]) -> Mapping[str, Any]:
+    """A rollout record's payload in the first form: an item_completed event
+    becomes the event its item replaced, and one carrying a mute item stays
+    as it is. One carrying an item of another type, or an item sourcery
+    reads in a form no store has shown, becomes an event of no kind, which
+    codex_exchanges refuses in a session read for the repo."""
+    match record:
+        case {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+            "type": "UserMessage",
+            "content": [{"type": "text", "text": str() as text, "text_elements": []}, *images],
+        }}} if all(
+            isinstance(image, dict) and image.get("type") == "image" and isinstance(image.get("image_url"), str)
+            for image in images
+        ):
+            return {"type": "user_message", "message": text, "images": [image["image_url"] for image in images]}
+        case {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+            "type": "AgentMessage", "content": [{"type": "Text", "text": str() as text}],
+        }}}:
+            return {"type": "agent_message", "message": text}
+        case {"type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "Reasoning"}}}:
+            return {"type": "agent_reasoning"}
+        case {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+            "type": "FileChange", "status": "completed", "changes": dict() as changes,
+        }}}:
+            return {"type": "patch_apply_end", "success": True, "changes": changes}
+        case {"type": "event_msg", "payload": {
+            "type": "item_completed", "item": {"type": str() as kind},
+        } as payload} if kind in CODEX_MUTE_ITEMS:
+            return payload
+        case {"type": "event_msg", "payload": {"type": "item_completed"}}:
+            return {"type": None}
+        case {"payload": dict() as payload}:
+            return payload
+        case _:
+            return {}
+
+
+def codex_exchanges(
+    path: Path, repo: Path, session_seen: Callable[[str, bool], None] = lambda session, held: None
+) -> tuple[list[Exchange], set[Holding]]:
     session = path.stem
     holdings: set[Holding] = set()
     cwd: Any = ""
+    attributed = False  # whether the session's cwd was ever the repo's: session_seen hears of it then
     model = ""
     effort = ""
     messages: list[Message] = []
@@ -1283,8 +1501,7 @@ def codex_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holding
     tally = (0, 0)  # repo lines (added, deleted) since the last message
     quizzes: dict[str, Quiz] = {}  # call_id -> questions asked of the human
     for line_number, record in read_jsonl(path):
-        payload = record.get("payload")
-        payload = payload if isinstance(payload, dict) else {}
+        payload = codex_payload(record)
         record_type = record.get("type")
         working = (
             record_type in {"event_msg", "response_item"}
@@ -1296,14 +1513,36 @@ def codex_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holding
             if previous is not None and working:
                 pending += max((stamp - previous).total_seconds(), 0.0)
             previous = stamp
+        known = record_type in CODEX_RECORDS and (record_type != "event_msg" or payload.get("type") in CODEX_EVENTS)
+        if not known and under_dir(cwd, repo, path):
+            # TODO: Says this Codex record, at the file and line named, is of
+            # a type, kind, or form no store had shown, and may hold the
+            # human's words: the transcript format seems to have changed, so
+            # codex_exchanges needs updating.
+            raise UserError(
+                f"Recordum Codex generis vel formae ignotae, fortasse verba hominis tenens: {path}:{line_number}\n"
+                "Forma transcripti Codex mutata videtur; codex_exchanges renovandum est."
+            )
         match record_type:
             case "session_meta":
                 if not codex_include_session(payload, path):
                     return [], set()  # nothing in an excluded thread is held for the repo
+                if not isinstance(payload.get("cwd"), str):
+                    # TODO: Says this Codex session names no working
+                    # directory, by which sourcery tells which project's
+                    # page a session belongs on, so it cannot be attributed:
+                    # the format seems to have changed, so codex_exchanges
+                    # needs updating.
+                    raise UserError(
+                        f"Sessio Codex sine cwd, cuius pagina incerta est: {path}:{line_number}\n"
+                        "Forma transcripti Codex mutata videtur; codex_exchanges renovandum est."
+                    )
                 session = str(payload.get("id") or session)
                 cwd = payload.get("cwd") or cwd
+                attributed = attributed or under_dir(cwd, repo, path)
             case "turn_context":
                 cwd = payload.get("cwd") or cwd
+                attributed = attributed or under_dir(cwd, repo, path)
                 model = payload.get("model") if isinstance(payload.get("model"), str) else model
                 effort = payload.get("effort") if isinstance(payload.get("effort"), str) else effort
             case "response_item" if payload.get("type") == "function_call" and payload.get("name") == CODEX_ASK_TOOL:
@@ -1349,6 +1588,8 @@ def codex_exchanges(path: Path, repo: Path) -> tuple[list[Exchange], set[Holding
                     tally = (0, 0)
             case _:
                 continue
+    if attributed:
+        session_seen(session, holdings != set())
     return paired("Codex", session, messages, path, (pending, *tally)), holdings
 
 
@@ -1373,6 +1614,13 @@ VSCODE_MUTE_KINDS = frozenset({
 # versions and the editor's explain-diagnostic action.
 COPILOT_CANNED = re.compile(r'@\w+ Enable: "|@workspace /explain ')
 
+# Kinds of the variables a request carries, as the stores show them: prompt
+# and instruction files, attached files, auto-added instruction text, tools,
+# the workspace, the implicit editor context (which has no kind), and pasted
+# images, the one kind read. A variable of any other kind is refused: it may
+# be something the human pasted.
+COPILOT_VARIABLE_KINDS = frozenset({"promptFile", "file", "promptText", "tool", "workspace", None, "image"})
+
 
 # Copilot serializes pasted-image bytes as an object with numeric-string
 # keys plus a mimeType. Newer sessions instead carry the whole payload
@@ -1395,6 +1643,21 @@ def copilot_image_uri(variable: Mapping[str, Any], path: Path) -> str:
     return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
 
+def copilot_part_held(part: Any, text: str) -> bool:
+    """Whether a part of a request's message is one whose words its
+    message.text holds, as the stores show them: a text part whose text it
+    contains, or a mention of an agent, a slash subcommand, or a prompt
+    file, which carries no text of its own (its words, an @-mention say,
+    are in message.text)."""
+    match part:
+        case {"kind": "text", "text": str() as words}:
+            return words in text
+        case {"kind": "agent" | "subcommand" | "prompt"}:
+            return True
+        case _:
+            return False
+
+
 def vscode_reference_name(item: Mapping[str, Any]) -> str:
     reference = item.get("inlineReference")
     reference = reference if isinstance(reference, dict) else {}
@@ -1409,7 +1672,14 @@ def vscode_reference_name(item: Mapping[str, Any]) -> str:
 def vscode_reply(response: Any, path: Path) -> tuple[str, str]:
     parts: list[str] = []
     resolutions: list[Any] = []
-    for item in response if isinstance(response, list) else []:
+    if not isinstance(response, list):
+        # TODO: Says a request's response is not a list of items — the
+        # storage format seems to have changed and the script needs updating.
+        raise UserError(
+            f"Responsum VS Code index membrorum non est: {path}\n"
+            "Forma repositi mutata videtur; scriptum renovandum est."
+        )
+    for item in response:
         if not isinstance(item, dict):
             # TODO: Says a response item is not a JSON object.
             raise UserError(f"Membrum responsi obiectum non est: {path}")
@@ -1493,7 +1763,7 @@ def vscode_state(path: Path) -> dict[str, Any]:
 
 
 def vscode_exchanges(
-    path: Path, workspace: tuple[Path, ...], repo: Path
+    path: Path, workspace: tuple[Path, ...], repo: Path, session_seen: Callable[[str, bool], None] = lambda session, held: None
 ) -> tuple[list[Exchange], set[Holding]]:
     inside = tuple(root for root in workspace if under_dir(str(root), repo, path))
     if inside == ():
@@ -1530,6 +1800,27 @@ def vscode_exchanges(
         if not isinstance(prompt, str):
             # TODO: Says a request has no text in message.text.
             raise UserError(f"Rogatio VS Code textum in message.text non habet: {path}")
+        parts = message.get("parts")
+        if not (isinstance(parts, list) and all(copilot_part_held(part, prompt) for part in parts)):
+            # TODO: Says a request's message parts are missing, malformed, of
+            # a kind no store had shown, or hold text that message.text lacks,
+            # so the prompt may have moved out of message.text: the storage
+            # format seems to have changed and the script needs updating.
+            raise UserError(
+                f"Partes rogationis VS Code textum habent quem message.text non habet: {path}\n"
+                "Forma repositi mutata videtur; scriptum renovandum est."
+            )
+        match request.get("hiddenFromTranscript"):
+            case None | False:
+                pass
+            case marker:
+                # TODO: Says a request is marked hidden from the transcript, or
+                # marked so with an unrecognized value; what such a request
+                # shows the human is unknown, so the script needs updating.
+                raise UserError(
+                    f"Signum hiddenFromTranscript ignotum: {marker!r} in {path}\n"
+                    "Forma repositi mutata videtur; scriptum renovandum est."
+                )
         if "timestamp" not in request:
             # TODO: Says a request has no timestamp.
             raise UserError(f"Tempus deest in rogatione: {path}")
@@ -1566,14 +1857,23 @@ def vscode_exchanges(
         # of a wrong one.
         response = request.get("response")
         reply, resolved_model = vscode_reply(response, path)
-        paused = any(
-            isinstance(item, dict)
-            and item.get("kind") in {"confirmation", "elicitation", "elicitationSerialized"}
-            for item in (response if isinstance(response, list) else [])
-        )
-        variable_data = request.get("variableData")
-        variables = variable_data.get("variables") if isinstance(variable_data, dict) else []
-        variables = variables if isinstance(variables, list) else []
+        paused = any(item.get("kind") in {"confirmation", "elicitation", "elicitationSerialized"} for item in response)
+        match request.get("variableData"):
+            case None:
+                variables = []
+            case {"variables": list() as variables} if all(
+                isinstance(variable, dict) and variable.get("kind") in COPILOT_VARIABLE_KINDS for variable in variables
+            ):
+                pass
+            case _:
+                # TODO: Says a request's variables are malformed or include a
+                # kind no store had shown, which may be something the human
+                # pasted: the storage format seems to have changed and the
+                # script needs updating.
+                raise UserError(
+                    f"Variabiles rogationis VS Code in forma ignota: {path}\n"
+                    "Forma repositi mutata videtur; scriptum renovandum est."
+                )
         exchanges.append(
             Exchange(
                 timestamp=timestamp,
@@ -1583,11 +1883,7 @@ def vscode_exchanges(
                 prompt=prompt,
                 reply=reply,
                 source=path,
-                images=tuple(
-                    copilot_image_uri(variable, path)
-                    for variable in variables
-                    if isinstance(variable, dict) and variable.get("kind") == "image"
-                ),
+                images=tuple(copilot_image_uri(variable, path) for variable in variables if variable.get("kind") == "image"),
                 elapsed=(
                     total_elapsed / 1000.0
                     if isinstance(total_elapsed, (int, float)) and not paused
@@ -1595,6 +1891,7 @@ def vscode_exchanges(
                 ),
             )
         )
+    session_seen(session, holdings != set())
     return exchanges, holdings
 
 
@@ -2102,9 +2399,31 @@ def codex_session_dirs(root: Path) -> tuple[Path, ...]:
     return tuple(root / name for name in ("sessions", "archived_sessions"))
 
 
-def collect(repo: Path, roots: Roots) -> tuple[list[Exchange], set[Holding]]:
+def unread_file(path: Path, agent: str, forms: str) -> UserError:
+    """The refusal of a file in an agent's transcript store that is in none
+    of the forms sourcery reads there. Codex began compressing its rollouts,
+    and the compressed ones went unread in silence; a file in another form
+    may be a transcript too."""
+    # TODO: Says this file in the named agent's transcript store is in a
+    # form sourcery does not read (it reads only the forms named there),
+    # though it may hold a transcript: if it does, sourcery needs updating;
+    # if not, move it out of the transcript store; then rerun. Nothing
+    # written.
+    return UserError(
+        f"Fasciculus in reposito transcriptorum {agent} formam habet quam sourcery non legit "
+        f"(legit tantum {forms}):\n{path}\n"
+        "Si transcriptum tenet, sourcery renovandum est; sin minus, eum e reposito "
+        "transcriptorum alio move. Deinde iterum curre.\nNihil scriptum est."
+    )
+
+
+def collect(
+    repo: Path, roots: Roots, seen: Callable[[str, str, Path, bool], None] = lambda provider, session, path, held: None
+) -> tuple[list[Exchange], set[Holding]]:
     """Every exchange the stores hold for the repo, unwoven, with the
-    holdings: every prompt record they still hold, kept or dropped."""
+    holdings: every prompt record they still hold, kept or dropped. `seen`
+    hears of every session the stores hold for the repo, with its agent and
+    file and whether it holds any holding."""
     exchanges: list[Exchange] = []
     holdings: set[Holding] = set()
 
@@ -2144,16 +2463,26 @@ def collect(repo: Path, roots: Roots) -> tuple[list[Exchange], set[Holding]]:
                 "si alter alterius exemplar est, exemplar dele, noli coniungere. Deinde iterum curre."
             )
 
+    # Claude Code keeps its transcripts as .jsonl files among other files
+    # of every kind (workflow artifacts, memory notes); one named past
+    # ".jsonl" (compressed, say) is a transcript sourcery would not read.
     for root in roots.claude:
         if require_dir(root):
-            for path in sorted(p for p in root.rglob("*.jsonl") if p.is_file()):
-                gather(claude_exchanges(path, repo, session_file))
+            for path in sorted(p for p in root.rglob("*") if p.is_file()):
+                if ".jsonl." in path.name:
+                    raise unread_file(path, "Claude Code", ".jsonl")
+                if path.suffix == ".jsonl":
+                    gather(claude_exchanges(
+                        path, repo, session_file, lambda session, held: seen("Claude Code", session, path, held)
+                    ))
     for root in roots.codex:
         if require_dir(root):
             for directory in codex_session_dirs(root):
                 if directory.is_dir():
-                    for path in sorted(p for p in directory.rglob("*.jsonl") if p.is_file()):
-                        gather(codex_exchanges(path, repo))
+                    for path in sorted(p for p in directory.rglob("*") if p.is_file()):
+                        if not path.name.endswith((".jsonl", ".jsonl.zst")):
+                            raise unread_file(path, "Codex", ".jsonl, .jsonl.zst")
+                        gather(codex_exchanges(path, repo, lambda session, held: seen("Codex", session, path, held)))
     for root in roots.vscode:
         storage_root = root / "workspaceStorage"
         if not require_dir(root) or not storage_root.is_dir():
@@ -2163,13 +2492,19 @@ def collect(repo: Path, roots: Roots) -> tuple[list[Exchange], set[Holding]]:
             if not session_dir.is_dir():
                 continue
             workspace = workspace_roots(storage)
-            for path in sorted((*session_dir.glob("*.json"), *session_dir.glob("*.jsonl"))):
-                gather(vscode_exchanges(path, workspace, repo))
+            for path in sorted(session_dir.iterdir()):
+                if not (path.is_file() and path.suffix in {".json", ".jsonl"}):
+                    raise unread_file(path, "Copilot Chat", ".json, .jsonl")
+                gather(vscode_exchanges(
+                    path, workspace, repo, lambda session, held: seen("Copilot Chat", session, path, held)
+                ))
     for root in roots.antigravity:
         conversations = root / "conversations"
         if not require_dir(root) or not conversations.is_dir():
             continue
-        for path in sorted(p for p in conversations.glob("*.pb") if p.is_file()):
+        for path in sorted(conversations.iterdir()):
+            if not (path.is_file() and path.suffix == ".pb"):
+                raise unread_file(path, "Antigravity", ".pb")
             gather(antigravity_exchanges(path, repo, antigravity_key()))
     return exchanges, holdings
 
@@ -3450,6 +3785,41 @@ def check_ledgers(
 # holds the prompt's record twice and its copies read differently (the
 # first with no reply, say). Exactly identical rows are no two readings:
 # weave collapses them before this check.
+def check_sessions(
+    rows: Iterable[Exchange], sessions: Mapping[tuple[str, str], tuple[Path, bool]], ledger: Path
+) -> None:
+    """Refuse when a session the stores still hold for the repo yields no
+    prompt at all, though the runner's ledger holds prompts read from it.
+    `sessions` maps each such session, by agent and session id, to its file
+    and whether it holds any holding. The session kept its place, so its
+    prompts did not leave with a pruned file: most likely the store began to
+    record them in a form sourcery does not read, as when Codex rewrote its
+    rollouts and their prompts went unread in silence for weeks. A session
+    still yielding some of its prompts (a store restored from an older
+    backup) passes, its other prompts kept from the ledger."""
+    emptied = [row for row in rows if not sessions.get((row.provider, row.session), (ledger, True))[1]]
+    if emptied:
+        first = min(emptied, key=chronology)
+        path, _ = sessions[(first.provider, first.session)]
+        count = sum((row.provider, row.session) == (first.provider, first.session) for row in emptied)
+        # TODO: Says this session of the named agent is still in the
+        # transcript store, in the file named, but yields no prompt any more,
+        # though the human's ledger (named) holds the given number of prompts
+        # read from it, the first at the time named: the transcript format
+        # seems to have changed, so sourcery needs updating; if the prompts
+        # were deleted on purpose in the agent's own interface, their lines
+        # are to be deleted from the ledger instead; then rerun. Nothing
+        # written.
+        raise UserError(
+            f"Sessio {first.provider} {first.session} in reposito transcriptorum adhuc est ({path}), "
+            f"sed nullam iam rogationem reddit, quamquam tabula {ledger} {count} rogationes ex ea lectas "
+            f"tenet, primam {first.timestamp.isoformat()}.\n"
+            "Forma transcripti mutata videtur; sourcery renovandum est. Si rogationes in ipsa machina "
+            "agentis consulto deletae sunt, lineas earum e tabula dele. Deinde iterum curre.\n"
+            "Nihil scriptum est."
+        )
+
+
 def prompt_key(row: Exchange) -> tuple[str, dt.datetime, str, str]:
     """What every reading of one prompt shares: its agent, time, session,
     and words."""
@@ -3537,7 +3907,14 @@ def run(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None)
         project = project_name(repo, remote)
         roots = discover_roots(environment)
         login = github_login()
-        fresh, holdings = collect(repo, roots)
+        # Each session the stores hold for the repo, by agent and id: its
+        # file, and whether it holds any holding (see check_sessions).
+        sessions: dict[tuple[str, str], tuple[Path, bool]] = {}
+
+        def seen(provider: str, session: str, path: Path, held: bool) -> None:
+            sessions[(provider, session)] = (path, sessions.get((provider, session), (path, False))[1] or held)
+
+        fresh, holdings = collect(repo, roots, seen)
         credits = page_credits(options.output)
         ledgers, citations = read_ledgers(options.output, repo, remote)
         check_ledgers(options.output, login, ledgers, credits, holdings)
@@ -3549,6 +3926,7 @@ def run(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None)
         # the store's copy. The runner's ledger is absent until their first
         # run: then it holds nothing.
         old = ledgers.get(login, [])
+        check_sessions(old, sessions, ledger_path(options.output, login))
         kept = [exchange for exchange in old if holding(exchange) not in holdings]
         mine = weave(fresh + kept)
         ledgers = dict(sorted({**ledgers, login: mine}.items()))
