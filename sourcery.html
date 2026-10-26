@@ -2860,8 +2860,12 @@ Adde hoc genus consulto in VSCODE_MUTE_KINDS vel vscode_reply.
 <header><p class="speaker">dreev</p></header>
 <pre class="prompt">thanks. everything good now? no regressions or open items?</pre>
 <details>
-<summary><a class="anchor" href="#p151"><time datetime="2026-10-26T04:53:45.119000+00:00">04:53</time></a> <span class="chip"></span> <span class="agent">Claude Code</span></summary>
-<div class="reply machine empty"><p>Response still generating when this transcript was captured</p></div>
+<summary><a class="anchor" href="#p151"><time datetime="2026-10-26T04:53:45.119000+00:00">04:53</time></a> <span class="chip"></span> <span class="agent">Claude Code</span> <span class="model">claude-opus-5-5</span> <span class="effort">(max)</span> <span class="elapsed">thought for 2m25s · 2m50s wall-clock time</span></summary>
+<div class="reply machine"><p>Checking rather than asserting. The strongest regression test available is an A/B run: the last committed version (HEAD, on 3.13) and the current code (on 3.14), each run on identical scratch copies of all 22 lab pages, back to back. Differences should be only the intended Codex readings, plus anything live sessions wrote in between. It also times both versions:</p>
+<p>The A/B run takes 15–20 minutes. Meanwhile, the open items that don&#x27;t depend on it, starting with what is still uncommitted and where recovered data exists only in untracked files:</p>
+<p>tauction and powersums are clean, so someone has committed them since this session&#x27;s writes. Confirming what those commits hold:</p>
+<p>The fixed command runs: it resolves <code>python3.14</code> through the shebang and prints <code>6.2.0</code>. The A/B comparison is still running, and it&#x27;s what will settle whether the code changes regressed anything, so the full answer follows when it finishes. Found so far, each verified against the files:</p>
+<ul><li><strong>Regression, fixed:</strong> molecall&#x27;s <code>npm run sourcery</code> called <code>python3</code>.</li><li><strong>Data only in untracked files:</strong> road&#x27;s and mementovori&#x27;s ledgers (the recovered prompts) and reciplier&#x27;s ledger and page (the 150 Codex prompts) exist nowhere but the working tree. tauction and powersums are committed.</li></ul></div>
 </details>
 </article>
 </main>
