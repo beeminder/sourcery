@@ -588,6 +588,27 @@ CLAUDE_MUTE_ATTACHMENTS = frozenset({
 # model fallback notices.
 CLAUDE_MUTE_BLOCKS = frozenset({"thinking", "tool_use", "fallback"})
 
+# Built-in tools whose results the stores show, every one read or knowingly
+# passed over: AskUserQuestion's answers are read, a rejection's reason is
+# read whatever the tool, and the rest is plumbing, as is every MCP tool's
+# result (the server's output). SendUserMessage and Brief, the tool the
+# reply is read from, are known by name. A result of any other tool is
+# refused: a new tool might ask the human for words.
+CLAUDE_TOOLS = frozenset({
+    "Bash", "Read", "Edit", "Write", "Workflow", "TodoWrite", "WebFetch", "ToolSearch", "WebSearch",
+    "AskUserQuestion", "TaskOutput", "Artifact", "TaskStop", "Skill", "Agent", "Monitor", "SendUserFile",
+    "SendMessage", "ExitPlanMode", "ScheduleWakeup", "ListAgents", "EnterPlanMode", "PushNotification",
+    "SendUserMessage", "Brief",
+})
+
+# What Claude Code ≥2.1.285 records as a rejected tool call's toolUseResult;
+# the rejection's text, any typed reason with it, is the tool result itself.
+CLAUDE_REJECTED = "User rejected tool use"
+
+# A pasted text's wrapper in a stored prompt; Claude Code's last-prompt echo
+# of the prompt leaves it out (see claude_echo_read).
+CLAUDE_PASTE_TAG = re.compile(r"</?pasted_content[^>]*>")
+
 # Newer Claude Code stamps user records with an origin kind. Machine origins
 # (background-task notifications, and "peer": another agent's message, e.g.
 # a background agent handing its result back) are never typing; an origin kind
@@ -670,6 +691,8 @@ def claude_recovered(record: Mapping[str, Any], path: Path, line_number: int) ->
     match result:
         case str() if CLAUDE_DENIAL_FAMILY in result:
             return claude_denial_text(result, path, line_number), ()
+        case str() if result == CLAUDE_REJECTED:
+            return claude_denial_text(claude_result_text(record, path, line_number), path, line_number), ()
         case {"questions": list() as questions, "answers": dict() as answers}:
             ballots: list[Ballot] = []
             typed: list[str] = []
@@ -714,13 +737,71 @@ def claude_recovered(record: Mapping[str, Any], path: Path, line_number: int) ->
             return "", ()
 
 
+def claude_result_text(record: Mapping[str, Any], path: Path, line_number: int) -> str:
+    """The text of the one tool result a user record carries: text, or a
+    list of text pieces."""
+    match record:
+        case {"message": {"content": [{"type": "tool_result", "content": str() as text}]}}:
+            return text
+        case {"message": {"content": [{"type": "tool_result", "content": list() as pieces}]}} if all(
+            isinstance(piece, dict) and piece.get("type") == "text" and isinstance(piece.get("text"), str)
+            for piece in pieces
+        ):
+            return "".join(piece["text"] for piece in pieces)
+        case _:
+            # TODO: Says a rejected tool call's result is in an unrecognized
+            # form (not one tool result holding text) — the format seems to
+            # have changed and claude_recovered needs updating.
+            raise UserError(
+                f"Fructus instrumenti recusati in forma ignota: {path}:{line_number}\n"
+                "Forma mutata videtur; claude_recovered renovandum est."
+            )
+
+
 def claude_denial_key(record: Mapping[str, Any], text: str) -> tuple[Any, str] | None:
     """Identify adjacent records produced by one denied parallel tool batch."""
     match record.get("toolUseResult"):
-        case str() as result if CLAUDE_DENIAL_FAMILY in result:
+        case str() as result if CLAUDE_DENIAL_FAMILY in result or result == CLAUDE_REJECTED:
             return (record.get("promptId"), text)
         case _:
             return None
+
+
+def claude_flagged_human(
+    record: Mapping[str, Any], attachment: Mapping[str, Any] | None, path: Path, line_number: int
+) -> bool:
+    """Whether a record flagged as machine traffic states a human origin,
+    or, being no queued command, holds words or clicks the human gave."""
+    if attachment is not None:
+        return claude_origin_kind(attachment) in CLAUDE_HUMAN_ORIGINS
+    typed, ballots = claude_recovered(record, path, line_number)
+    return claude_origin_kind(record) in CLAUDE_HUMAN_ORIGINS or typed != "" or any(b.picked for b in ballots)
+
+
+def claude_tool_known(name: Any) -> bool:
+    """Whether a tool's results are ones the stores show (see CLAUDE_TOOLS)."""
+    return isinstance(name, str) and (name in CLAUDE_TOOLS or name.startswith("mcp__"))
+
+
+def claude_squash(text: str) -> str:
+    """text without paste wrappers or whitespace, as a last-prompt echo is
+    compared with it."""
+    return re.sub(r"\s+", "", CLAUDE_PASTE_TAG.sub("", text))
+
+
+def claude_echo_read(echo: Any, read: set[str]) -> bool:
+    """Whether a last-prompt echo is of a prompt read (each in `read` as
+    claude_squash gives it). The echo is the prompt with its newlines as
+    spaces and any paste unwrapped, cut at 200 characters with an ellipsis,
+    so it is compared without whitespace or paste wrappers, a cut one as the
+    start of a prompt read."""
+    match echo:
+        case str() if echo.endswith("…"):
+            return any(prompt.startswith(claude_squash(echo[:-1])) for prompt in read)
+        case str():
+            return claude_squash(echo) in read
+        case _:
+            return False
 
 
 def claude_delivery_key(attachment: Mapping[str, Any] | None, path: Path, line_number: int) -> str | int:
@@ -932,6 +1013,13 @@ def claude_exchanges(
     # and whether one of them names the repo as its own cwd.
     unseen: list[int] = []
     unseen_inside = False
+    # Every tool call's tool, by call id, so each tool result is known by
+    # its tool (see CLAUDE_TOOLS); the file's last-prompt echoes, by line;
+    # and the prompts read, as claude_squash gives them, which every echo
+    # must be of (see claude_echo_read).
+    tools: dict[Any, Any] = {}
+    echoes: list[tuple[int, Any]] = []
+    read: set[str] = set()
     # Agent working time, distinguished from waiting-for-human time by where
     # a timestamp gap ends: a gap ending at an assistant record is generation;
     # a gap ending at a tool_result hides both tool runtime and permission
@@ -988,23 +1076,28 @@ def claude_exchanges(
             attachment = attachment if isinstance(attachment, dict) else {}
             if attachment.get("type") != "queued_command":
                 continue
+        elif role == "last-prompt":
+            echoes.append((line_number, record.get("lastPrompt")))
+            continue
         elif role not in {"user", "assistant"}:
             continue
         # Subagent traffic, meta records, compaction summaries, and
         # transcript-only notes are never the human's words, whatever form
         # they take (a coordinating agent's message queued to its subagent
-        # states no commandMode); one stating a human origin is refused, the
-        # flag and the origin disagreeing about who wrote it.
+        # states no commandMode); one stating a human origin, or holding
+        # words or clicks the human gave (a reason typed for rejecting a
+        # subagent's tool call, an answer to a subagent's question), is
+        # refused: which page and exchange should show them is undecided.
         if any(record.get(flag) for flag in CLAUDE_SKIP_FLAGS):
-            if claude_origin_kind(attachment if attachment is not None else record) in CLAUDE_HUMAN_ORIGINS:
+            if claude_flagged_human(record, attachment, path, line_number):
                 # TODO: Says this record is flagged as machine traffic
                 # (subagent traffic, a meta record, a compaction summary, or a
-                # transcript-only note) yet states a human origin, so who
-                # wrote it is undecided: the format seems to have changed, so
-                # claude_exchanges needs updating.
+                # transcript-only note) yet states a human origin or holds
+                # words or clicks the human gave, so where it belongs is
+                # undecided: claude_exchanges needs updating.
                 raise UserError(
-                    f"Recordum ut machinae signatum originem humanam fert: {path}:{line_number}\n"
-                    "Quis id scripserit incertum est; claude_exchanges renovandum est."
+                    f"Recordum ut machinae signatum verba vel originem hominis fert: {path}:{line_number}\n"
+                    "Ubi ponendum sit incertum est; claude_exchanges renovandum est."
                 )
             continue
         if attachment is not None:
@@ -1142,6 +1235,21 @@ def claude_exchanges(
             if text == "" and attachment is None:
                 text, ballots = claude_recovered(record, path, line_number)
                 denial_key = claude_denial_key(record, text)
+            if not all(
+                claude_tool_known(tools.get(item["tool_use_id"]))
+                for item in (content if attachment is None and isinstance(content, list) else [])
+                if item["type"] == "tool_result"
+            ):
+                # TODO: Says a tool result read for the project is of a tool
+                # no store had shown, or answers a call the file does not
+                # hold (no store shows one), so its tool is unknown, and a new
+                # tool might ask the human for words: claude_exchanges needs
+                # updating.
+                raise UserError(
+                    f"Fructus instrumenti ignoti, fortasse verba hominis tenens: {path}:{line_number}\n"
+                    "Instrumentum novum aut vocatio absens; claude_exchanges renovandum est."
+                )
+            read.add(claude_squash(text))
             images = claude_images(content, path, line_number)
             # Compare and record every delivery before the checks below
             # decide whether it is a prompt, so a redelivery is refused or
@@ -1181,6 +1289,9 @@ def claude_exchanges(
                            active=pending.pop(session, 0.0), added=added, deleted=deleted)
         else:
             text = "\n\n".join(claude_reply_blocks(message.get("content"), path, line_number))
+            tools.update(
+                (block.get("id"), block.get("name")) for block in message["content"] if block.get("type") == "tool_use"
+            )
             if text == "":
                 continue
             effort = record.get("effort") if isinstance(record.get("effort"), str) else ""
@@ -1202,6 +1313,20 @@ def claude_exchanges(
         raise UserError(
             f"Recordum Claude generis ignoti, fortasse verba hominis tenens: {path}:{unseen[0]}\n"
             "Forma transcripti Claude mutata videtur; claude_exchanges renovandum est."
+        )
+    # Claude Code echoes each typed prompt in a last-prompt record; an echo
+    # of no prompt read means the human typed words sourcery did not read,
+    # even in a session it never read before.
+    unechoed = [line for line, echo in echoes if not claude_echo_read(echo, read)]
+    if unechoed and sessions_read:
+        # TODO: Says this echo of a typed prompt, in a Claude transcript
+        # holding records read for the project, is of no prompt sourcery read
+        # there: the human typed words sourcery does not read, so the format
+        # seems to have changed and claude_exchanges needs updating.
+        raise UserError(
+            f"Imago rogationis nullam rogationem lectam reddit: {path}:{unechoed[0]}\n"
+            "Homo verba scripsit quae sourcery non legit; forma transcripti Claude mutata videtur, "
+            "claude_exchanges renovandum est."
         )
     for session in sessions_read:
         session_seen(session, session in sessions_held)
@@ -1447,6 +1572,52 @@ CODEX_EVENTS = frozenset({
     "token_count", "task_started", "task_complete", "thread_settings_applied", "turn_aborted",
     "sub_agent_activity", "web_search_end", "context_compacted",
 })
+# The response_item types the stores show (the model's input and output),
+# and the content pieces a message of each role holds.
+CODEX_RESPONSE_ITEMS = frozenset({
+    "message", "reasoning", "function_call", "function_call_output", "custom_tool_call",
+    "custom_tool_call_output", "agent_message", "web_search_call", "compaction", "tool_search_call",
+    "tool_search_output",
+})
+CODEX_MESSAGE_PIECES = {
+    "user": frozenset({"input_text", "input_image"}),
+    "developer": frozenset({"input_text"}),
+    "assistant": frozenset({"output_text"}),
+}
+# The notes Codex injects in the user role, by how each begins. Every other
+# user-role message the model receives is the model's copy of a prompt the
+# session records (see codex_heard).
+CODEX_INJECTIONS = (
+    "<environment_context>", "# AGENTS.md instructions", "<recommended_plugins>",
+    "<external_codex_apps_open_page>", "<turn_aborted>",
+)
+
+
+def codex_known(record_type: Any, payload: Mapping[str, Any]) -> bool:
+    """Whether a record is of a type, kind, and form the stores show (see
+    CODEX_RECORDS, CODEX_EVENTS, CODEX_RESPONSE_ITEMS)."""
+    match record_type, payload:
+        case "event_msg", _:
+            return payload.get("type") in CODEX_EVENTS
+        case "response_item", {"type": "message", "role": str() as role, "content": list() as pieces}:
+            return role in CODEX_MESSAGE_PIECES and all(
+                isinstance(piece, dict) and piece.get("type") in CODEX_MESSAGE_PIECES[role] for piece in pieces
+            )
+        case "response_item", {"type": "message"}:
+            return False
+        case "response_item", _:
+            return payload.get("type") in CODEX_RESPONSE_ITEMS
+        case _:
+            return record_type in CODEX_RECORDS
+
+
+def codex_heard(said: str, prompted: Sequence[str]) -> bool:
+    """Whether a user-role message the model received is accounted for: a
+    note Codex injects, or the model's copy of a prompt the session records
+    (the same words, the one holding the other)."""
+    return said.startswith(CODEX_INJECTIONS) or (
+        said != "" and any(said == prompt or prompt in said or said in prompt for prompt in prompted if prompt != "")
+    )
 
 
 def codex_payload(record: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1500,6 +1671,11 @@ def codex_exchanges(
     pending = 0.0
     tally = (0, 0)  # repo lines (added, deleted) since the last message
     quizzes: dict[str, Quiz] = {}  # call_id -> questions asked of the human
+    # The words of every prompt event, and of every user-role message the
+    # model received, by line: each of the latter must be accounted for by
+    # the former, or be a note Codex injects (see codex_heard).
+    prompted: list[str] = []
+    heard: list[tuple[int, str]] = []
     for line_number, record in read_jsonl(path):
         payload = codex_payload(record)
         record_type = record.get("type")
@@ -1513,8 +1689,7 @@ def codex_exchanges(
             if previous is not None and working:
                 pending += max((stamp - previous).total_seconds(), 0.0)
             previous = stamp
-        known = record_type in CODEX_RECORDS and (record_type != "event_msg" or payload.get("type") in CODEX_EVENTS)
-        if not known and under_dir(cwd, repo, path):
+        if not codex_known(record_type, payload) and under_dir(cwd, repo, path):
             # TODO: Says this Codex record, at the file and line named, is of
             # a type, kind, or form no store had shown, and may hold the
             # human's words: the transcript format seems to have changed, so
@@ -1547,6 +1722,11 @@ def codex_exchanges(
                 effort = payload.get("effort") if isinstance(payload.get("effort"), str) else effort
             case "response_item" if payload.get("type") == "function_call" and payload.get("name") == CODEX_ASK_TOOL:
                 quizzes[payload.get("call_id")] = codex_quiz(payload.get("arguments"), path, line_number)
+            case "response_item" if payload.get("type") == "message" and payload.get("role") == "user":
+                heard.append((line_number, "".join(
+                    piece.get("text", "") for piece in payload.get("content") or []
+                    if isinstance(piece, dict) and piece.get("type") == "input_text"
+                )))
             case "event_msg":
                 kind = payload.get("type")
                 # A patch that failed to apply changed nothing, so only a
@@ -1558,6 +1738,8 @@ def codex_exchanges(
                             tally = (tally[0] + grew[0], tally[1] + grew[1])
                 if kind not in {"user_message", "agent_message"}:
                     continue
+                if kind == "user_message" and isinstance(payload.get("message"), str):
+                    prompted.append(payload["message"])
                 if not under_dir(cwd, repo, path):
                     continue
                 text = payload.get("message")
@@ -1589,6 +1771,18 @@ def codex_exchanges(
             case _:
                 continue
     if attributed:
+        unheard = [line for line, said in heard if not codex_heard(said, prompted)]
+        if unheard:
+            # TODO: Says the model in this Codex session, read for the
+            # project, received a user-role message (at the file and line
+            # named) that no prompt the session records accounts for and that
+            # is none of the notes Codex injects, so it may be the human's
+            # words in a form sourcery does not read: codex_exchanges needs
+            # updating.
+            raise UserError(
+                f"Nuntius quem exemplar ut ab homine accepit nullam rogationem in sessione habet: {path}:{unheard[0]}\n"
+                "Fortasse verba hominis in forma quam sourcery non legit; codex_exchanges renovandum est."
+            )
         session_seen(session, holdings != set())
     return paired("Codex", session, messages, path, (pending, *tally)), holdings
 
@@ -1797,7 +1991,8 @@ def vscode_exchanges(
             raise UserError(f"Elementum requests obiectum non est: {path}")
         message = request.get("message")
         prompt = message.get("text") if isinstance(message, dict) else None
-        if not isinstance(prompt, str):
+        # No store shows a request without words; one would mean they moved.
+        if not isinstance(prompt, str) or prompt == "":
             # TODO: Says a request has no text in message.text.
             raise UserError(f"Rogatio VS Code textum in message.text non habet: {path}")
         parts = message.get("parts")
@@ -2399,6 +2594,11 @@ def codex_session_dirs(root: Path) -> tuple[Path, ...]:
     return tuple(root / name for name in ("sessions", "archived_sessions"))
 
 
+# Files a store's folders may hold that are no transcript: the metadata
+# Finder leaves in any folder it shows.
+STORE_LITTER = frozenset({".DS_Store"})
+
+
 def unread_file(path: Path, agent: str, forms: str) -> UserError:
     """The refusal of a file in an agent's transcript store that is in none
     of the forms sourcery reads there. Codex began compressing its rollouts,
@@ -2479,7 +2679,7 @@ def collect(
         if require_dir(root):
             for directory in codex_session_dirs(root):
                 if directory.is_dir():
-                    for path in sorted(p for p in directory.rglob("*") if p.is_file()):
+                    for path in sorted(p for p in directory.rglob("*") if p.is_file() and p.name not in STORE_LITTER):
                         if not path.name.endswith((".jsonl", ".jsonl.zst")):
                             raise unread_file(path, "Codex", ".jsonl, .jsonl.zst")
                         gather(codex_exchanges(path, repo, lambda session, held: seen("Codex", session, path, held)))
@@ -2492,7 +2692,7 @@ def collect(
             if not session_dir.is_dir():
                 continue
             workspace = workspace_roots(storage)
-            for path in sorted(session_dir.iterdir()):
+            for path in sorted(p for p in session_dir.iterdir() if p.name not in STORE_LITTER):
                 if not (path.is_file() and path.suffix in {".json", ".jsonl"}):
                     raise unread_file(path, "Copilot Chat", ".json, .jsonl")
                 gather(vscode_exchanges(
@@ -2502,7 +2702,7 @@ def collect(
         conversations = root / "conversations"
         if not require_dir(root) or not conversations.is_dir():
             continue
-        for path in sorted(conversations.iterdir()):
+        for path in sorted(p for p in conversations.iterdir() if p.name not in STORE_LITTER):
             if not (path.is_file() and path.suffix == ".pb"):
                 raise unread_file(path, "Antigravity", ".pb")
             gather(antigravity_exchanges(path, repo, antigravity_key()))

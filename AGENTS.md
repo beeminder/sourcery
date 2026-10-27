@@ -48,5 +48,6 @@ Codex rewrote and compressed its transcript store in 2026-09/10 and sourcery rea
 - Every file in a transcript store, every record type, event kind, item type, content piece, part, and variable kind is either in an explicit allowlist or refused, citing file and line, wherever it may belong to the repo being exported. Each allowlist is pinned by a qual named like `..._the_stores_show_pass`.
 - A new shape gets added only after surveying the real stores and saying what it holds. Never widen a pattern, add a default arm, or default a missing field to make a refusal go away.
 - `check_sessions` refuses a run when a session the store still holds stops yielding every prompt the ledger read from it: that is how a silent format change shows itself even past the allowlists.
+- Where a store records each typed prompt twice, the two must agree, so a prompt sourcery fails to read is caught even in a session it never saw: every Claude `last-prompt` echo must match a prompt read (`claude_echo_read`), and every user-role message a Codex model received must be a prompt event's copy or a known injection (`codex_heard`).
 - Before claiming a reader change is safe, dry-run every lab page on scratch copies; the real stores contradict surveys (Copilot mention parts carry no text).
 - A refusal is never put to the human as a question. It is the default.

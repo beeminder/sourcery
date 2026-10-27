@@ -217,6 +217,13 @@ def ca(blocks, ts=T1, cwd=None, session="cs1", mid="m1", model="claude-opus-4-8"
     return record
 
 
+def ct(name, tid, ts, cwd, session="cs1"):
+    """An assistant record holding nothing but the tool call `tid` names,
+    written before that call's result, as Claude Code writes every call.
+    Stamped `ts`, the time of the record before it, so no gap moves."""
+    return ca([{"type": "tool_use", "id": tid, "name": name, "input": {}}], ts=ts, cwd=cwd, session=session, mid=f"m-{tid}")
+
+
 def send_user_message(message, tid="tu1"):
     """A SendUserMessage tool call: how an agent in a Claude-desktop cloud
     workspace can speak to the human without writing a text block."""
@@ -277,6 +284,7 @@ class ClaudeQuals(Fixture):
     def test_tool_results_and_flagged_records_skipped(self):
         cwd = str(self.repo)
         records = [
+            ct("Bash", "t", T0, cwd),
             cu([{"type": "tool_result", "tool_use_id": "t", "content": "out"}], cwd=cwd),
             cu("sidechain", cwd=cwd, isSidechain=True),
             cu("meta", cwd=cwd, isMeta=True),
@@ -698,6 +706,8 @@ class ClaudeQuals(Fixture):
         }
         records = [
             cu("build it", ts=T0, cwd=cwd),
+            ct("Edit", "t1", T0, cwd),
+            ct("Write", "t2", T0, cwd),
             cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
                ts=T1, cwd=cwd, toolUseResult=patch),
             cu([{"type": "tool_result", "tool_use_id": "t2", "content": "ok"}],
@@ -728,6 +738,8 @@ class ClaudeQuals(Fixture):
         )
         records = [
             cu("go", ts=T0, cwd=cwd),
+            ct("Edit", "t1", T0, cwd),
+            ct("Edit", "t2", T0, cwd),
             cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
                ts=T1, cwd=cwd, toolUseResult=elsewhere),
             cu([{"type": "tool_result", "tool_use_id": "t2", "content": denial}],
@@ -751,6 +763,7 @@ class ClaudeQuals(Fixture):
         }
         records = [
             cu("go", ts=T0, cwd=cwd),
+            ct("Edit", "t1", T0, cwd),
             cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
                ts=T1, cwd=cwd, toolUseResult=patch),
             ca([{"type": "text", "text": "done"}], ts=T2, cwd=cwd),
@@ -788,6 +801,8 @@ class ClaudeQuals(Fixture):
         }
         records = [
             cu("start the work", ts=T0, cwd=cwd),
+            ct("Edit", "t1", T0, cwd),
+            ct("Write", "t2", T0, cwd),
             cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
                ts=T1, cwd=cwd, toolUseResult=patch),
             queued,  # arrives before the agent has said anything
@@ -990,10 +1005,12 @@ class ClaudeQuals(Fixture):
             ca([{"type": "text", "text": "Noted the first."}], ts="2026-03-01T10:07:00.000Z", cwd=cwd, mid="m2"),
             cq("second aside", second, cwd, source_uuid="src-2", delivery_id="dlv-2"),
             ca([{"type": "text", "text": "Noted the second."}], ts="2026-03-01T10:09:00.000Z", cwd=cwd, mid="m3"),
+            ct("Edit", "t1", "2026-03-01T10:09:00.000Z", cwd),
             cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
                ts=T2, cwd=cwd, toolUseResult=before),
             cq("first aside", again, cwd, source_uuid="src-1", delivery_id="dlv-3"),
             cq("second aside", again2, cwd, source_uuid="src-2", delivery_id="dlv-4"),
+            ct("Edit", "t2", again2, cwd),
             cu([{"type": "tool_result", "tool_use_id": "t2", "content": "ok"}],
                ts="2026-03-01T10:31:00.000Z", cwd=cwd, toolUseResult=after),
             ca([{"type": "text", "text": "Did both."}], ts="2026-03-01T10:32:00.000Z", cwd=cwd, mid="m4"),
@@ -1725,6 +1742,7 @@ class ClaudeQuals(Fixture):
         )
         records = [
             cu("start the work", ts=T0, cwd=cwd),
+            ct("Edit", "t1", T0, cwd),
             cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
                ts=T1, cwd=cwd, toolUseResult=patch),
             cu(wrapped, ts=T2, cwd=cwd, promptId="pq1"),
@@ -1770,6 +1788,7 @@ class ClaudeQuals(Fixture):
             "The user provided the following reason for the rejection:  hold tight, i'm catching you up"
         )
         records = [
+            ct("Bash", "t1", T0, cwd),
             cu([{"type": "tool_result", "tool_use_id": "t1", "content": denial[7:]}], cwd=cwd, toolUseResult=denial),
             ca([{"type": "text", "text": "Understood."}], cwd=cwd),
         ]
@@ -1794,6 +1813,8 @@ class ClaudeQuals(Fixture):
                 toolUseResult=denial,
             )
         records = [
+            ct("Bash", "t1", T0, cwd),
+            ct("Bash", "t2", T0, cwd),
             denial_record(T0, "t1"),
             denial_record(T1, "t2"),
             ca([{"type": "text", "text": "Standing by."}], ts=T2, cwd=cwd),
@@ -1810,6 +1831,8 @@ class ClaudeQuals(Fixture):
             "The user provided the following reason for the rejection:  hold tight"
         )
         records = [
+            ct("Bash", "t1", T0, cwd),
+            ct("Bash", "t2", T0, cwd),
             cu([{"type": "tool_result", "tool_use_id": "t1", "content": denial[7:]}],
                ts=T0, cwd=cwd, toolUseResult=denial, promptId="act-1"),
             cu([{"type": "tool_result", "tool_use_id": "t2", "content": denial[7:]}],
@@ -1834,7 +1857,7 @@ class ClaudeQuals(Fixture):
             "Error: Permission for this tool use was denied. "
             f'{family}To tell you how to proceed, the user said: "hold tight"',
         ]
-        records = [
+        records = [ct("Bash", "t1", T0, cwd), ct("Bash", "t2", T0, cwd)] + [
             cu([{"type": "tool_result", "tool_use_id": f"t{i}", "content": denial[7:]}],
                ts=ts, cwd=cwd, toolUseResult=denial, promptId="one-human-act")
             for i, (ts, denial) in enumerate(zip((T0, T1), denials), start=1)
@@ -1851,6 +1874,7 @@ class ClaudeQuals(Fixture):
             "The user provided the following reason for the rejection:  hold tight"
         )
         records = [
+            ct("Edit", "t1", T0, cwd),
             cu([{"type": "tool_result", "tool_use_id": "t1", "content": denial[7:]}],
                ts=T0, cwd=cwd, toolUseResult=denial, promptId="reused-prompt"),
             ca([{"type": "tool_use", "id": "t2", "name": "Edit", "input": {}}],
@@ -1873,6 +1897,9 @@ class ClaudeQuals(Fixture):
         )
         lookalike = "grep output: The user provided the following reason for the rejection: fake"
         records = [
+            ct("Bash", "t1", T0, cwd),
+            ct("Bash", "t2", T0, cwd),
+            ct("Bash", "t3", T0, cwd),
             cu(
                 [{"type": "tool_result", "tool_use_id": "t1", "content": "denied"}],
                 cwd=cwd,
@@ -1907,6 +1934,8 @@ class ClaudeQuals(Fixture):
             "the new_string was NOT written to the file). "
         )
         records = [
+            ct("ExitPlanMode", "t1", T0, cwd),
+            ct("Bash", "t2", T0, cwd),
             cu(
                 [{"type": "tool_result", "tool_use_id": "t1", "content": "x"}],
                 cwd=cwd,
@@ -1965,6 +1994,7 @@ class ClaudeQuals(Fixture):
             "answers": {"Q1": "Yes (Recommended)", "Q2": "my own typed answer"},
         }
         records = [
+            ct("AskUserQuestion", "t1", T0, cwd),
             cu(
                 [{"type": "tool_result", "tool_use_id": "t1", "content": "Your questions have been answered..."}],
                 cwd=cwd,
@@ -1990,6 +2020,7 @@ class ClaudeQuals(Fixture):
             "answers": {"Q1": "Delete it"},
         }
         records = [
+            ct("AskUserQuestion", "t1", T0, cwd),
             cu(
                 [{"type": "tool_result", "tool_use_id": "t1", "content": "Your questions have been answered..."}],
                 cwd=cwd,
@@ -2014,6 +2045,7 @@ class ClaudeQuals(Fixture):
             "answers": {"Q1": "Tutorial, Sandbox"},
         }
         records = [
+            ct("AskUserQuestion", "t1", T0, cwd),
             cu(
                 [{"type": "tool_result", "tool_use_id": "t1", "content": "answered"}],
                 cwd=cwd,
@@ -2089,11 +2121,11 @@ class ClaudeQuals(Fixture):
         cwd = str(self.repo)
         quiet = [
             {"type": kind, "sessionId": "cs1"}
-            for kind in ["system", "queue-operation", "ai-title", "last-prompt", "api-request", "api-request-blob",
+            for kind in ["system", "queue-operation", "ai-title", "api-request", "api-request-blob",
                          "api-request-shape", "atis-latch", "file-history-snapshot", "file-history-delta",
                          "bridge-session", "mode", "frame-link", "artifact-autoreact-ledger",
                          "artifact-comment-monitor", "cost-state"]
-        ]
+        ] + [{"type": "last-prompt", "lastPrompt": "go", "leafUuid": "u1", "sessionId": "cs1"}]
         got = ace.claude_exchanges(
             self.path([*quiet, cu("go", cwd=cwd), ca([{"type": "text", "text": "done"}], cwd=cwd)]), self.repo
         )[0]
@@ -2226,6 +2258,99 @@ class ClaudeQuals(Fixture):
         }.items():
             with self.subTest(name):
                 self.refused_at([record], 1, name)
+
+    # The text of a rejected tool call's result as Claude Code ≥2.1.285
+    # records it, the reason (if typed) between the rejection sentences.
+    REJECTED = (
+        "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file "
+        "edit, the new_string was NOT written to the file). {tail}"
+    )
+    UNTYPED_TAIL = (
+        "STOP what you are doing and wait for the user to tell you how to proceed.\n\nNote: The user's next "
+        "message may contain a correction or preference. Pay close attention — if they explain what went wrong or "
+        "how they'd prefer you to work, consider saving that to memory for future sessions."
+    )
+
+    def rejection(self, tail, **extra):
+        """A rejected tool call's result in the current form: the
+        rejection's text in the tool result, toolUseResult a fixed note."""
+        return cu([{"type": "tool_result", "tool_use_id": "t1", "is_error": True,
+                    "content": self.REJECTED.format(tail=tail)}],
+                  cwd=str(self.repo), toolUseResult="User rejected tool use", **extra)
+
+    def called(self, name="Bash", tid="t1"):
+        return ca([{"type": "tool_use", "id": tid, "name": name, "input": {}}], cwd=str(self.repo))
+
+    def test_rejection_reason_read_from_the_tool_result_in_the_current_form(self):
+        # Replicata: Claude Code ≥2.1.285 records a rejected tool call with
+        # toolUseResult "User rejected tool use" and the rejection's text,
+        # any typed reason with it, in the tool result itself. Expectata:
+        # the typed reason is the prompt; a rejection with nothing typed
+        # yields none; a rejection text of a form no store has shown is
+        # refused. Resultata (v6.2.0): every rejection read as nothing typed,
+        # since the reason was sought in toolUseResult alone.
+        typed = self.rejection('The user provided the following reason for the rejection: "use uv instead"')
+        got = ace.claude_exchanges(self.path([self.called(), typed]), self.repo)[0]
+        self.assertEqual([e.prompt for e in got], ["use uv instead"])
+        untyped = self.rejection(self.UNTYPED_TAIL)
+        self.assertEqual(ace.claude_exchanges(self.path([self.called(), untyped]), self.repo)[0], [])
+        self.refused_at([self.called(), self.rejection("Something new the harness says now.")], 2, "unseen rejection")
+
+    def test_typed_words_in_a_subagents_records_refused(self):
+        # Replicata: a subagent's record holds words the human typed: a
+        # reason given for rejecting the subagent's tool call. Expectata:
+        # refused, citing the file and line, since which page and exchange
+        # should show it is undecided; a subagent's rejection with nothing
+        # typed is skipped like the rest of its traffic. Resultata (v6.2.0):
+        # skipped with the subagent's records, in silence.
+        typed = self.rejection('The user provided the following reason for the rejection: "not that file"', isSidechain=True)
+        self.refused_at([self.called(), typed], 2, "typed")
+        untyped = self.rejection(self.UNTYPED_TAIL, isSidechain=True)
+        self.assertEqual(ace.claude_exchanges(self.path([self.called(), untyped]), self.repo)[0], [])
+
+    def test_results_of_tools_never_seen_refused(self):
+        # Replicata: a tool result read for the repo whose call names a tool
+        # no store has shown (a new tool that might ask the human for
+        # words), or whose call is nowhere in its file, as no store shows.
+        # Expectata: refused, citing the file and line. Resultata (v6.2.0):
+        # read as plumbing, any typed words in it lost in silence.
+        result = cu([{"type": "tool_result", "tool_use_id": "t1", "content": "the human's answer"}], cwd=str(self.repo),
+                    toolUseResult={"answer": "the human's answer"})
+        self.refused_at([self.called("AskTheHuman"), result], 2, "unseen tool")
+        self.refused_at([result], 1, "no call")
+
+    def test_results_of_tools_the_stores_show_pass(self):
+        # Every built-in tool the stores show, and every MCP tool (its result
+        # is the server's output), yields plumbing only.
+        names = ["Bash", "Read", "Edit", "Write", "Workflow", "TodoWrite", "WebFetch", "ToolSearch", "WebSearch",
+                 "AskUserQuestion", "TaskOutput", "Artifact", "TaskStop", "Skill", "Agent", "Monitor",
+                 "SendUserFile", "SendMessage", "ExitPlanMode", "ScheduleWakeup", "ListAgents", "EnterPlanMode",
+                 "PushNotification", "mcp__claude_ai_Claude_Docs__read"]
+        records = []
+        for n, name in enumerate(names):
+            records.append(self.called(name, f"t{n}"))
+            records.append(cu([{"type": "tool_result", "tool_use_id": f"t{n}", "content": "out"}], cwd=str(self.repo),
+                              toolUseResult={"stdout": "out"}))
+        self.assertEqual(ace.claude_exchanges(self.path([cu("go", cwd=str(self.repo)), *records]), self.repo)[0][0].prompt, "go")
+
+    def test_last_prompt_echo_without_a_prompt_refused(self):
+        # Replicata: a session file read for the repo holds a last-prompt
+        # echo (Claude Code's copy of the last typed prompt, newlines as
+        # spaces, cut at 200 characters with an ellipsis, a paste unwrapped)
+        # that no prompt sourcery read matches. Expectata: refused, citing
+        # the file and the echo's line, since the human typed something
+        # sourcery did not read; echoes of prompts it read pass. Resultata
+        # (v6.2.0): echoes passed over unread, so a prompt in a form sourcery
+        # does not read went missing in silence even in a session never read
+        # before.
+        cwd = str(self.repo)
+        long = "line one\nline two " + "x" * 300
+        pasted = 'see this:\n\n<pasted_content id="p1">\npasted words\n</pasted_content>'
+        echo = lambda text: {"type": "last-prompt", "lastPrompt": text, "leafUuid": "u1", "sessionId": "cs1"}
+        fine = [cu(long, cwd=cwd), cu(pasted, ts=T1, cwd=cwd),
+                echo(long.replace("\n", " ")[:200] + "…"), echo("see this:pasted words")]
+        self.assertEqual(len(ace.claude_exchanges(self.path(fine), self.repo)[0]), 2)
+        self.refused_at([cu("go", cwd=cwd), echo("a prompt nobody read")], 2, "echo")
 
     def test_records_without_a_cwd_refused(self):
         # Replicata: a user, assistant, or queued-prompt record with no cwd,
@@ -2819,6 +2944,73 @@ class CodexQuals(Fixture):
                 elsewhere = self.path([cxmeta("/elsewhere"), record], f"{name}-elsewhere.jsonl")
                 self.assertEqual(ace.codex_exchanges(elsewhere, self.repo), ([], set()))
 
+    def test_response_items_of_unseen_forms_refused_in_sessions_read_for_the_repo(self):
+        # Replicata: a rollout holds a response_item of a type, a message of a
+        # role, or a content piece of a type no store has shown. Expectata:
+        # refused, citing the file and line, in a session read for the repo;
+        # ignored elsewhere. Resultata (v6.2.0): every response_item passed
+        # over in silence but the question tool's calls.
+        items = {
+            "unseen type": {"type": "user_input", "text": "words"},
+            "unseen role": {"type": "message", "role": "human", "content": [{"type": "input_text", "text": "words"}]},
+            "unseen piece": {"type": "message", "role": "user", "content": [{"type": "input_audio", "data": "AA"}]},
+        }
+        for name, payload in items.items():
+            with self.subTest(name):
+                record = {"type": "response_item", "timestamp": T0, "payload": payload}
+                path = self.path([cxmeta(str(self.repo)), record], f"{name}.jsonl")
+                with self.assertRaises(ace.UserError) as ctx:
+                    ace.codex_exchanges(path, self.repo)
+                self.assertIn(f"{path}:2\n", str(ctx.exception))
+                elsewhere = self.path([cxmeta("/elsewhere"), record], f"{name}-elsewhere.jsonl")
+                self.assertEqual(ace.codex_exchanges(elsewhere, self.repo), ([], set()))
+
+    def test_response_item_forms_the_stores_show_pass(self):
+        # Every response_item type, message role, and content piece the
+        # stores show changes nothing a session yields; a user-role message
+        # is the model's copy of a prompt the session records, or one of the
+        # machine notes Codex injects in the user role.
+        injected = ["<environment_context>\n  <cwd>/x</cwd>\n</environment_context>",
+                    "# AGENTS.md instructions for /x\n\nrules", "<recommended_plugins>none</recommended_plugins>",
+                    "<external_codex_apps_open_page>p</external_codex_apps_open_page>", "<turn_aborted>x</turn_aborted>"]
+        def item(payload, ts=T0):
+            return {"type": "response_item", "timestamp": ts, "payload": payload}
+        records = [
+            cxmeta(str(self.repo)),
+            *(item({"type": "message", "role": "user", "content": [{"type": "input_text", "text": t}]}) for t in injected),
+            item({"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "dev"}]}),
+            item({"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": "go"}, {"type": "input_image", "image_url": "data:image/png;base64,AA"}]}),
+            cxuser("go", ts=T0),
+            *(item({"type": kind}, T1) for kind in ["reasoning", "function_call", "function_call_output", "custom_tool_call",
+                                                    "custom_tool_call_output", "agent_message", "web_search_call",
+                                                    "compaction", "tool_search_call", "tool_search_output"]),
+            item({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]}, T1),
+            cxagent("done", ts=T2),
+        ]
+        got = ace.codex_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual([(e.prompt, e.reply) for e in got], [("go", "done")])
+
+    def test_user_message_the_model_received_without_a_prompt_refused(self):
+        # Replicata: in a session read for the repo, the model received a
+        # user-role message that no prompt event in the session records and
+        # that is none of the machine notes Codex injects: the human's words
+        # in a form sourcery does not read yet, say, in a session it never
+        # read before. Expectata: refused, citing the file and line.
+        # Resultata (v6.2.0): passed over in silence, the session yielding no
+        # prompt and the canary, which knows only sessions read before,
+        # staying quiet.
+        records = [
+            cxmeta(str(self.repo)),
+            {"type": "response_item", "timestamp": T0, "payload": {
+                "type": "message", "role": "user", "content": [{"type": "input_text", "text": "words nobody read"}]}},
+            cxagent("done", ts=T1),
+        ]
+        path = self.path(records)
+        with self.assertRaises(ace.UserError) as ctx:
+            ace.codex_exchanges(path, self.repo)
+        self.assertIn(f"{path}:2\n", str(ctx.exception))
+
     def test_compressed_rollout_reads_as_plain(self):
         # Replicata: Codex compresses older rollouts, each to a .jsonl.zst
         # file. Expectata: one reads exactly as the plain file it was.
@@ -2994,6 +3186,16 @@ class VscodeQuals(Fixture):
                 with self.assertRaises(ace.UserError) as ctx:
                     ace.vscode_exchanges(path, (self.repo,), self.repo)
                 self.assertIn(str(path), str(ctx.exception))
+
+    def test_request_without_words_refused(self):
+        # Replicata: a request whose message.text is empty, as no store
+        # shows. Expectata: refused, naming the file: the words may have
+        # moved elsewhere. Resultata (v6.2.0): dropped as no prompt, in
+        # silence.
+        path = self.write_session(vssession([vsreq("", [md("a")])]))
+        with self.assertRaises(ace.UserError) as ctx:
+            ace.vscode_exchanges(path, (self.repo,), self.repo)
+        self.assertIn(str(path), str(ctx.exception))
 
     def test_request_forms_the_stores_show_pass(self):
         # Every variable kind the stores show (prompt and instruction files,
@@ -4090,6 +4292,20 @@ class CliQuals(Fixture):
                 self.assertIn(f"{stray}\n", err)
                 stray.unlink()
 
+    def test_finder_metadata_among_the_transcripts_passes(self):
+        # A .DS_Store, which Finder leaves in any folder it shows, holds no
+        # transcript: one in the Codex, Copilot, or Antigravity store
+        # changes nothing. Resultata (v6.2.0): refused as a file of unknown
+        # form.
+        self.populate()
+        conversations = self.antigravity_root / "conversations"
+        conversations.mkdir()
+        for folder in (self.codex_root / "sessions" / "2026",
+                       self.vscode_root / "workspaceStorage" / "h1" / "chatSessions", conversations):
+            (folder / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+        out, page = self.generate(self.tmp / "out.html")
+        self.assertIn(f"Prompts: 3\n  {LOGIN}: 3\n", out)
+
     def canary(self, rewrite):
         """Run once, so the ledger reads the populated stores' prompts; then
         rewrite a store file in place, the session it holds left in the
@@ -4102,22 +4318,20 @@ class CliQuals(Fixture):
 
     def test_session_the_store_still_holds_but_yields_no_prompt_refused(self):
         # Replicata: a run reads a session's prompt into the ledger; then the
-        # store keeps the session (same id, same project) with no prompt
-        # sourcery can read left in it: Codex rewriting a rollout into a
-        # form sourcery cannot read yet, say. Expectata: exit 2, naming the
-        # session and its file, nothing written: a session that kept its
-        # place but lost every prompt the ledger read from it means the
-        # transcript format changed. Resultata (v6.2.0): exit 0, the ledger
-        # copies kept in silence and every later prompt of the session
-        # missing, which is how Codex's rewrite of its store went unseen for
-        # weeks.
+        # store keeps the session (same id, same project) with no trace of
+        # its prompt left that sourcery reads: Codex rewriting a rollout and
+        # dropping, or moving out of sight, every record of the prompt, say.
+        # (A rollout keeping the model's copy of the prompt is refused
+        # inside the session already: see
+        # test_user_message_the_model_received_without_a_prompt_refused.)
+        # Expectata: exit 2, naming the session and its file, nothing
+        # written: a session that kept its place but lost every prompt the
+        # ledger read from it means the transcript format changed. Resultata
+        # (v6.2.0): exit 0, the ledger copies kept in silence and every later
+        # prompt of the session missing, which is how Codex's rewrite of its
+        # store went unseen for weeks.
         rollout = self.codex_root / "sessions" / "2026" / "rollout-1.jsonl"
-        err = self.canary(lambda: write_jsonl(rollout, [
-            cxmeta(str(self.repo)),
-            {"type": "response_item", "timestamp": T1, "payload": {
-                "type": "message", "role": "user", "content": [{"type": "input_text", "text": "codex prompt"}]}},
-            cxagent("codex reply", ts=T2),
-        ]))
+        err = self.canary(lambda: write_jsonl(rollout, [cxmeta(str(self.repo)), cxagent("codex reply", ts=T2)]))
         self.assertIn(f"Sessio Codex cx1 in reposito transcriptorum adhuc est ({rollout})", err)
         self.assertIn("Nihil scriptum est.", err)
 
