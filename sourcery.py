@@ -70,7 +70,7 @@ from compression import zstd
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "6.2.0"
+VERSION = "6.2.1"
 UTC = dt.timezone.utc
 
 
@@ -2602,6 +2602,19 @@ def codex_session_dirs(root: Path) -> tuple[Path, ...]:
 # Finder leaves in any folder it shows.
 STORE_LITTER = frozenset({".DS_Store"})
 
+# The WakaTime plugin for Claude Code (github.com/wakatime/claude-code-wakatime,
+# src/utils.ts) keeps its "state" for a session beside the transcript, named
+# for it plus ".wakatime": only the time of its last heartbeat, as
+# JSON.stringify({lastHeartbeatAt: Date.now() / 1000}, null, 2) writes it.
+# Every version since 2026-01 writes it so.
+WAKATIME_STATE = re.compile(rb'\{\n  "lastHeartbeatAt": [0-9]+(\.[0-9]+)?\n\}')
+
+
+def wakatime_state(path: Path) -> bool:
+    """Whether a file in the Claude Code store is the WakaTime plugin's
+    state for a session, which holds no transcript."""
+    return path.name.endswith(".jsonl.wakatime") and WAKATIME_STATE.fullmatch(path.read_bytes()) is not None
+
 
 def unread_file(path: Path, agent: str, forms: str) -> UserError:
     """The refusal of a file in an agent's transcript store that is in none
@@ -2669,11 +2682,12 @@ def collect(
 
     # Claude Code keeps its transcripts as .jsonl files among other files
     # of every kind (workflow artifacts, memory notes); one named past
-    # ".jsonl" (compressed, say) is a transcript sourcery would not read.
+    # ".jsonl" (compressed, say) is a transcript sourcery would not read,
+    # unless it is the WakaTime plugin's state.
     for root in roots.claude:
         if require_dir(root):
             for path in sorted(p for p in root.rglob("*") if p.is_file()):
-                if ".jsonl." in path.name:
+                if ".jsonl." in path.name and not wakatime_state(path):
                     raise unread_file(path, "Claude Code", ".jsonl")
                 if path.suffix == ".jsonl":
                     gather(claude_exchanges(

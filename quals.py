@@ -4322,6 +4322,38 @@ class CliQuals(Fixture):
         out, page = self.generate(self.tmp / "out.html")
         self.assertIn(f"Prompts: 3\n  {LOGIN}: 3\n", out)
 
+    def test_wakatime_states_the_stores_show_pass(self):
+        # Replicata: the WakaTime plugin for Claude Code has left its state
+        # for a session, the transcript's name plus ".wakatime", holding
+        # only its last heartbeat's time as the plugin writes it: one beside
+        # its transcript, one in another project directory whose transcript
+        # is gone. Expectata: the export goes on as if neither were there.
+        # Resultata (v6.2.0): refused as a file sourcery does not read.
+        self.populate()
+        (self.claude_root / "p" / "s.jsonl.wakatime").write_bytes(b'{\n  "lastHeartbeatAt": 1761625483.512\n}')
+        (self.claude_root / "q").mkdir()
+        (self.claude_root / "q" / "t.jsonl.wakatime").write_bytes(b'{\n  "lastHeartbeatAt": 1761625483\n}')
+        out, page = self.generate(self.tmp / "out.html")
+        self.assertIn(f"Prompts: 3\n  {LOGIN}: 3\n", out)
+
+    def test_wakatime_named_files_of_another_shape_refused(self):
+        # Replicata: a file named like the WakaTime plugin's state,
+        # s.jsonl.wakatime, holds something else: a transcript, the state
+        # with a second field, the state on one line. Expectata: exit 2
+        # naming the file, nothing written, since only the name says it is
+        # no transcript.
+        self.populate()
+        stray = self.claude_root / "p" / "s.jsonl.wakatime"
+        for name, content in {
+            "transcript": (self.claude_root / "p" / "s.jsonl").read_bytes(),
+            "second field": b'{\n  "lastHeartbeatAt": 1761625483.512,\n  "prompt": "x"\n}',
+            "one line": b'{"lastHeartbeatAt":1761625483.512}',
+        }.items():
+            with self.subTest(name):
+                stray.write_bytes(content)
+                err = self.refused([str(self.repo), str(self.tmp / "out.html")])
+                self.assertIn(f"{stray}\n", err)
+
     def canary(self, rewrite):
         """Run once, so the ledger reads the populated stores' prompts; then
         rewrite a store file in place, the session it holds left in the
