@@ -112,9 +112,9 @@ def gh_missing():
 
 
 def ledger_header(project):
-    """A ledger's first line as sourcery writes it: the ledger format, 1,
+    """A ledger's first line as sourcery writes it: the ledger format, 2,
     and the project name."""
-    return {"ledger": 1, "repo": project}
+    return {"ledger": 2, "repo": project}
 
 
 def ledger_text(repo_name, exchanges, header=None):
@@ -140,14 +140,17 @@ def jsonable(exchange):
 def five_page(repo, exchanges, version="5.5.2", name=None):
     """A page as sourcery 5 wrote it: its articles crediting no one and
     naming no human, and before </body> its snapshot, the block 5.5.2's
-    snapshot() wrote (every exchange in freeze() form, one per line, every
-    "<" escaped), naming the repo `name`, or repo's own name."""
+    snapshot() wrote (every exchange in freeze() form but its title, which
+    5.5.2 had none of, one per line, every "<" escaped), naming the repo
+    `name`, or repo's own name."""
     bare = re.sub(
         r' data-login="[^"]*"|\n<header><p class="speaker">[^<]*</p>((?:\n<div class="diffstat">.*?</div>)?)</header>',
         r"\1",
         ace.render(repo, {LOGIN: exchanges}),
     )
-    rows = ",\n".join(json.dumps(ace.freeze(e), ensure_ascii=False) for e in exchanges)
+    rows = ",\n".join(
+        json.dumps({k: v for k, v in ace.freeze(e).items() if k != "title"}, ensure_ascii=False) for e in exchanges
+    )
     named = json.dumps(repo.name if name is None else name)
     snapshot = f'{{"sourcery": {json.dumps(version)}, "repo": {named}, "exchanges": [\n{rows}\n]}}'
     escaped = snapshot.replace("<", "\\u003c")
@@ -2116,9 +2119,10 @@ class ClaudeQuals(Fixture):
         # Every record type the stores show in session files read for a repo,
         # beside user, assistant, and attachment, is harness bookkeeping:
         # system notices, the prompt queue, titles, the last prompt's echo,
-        # request logs, file-history snapshots, the session's mode, bridge,
-        # frame, artifact, and cost state, and the tools a session used.
-        # None changes what a file yields.
+        # request logs, file-history snapshots, the session's mode and
+        # permission mode, bridge, frame, artifact, and cost state, the
+        # tools a session used, the name its agent goes by, and the pull
+        # requests it opened. None changes what a file yields.
         cwd = str(self.repo)
         quiet = [
             {"type": kind, "sessionId": "cs1"}
@@ -2126,11 +2130,58 @@ class ClaudeQuals(Fixture):
                          "api-request-shape", "atis-latch", "file-history-snapshot", "file-history-delta",
                          "bridge-session", "mode", "frame-link", "artifact-autoreact-ledger",
                          "artifact-comment-monitor", "cost-state", "tools-used"]
-        ] + [{"type": "last-prompt", "lastPrompt": "go", "leafUuid": "u1", "sessionId": "cs1"}]
+        ] + [{"type": "last-prompt", "lastPrompt": "go", "leafUuid": "u1", "sessionId": "cs1"},
+             {"type": "permission-mode", "permissionMode": "auto", "sessionId": "cs1"},
+             {"type": "agent-name", "agentName": "elf-reminders", "sessionId": "cs1"},
+             {"type": "pr-link", "sessionId": "cs1", "prNumber": "58", "prUrl": "https://github.com/o/r/pull/58",
+              "prRepository": "o/r", "timestamp": T0}]
         got = ace.claude_exchanges(
             self.path([*quiet, cu("go", cwd=cwd), ca([{"type": "text", "text": "done"}], cwd=cwd)]), self.repo
         )[0]
         self.assertEqual([(e.prompt, e.reply) for e in got], [("go", "done")])
+
+    def test_session_title_is_its_last_custom_title(self):
+        # Replicata: a session named by a custom-title record before its
+        # first prompt, stamped anew mid-session, then renamed, as /rename
+        # leaves it (each record bare: no cwd, no timestamp); beside it, in
+        # another file, a session never named. Expectata: every exchange of
+        # the named session carries the name it was given last, the
+        # unnamed session's none. Resultata (v6.2.1): refused, custom-title
+        # being a record of an unseen type.
+        cwd = str(self.repo)
+
+        def named(title):
+            return {"type": "custom-title", "customTitle": title, "sessionId": "cs1"}
+
+        got = ace.claude_exchanges(
+            self.path([
+                named("breaks-before-bug"), cu("go", cwd=cwd), named("breaks-before-bug"),
+                ca([{"type": "text", "text": "done"}], cwd=cwd), named("graph-matrix-ordering-bug"),
+                cu("again", ts=T2, cwd=cwd), ca([{"type": "text", "text": "again done"}], ts=T3, cwd=cwd),
+            ]),
+            self.repo,
+        )[0]
+        self.assertEqual([(e.prompt, e.title) for e in got],
+                         [("go", "graph-matrix-ordering-bug"), ("again", "graph-matrix-ordering-bug")])
+        unnamed = write_jsonl(self.tmp / "claude" / "p1" / "unnamed.jsonl",
+                              [cu("hi", cwd=cwd), ca([{"type": "text", "text": "hello"}], cwd=cwd)])
+        self.assertEqual([e.title for e in ace.claude_exchanges(unnamed, self.repo)[0]], [""])
+
+    def test_custom_titles_of_unseen_shapes_refused(self):
+        # Replicata: a session file read for the repo holds a custom-title
+        # record whose title is no string, or that names no title or no
+        # session. Expectata: refused like a record of an unseen type,
+        # citing the file and that record's line. Resultata (v6.2.1):
+        # refused, as every custom-title record was.
+        cwd = str(self.repo)
+        for name, odd in {
+            "number": {"type": "custom-title", "customTitle": 5, "sessionId": "cs1"},
+            "no title": {"type": "custom-title", "sessionId": "cs1"},
+            "no session": {"type": "custom-title", "customTitle": "named"},
+        }.items():
+            with self.subTest(name):
+                error = self.refused_at([odd, cu("go", cwd=cwd), ca([{"type": "text", "text": "done"}], cwd=cwd)], 1, name)
+                self.assertIn("claude_exchanges", error)
 
     def test_attachments_of_unseen_types_refused_for_the_repo(self):
         # Replicata: an attachment record of a type no store has shown, its
@@ -3548,6 +3599,19 @@ class RenderQuals(Fixture):
         self.assertIn("Claude Code", summary)
         self.assertIn("claude-opus-4-8", summary)
         self.assertNotIn("(", summary)
+
+    def test_meta_line_names_the_session_title(self):
+        # Replicata: two exchanges, one of a session titled with markup and
+        # quotes in its name, one of a session never titled. Expectata: the
+        # titled one's meta line ends with the title, escaped, in a title
+        # span; the untitled one's holds no title span. Resultata (v6.2.1):
+        # no exchange carried a title.
+        page = ace.render(self.repo, {LOGIN: [
+            exchange(title='<b>fix</b> "it"'), exchange(timestamp=utc(T1), prompt="q"),
+        ]})
+        first, second = re.findall(r"<summary>(.*?)</summary>", page, re.DOTALL)
+        self.assertTrue(first.endswith(' <span class="title">&lt;b&gt;fix&lt;/b&gt; &quot;it&quot;</span>'), first)
+        self.assertNotIn('class="title"', second)
 
     def test_speaker_label_names_each_prompts_human_by_display_name(self):
         # Replicata: a page rendered from three humans' ledgers, given in no
@@ -5255,7 +5319,7 @@ class CliQuals(Fixture):
     def test_ledger_first_line_names_the_format_not_the_release(self):
         # Replicata: a run, then a rerun on unchanged stores by another
         # sourcery release (VERSION replaced), as on two machines a release
-        # apart. Expectata: the ledger's first line is {"ledger": 1, "repo":
+        # apart. Expectata: the ledger's first line is {"ledger": 2, "repo":
         # PROJECT}, the ledger format and the project name, naming no
         # release, so both runs write the ledger byte-identical, and a union
         # merge between the two machines' ledgers never doubles line 1.
@@ -5279,8 +5343,8 @@ class CliQuals(Fixture):
 
     def test_ledger_of_another_format_refused(self):
         # Replicata: beside the page, the runner's ledger or mister-person's,
-        # its first line naming a ledger format other than 1: 2, as a later
-        # format would; "1", 1.0, or true, no format number at all; or the
+        # its first line naming a ledger format other than 1 and 2: 3, as a
+        # later format would; "1", 1.0, or true, no format number at all; or the
         # first line sourcery 6.0.0 wrote before ledgers named their format,
         # {"sourcery": "6.0.0", "repo": PROJECT}. Expectata: exit 2 citing
         # the ledger at line 1; nothing written. Resultata (v6.0.0): no
@@ -5289,7 +5353,7 @@ class CliQuals(Fixture):
         out_path = self.tmp / "out.html"
         for login in (LOGIN, "mister-person"):
             for header in (
-                {"ledger": 2, "repo": self.repo.name},
+                {"ledger": 3, "repo": self.repo.name},
                 {"ledger": "1", "repo": self.repo.name},
                 {"ledger": 1.0, "repo": self.repo.name},
                 {"ledger": True, "repo": self.repo.name},
@@ -5303,31 +5367,80 @@ class CliQuals(Fixture):
 
     def test_ledger_of_a_later_format_refused_saying_another_release_wrote_it(self):
         # Replicata: beside the page, mister-person's ledger or the
-        # runner's, as a later sourcery release writing ledger format 2
+        # runner's, as a later sourcery release writing ledger format 3
         # would leave it on a machine that upgraded: its first line
-        # {"ledger": 2, "repo": PROJECT}. Expectata: exit 2 citing the
+        # {"ledger": 3, "repo": PROJECT}. Expectata: exit 2 citing the
         # ledger at line 1, saying that when the header line names a ledger
-        # format other than 1, another sourcery release wrote the ledger,
-        # and to run a release that reads that format, then rerun; nothing
-        # written. Resultata (v6.0.0): only the advice for a git conflict or
-        # a union merge, though no merge made the ledger; and advice added
-        # once format 2 exists never reaches a machine still running this
-        # release, which is the one that meets such a ledger.
+        # format other than 1 or 2, another sourcery release wrote the
+        # ledger, and to run a release that reads that format, then rerun;
+        # nothing written. Resultata (v6.0.0): only the advice for a git
+        # conflict or a union merge, though no merge made the ledger; and
+        # advice added once format 3 exists never reaches a machine still
+        # running this release, which is the one that meets such a ledger.
         self.populate()
         out_path = self.tmp / "out.html"
         for login in ("mister-person", LOGIN):
             self.ledger(login).write_text(
-                ledger_text(self.repo.name, [self.theirs()], {"ledger": 2, "repo": self.repo.name}), encoding="utf-8"
+                ledger_text(self.repo.name, [self.theirs()], {"ledger": 3, "repo": self.repo.name}), encoding="utf-8"
             )
             with self.subTest(login=login):
                 err = self.refused([str(self.repo), str(out_path)])
                 self.assertIn(f"Tabula legi non potest: {self.ledger(login)}:1\n", err)
                 self.assertIn(
-                    "Si linea capitis formam tabulae aliam quam 1 nominat, tabulam alia editio sourcery scripsit: "
+                    "Si linea capitis formam tabulae aliam quam 1 aut 2 nominat, tabulam alia editio sourcery scripsit: "
                     "curre editionem quae illam formam legit, deinde iterum curre.",
                     err,
                 )
             self.ledger(login).unlink()
+
+    def test_ledgers_of_format_1_read_untitled_and_the_runners_rewritten_in_format_2(self):
+        # Replicata: beside the page, two ledgers a release before titles
+        # wrote, in format 1, each row holding every field but the title:
+        # mister-person's, holding his Codex prompt, and the runner's,
+        # holding a prompt the stores have since lost. Expectata: exit 0;
+        # the page shows both, and the stores' prompts; mister-person's
+        # ledger is never written; the runner's is rewritten in format 2,
+        # the lost prompt kept, untitled. Resultata (v6.2.1): ledger format
+        # 1 the only one.
+        self.populate()
+
+        def format_1(rows):
+            lines = [{"ledger": 1, "repo": self.repo.name}]
+            lines += [{k: v for k, v in ace.freeze(row).items() if k != "title"} for row in rows]
+            return "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines)
+
+        lost = exchange(timestamp=utc("2026-03-01T08:00:00.000Z"), session="cs0", prompt="lost prompt")
+        other = self.ledger("mister-person")
+        other.write_text(format_1([self.theirs()]), encoding="utf-8")
+        self.ledger().write_text(format_1([lost]), encoding="utf-8")
+        before = other.read_bytes()
+        out_path = self.tmp / "out.html"
+        out, page = self.generate(out_path)
+        self.assertIn("Prompts: 5\n  dreeves: 4\n  mister-person: 1\nPrompts deleted: 0\n", out)
+        for text in ("lost prompt", "logan prompt", "claude prompt", "codex prompt", "copilot prompt"):
+            self.assertIn(text, page)
+        self.assertEqual(other.read_bytes(), before)
+        header, *rows = ledger_rows(self.ledger())
+        self.assertEqual(header, ledger_header(self.repo.name))
+        self.assertEqual(rows[0], jsonable(lost))
+        self.assertEqual(rows[0]["title"], "")
+
+    def test_session_title_reaches_the_ledger_and_the_page(self):
+        # Replicata: the Claude session the stores hold is named by /rename,
+        # and a run follows. Expectata: the runner's ledger row of its
+        # prompt holds the title, and the page's meta line for it names it.
+        # Resultata (v6.2.1): refused, custom-title being a record of an
+        # unseen type.
+        self.populate()
+        path = self.claude_root / "p" / "s.jsonl"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "custom-title", "customTitle": "5690-elf-reminders", "sessionId": "cs1"}) + "\n")
+        out_path = self.tmp / "out.html"
+        _, page = self.generate(out_path)
+        _, *rows = ledger_rows(self.ledger())
+        self.assertEqual([(row["prompt"], row["title"]) for row in rows],
+                         [("claude prompt", "5690-elf-reminders"), ("codex prompt", ""), ("copilot prompt", "")])
+        self.assertEqual(page.count('<span class="title">5690-elf-reminders</span></summary>'), 1)
 
     def test_header_line_a_union_merge_left_twice_refused_saying_which_to_keep(self):
         # Replicata: github.com/dreeves/blog is renamed newblog, and this
@@ -5594,7 +5707,7 @@ class CliQuals(Fixture):
         # Replicata: a run by the login dreeves, each provider's store
         # holding one prompt. Expectata: beside the page,
         # sourcery.dreeves.jsonl: its first line the header naming the
-        # ledger format, 1, and the project, then one line per exchange in
+        # ledger format, 2, and the project, then one line per exchange in
         # freeze() form, in the page's order, the file ending in a newline;
         # stdout naming the ledger, then the page, as written. Resultata
         # (v5.5.2): no ledger; the page carried a snapshot of its exchanges
@@ -5651,7 +5764,7 @@ class CliQuals(Fixture):
         # Its header's keys written in another order, so a rewrite could
         # not match it.
         other.write_text(
-            ledger_text(self.repo.name, [self.theirs()], {"repo": self.repo.name, "ledger": 1}), encoding="utf-8"
+            ledger_text(self.repo.name, [self.theirs()], {"repo": self.repo.name, "ledger": 2}), encoding="utf-8"
         )
         before = (other.stat().st_ino, other.read_bytes())
         out_path = self.tmp / "out.html"
@@ -6678,7 +6791,7 @@ class CliQuals(Fixture):
         # holding a seeded claude.ai exchange and a Claude Code exchange; it
         # is adopted in place as dreeves. Expectata: exit 0; beside it,
         # sourcery.dreeves.jsonl holds the header naming the ledger format,
-        # 1, and the project, then the snapshot's exchanges in freeze()
+        # 2, and the project, then the snapshot's exchanges in freeze()
         # form, in time order; out.html is the page sourcery 6 renders from
         # that ledger, crediting every row to dreeves, its snapshot gone;
         # stdout names the ledger, then the page, as written, and counts the
@@ -7704,6 +7817,7 @@ MAXIMAL = dict(
     ballots=(ace.Ballot("Which?", ("a", "b"), ("b",)), ace.Ballot("Typed?", ("x",), ())),
     added=1234,
     deleted=5,
+    title='<b>"renamed"</b> & </span>',
 )
 
 
@@ -7751,9 +7865,27 @@ class LedgerQuals(Fixture):
         page = self.tmp / "page.html"
         with self.assertRaises(ValueError):
             ace.thaw({**frozen, "author": "someone"}, page)
-        for missing in ("prompt", "effort", "wall", "images", "ballots"):
+        for missing in ("prompt", "effort", "wall", "images", "ballots", "title"):
             with self.assertRaises(ValueError, msg=missing):
                 ace.thaw({k: v for k, v in frozen.items() if k != missing}, page)
+
+    def test_format_1_rows_thaw_untitled(self):
+        # Replicata: a row of ledger format 1, which predates titles, so
+        # holds every field but the title; and one holding a title too.
+        # Expectata: the first thaws in format 1's shape with no title, ""
+        # (and is refused in format 2's, which requires one); the second is
+        # refused in format 1's, as no format-1 row could hold a title.
+        # Resultata (v6.2.1): ledger format 1 the only one, holding no
+        # titles.
+        given = maximal_exchange(title="")
+        frozen = jsonable(maximal_exchange())
+        untitled = {k: v for k, v in frozen.items() if k != "title"}
+        page = self.tmp / "page.html"
+        self.assertEqual(ace.thaw(untitled, given.source, ace.ROW_SHAPES[1]), given)
+        with self.assertRaises(ValueError):
+            ace.thaw(untitled, page, ace.ROW_SHAPES[2])
+        with self.assertRaises(ValueError):
+            ace.thaw(frozen, page, ace.ROW_SHAPES[1])
 
     def test_thaw_rejects_wrong_types_and_ranges(self):
         # A hand-edited ledger row must not thaw into a guess: every field's
@@ -7778,6 +7910,8 @@ class LedgerQuals(Fixture):
             ("ballots", [{"question": "q", "options": ["a"], "picked": [], "extra": 1}]),
             ("ballots", [{"question": 5, "options": [], "picked": []}]),
             ("ballots", [{"question": "q", "options": "ab", "picked": []}]),
+            ("title", None),
+            ("title", 5),
         ):
             with self.assertRaises(ValueError, msg=(field, value)):
                 ace.thaw({**frozen, field: value}, page)

@@ -106,7 +106,9 @@ def snapshot(page: Path, repo: Path) -> list[Exchange]:
         shape = {key: type(value).__name__ for key, value in data.items()}
         if shape != SNAPSHOT_SHAPE:
             raise ValueError(f"{shape} != {SNAPSHOT_SHAPE}")
-        exchanges = [sourcery.thaw(frozen, page) for frozen in data["exchanges"]]
+        # A snapshot's rows are in ledger format 1's shape: sourcery 5 knew
+        # no titles.
+        exchanges = [sourcery.thaw(frozen, page, sourcery.ROW_SHAPES[1]) for frozen in data["exchanges"]]
     except (ValueError, TypeError, UserError) as exc:
         # TODO: Says the page's snapshot is malformed, gives the reason, and
         # that nothing was written.

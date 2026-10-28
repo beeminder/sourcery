@@ -70,7 +70,7 @@ from compression import zstd
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "6.2.1"
+VERSION = "6.3.0"
 UTC = dt.timezone.utc
 
 
@@ -115,6 +115,10 @@ class Exchange:
     # leave no record, so these are floors; Copilot records none at all).
     added: int = 0
     deleted: int = 0
+    # The session's title, the last one its store records ("" when none):
+    # Claude Code's custom-title, given by /rename or the desktop app. Not
+    # always typed: /rename given no name makes one up.
+    title: str = ""
 
 
 # A "holding" names a prompt record the store still holds: its provider and
@@ -559,15 +563,19 @@ CLAUDE_CANNED = re.compile(r"\[Request interrupted by user[^\]]*\]")
 # harness bookkeeping (system notices, the prompt queue, titles, the last
 # prompt's echo, request logs, file-history snapshots, the session's mode,
 # bridge, frame, artifact, and cost state, and the names of the tools the
-# session used, from 2026-10-27 on). Typed prompts once hid in
-# attachment records nobody had classified, so a record of any other type,
-# or of none, in a file holding records read for the repo, is refused: it
-# may hold the human's words.
+# session used, from 2026-10-27 on; its permission mode, auto or plan, as
+# {type, permissionMode, sessionId}; the name its agent goes by, a copy of
+# its custom-title or ai-title; and the pull requests it opened). The
+# session's custom-title is read, in the one shape the stores show (see
+# claude_record_known). Typed prompts once hid in attachment records
+# nobody had classified, so a record of any other type, or of none, in a
+# file holding records read for the repo, is refused: it may hold the
+# human's words.
 CLAUDE_RECORDS = frozenset({
     "user", "assistant", "attachment", "system", "queue-operation", "ai-title", "last-prompt",
     "api-request", "api-request-blob", "api-request-shape", "atis-latch", "file-history-snapshot",
     "file-history-delta", "bridge-session", "mode", "frame-link", "artifact-autoreact-ledger",
-    "artifact-comment-monitor", "cost-state", "tools-used",
+    "artifact-comment-monitor", "cost-state", "tools-used", "permission-mode", "agent-name", "pr-link",
 })
 
 # Attachment types the stores show that carry no typing: reminders, tool and
@@ -981,12 +989,15 @@ def claude_tool_seconds(record: Mapping[str, Any]) -> float:
 
 def claude_record_known(record: Mapping[str, Any]) -> bool:
     """Whether a record is of a type the stores show: an attachment of a
-    type they show, or another record of a type in CLAUDE_RECORDS."""
+    type they show, a custom-title in the shape they show, or another
+    record of a type in CLAUDE_RECORDS."""
     match record:
         case {"type": "attachment", "attachment": {"type": str() as kind}}:
             return kind == "queued_command" or kind in CLAUDE_MUTE_ATTACHMENTS
         case {"type": "attachment"}:
             return False
+        case {"type": "custom-title", "customTitle": str(), "sessionId": str()}:
+            return True
         case {"type": str() as kind}:
             return kind in CLAUDE_RECORDS
         case _:
@@ -1021,6 +1032,10 @@ def claude_exchanges(
     tools: dict[Any, Any] = {}
     echoes: list[tuple[int, Any]] = []
     read: set[str] = set()
+    # Each session's last custom-title (see Exchange.title). Claude Code
+    # stamps the title anew through the session, with no time or cwd, so
+    # the last in the file is the session's own.
+    titles: dict[str, Any] = {}
     # Agent working time, distinguished from waiting-for-human time by where
     # a timestamp gap ends: a gap ending at an assistant record is generation;
     # a gap ending at a tool_result hides both tool runtime and permission
@@ -1079,6 +1094,9 @@ def claude_exchanges(
                 continue
         elif role == "last-prompt":
             echoes.append((line_number, record.get("lastPrompt")))
+            continue
+        elif role == "custom-title":
+            titles[str(record.get("sessionId") or path.stem)] = record.get("customTitle")
             continue
         elif role not in {"user", "assistant"}:
             continue
@@ -1332,7 +1350,7 @@ def claude_exchanges(
     for session in sessions_read:
         session_seen(session, session in sessions_held)
     return [
-        exchange
+        dataclasses.replace(exchange, title=titles.get(session, ""))
         for session, messages in threads.items()
         for exchange in paired(
             "Claude Code",
@@ -3183,6 +3201,9 @@ summary:hover { color: var(--muted); }
    color, so the reading survives any color deficiency. */
 .chip { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 2px; background: var(--provider); }
 .agent { color: var(--muted); font-weight: 600; }
+/* The session's title, quoted so it reads as a name. */
+.title::before { content: "“"; }
+.title::after { content: "”"; }
 /* INVIOLABLE: machine-generated prose renders only inside a .machine
    container, in the phosphor-terminal style — monospace green on
    near-black, in both color schemes — for maximal distinction from the
@@ -3529,11 +3550,15 @@ def render(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = 
             if exchange.elapsed >= 0.5
             else ""
         )
+        # The session's title tells apart sessions the chronology interleaves.
+        # It is as often made up as typed, so it rides the meta line, never
+        # beside the human's words.
+        session_title = f' <span class="title">{html.escape(exchange.title)}</span>' if exchange.title else ""
         summary = (
             f'<a class="anchor" href="#p{number}">'
             f'<time datetime="{exchange.timestamp.isoformat()}">{at.strftime("%H:%M")}</time></a>'
             f' <span class="chip"></span>'
-            f' <span class="agent">{html.escape(exchange.provider)}</span>{model}{effort}{thought}'
+            f' <span class="agent">{html.escape(exchange.provider)}</span>{model}{effort}{thought}{session_title}'
         )
         attached = "".join(
             f'<img class="attachment" src="{html.escape(uri, quote=True)}" alt="">'
@@ -3662,7 +3687,7 @@ def freeze(exchange: Exchange) -> dict[str, Any]:
 SHAPE: dict[str, type | tuple[type, ...]] = {
     "timestamp": str, "provider": str, "model": str, "session": str, "prompt": str,
     "reply": str, "effort": str, "images": list, "elapsed": (int, float), "wall": (int, float),
-    "ballots": list, "added": int, "deleted": int,
+    "ballots": list, "added": int, "deleted": int, "title": str,
 }
 assert set(SHAPE) == {field.name for field in dataclasses.fields(Exchange)} - {"source"}
 
@@ -3671,14 +3696,18 @@ def shaped(value: Any, kind: type | tuple[type, ...]) -> bool:
     return isinstance(value, kind) and not isinstance(value, bool)
 
 
-def thaw(frozen: Mapping[str, Any], source: Path) -> Exchange:
+def thaw(
+    frozen: Mapping[str, Any], source: Path, shape: Mapping[str, type | tuple[type, ...]] = SHAPE
+) -> Exchange:
     """Inverse of freeze; the ledger is the source. The field set and every
-    field's type and range are checked, so a row another schema wrote, or
-    one edited by hand, fails loudly instead of thawing into nonsense."""
+    field's type and range are checked against the row shape of the
+    ledger format the row is in (see ROW_SHAPES), so a row another schema
+    wrote, or one edited by hand, fails loudly instead of thawing into
+    nonsense. A field the shape lacks thaws as Exchange's default."""
     fields = dict(frozen)
     sound = (
-        set(fields) == set(SHAPE)
-        and all(shaped(fields[name], kind) for name, kind in SHAPE.items())
+        set(fields) == set(shape)
+        and all(shaped(fields[name], kind) for name, kind in shape.items())
         and fields["provider"] in PROVIDER_SLUGS
         and all(0 <= fields[name] < float("inf") for name in ("elapsed", "wall", "added", "deleted"))
         and all(isinstance(uri, str) for uri in fields["images"])
@@ -3713,10 +3742,15 @@ def ledger_path(output: Path, login: str) -> Path:
 # what a row holds), never with a sourcery release. Machines running two
 # releases thus write one header, so a git union merge of their ledgers
 # never doubles line 1 for the release alone. read_ledger reads this format
-# and refuses any other, saying that another release wrote it: a later
-# format keeps the header's "ledger" key, so that a release still reading
-# this one can recognize what it cannot read.
-LEDGER_FORMAT = 1
+# and the earlier ones in ROW_SHAPES and refuses any other, saying that
+# another release wrote it: a later format keeps the header's "ledger" key,
+# so that a release still reading this one can recognize what it cannot
+# read. Format 2 added the session's title to every row.
+LEDGER_FORMAT = 2
+# What a row must look like in each ledger format read_ledger reads (see
+# SHAPE). Format 1 rows, and the rows of sourcery 5's snapshots, hold every
+# field but the title, so each thaws untitled.
+ROW_SHAPES = {1: {name: kind for name, kind in SHAPE.items() if name != "title"}, LEDGER_FORMAT: SHAPE}
 # What a ledger's header must look like: each key's JSON type.
 HEADER_SHAPE = {"ledger": "int", "repo": "str"}
 
@@ -3737,7 +3771,7 @@ def json_object(line: str) -> dict[str, Any]:
 
 def read_ledger(path: Path, repo: Path, remote: str) -> dict[Exchange, str]:
     """A ledger's exchanges, every line checked: a damaged line, a header
-    naming a ledger format other than LEDGER_FORMAT, or a header
+    naming a ledger format not in ROW_SHAPES, or a header
     naming a project other than the checkout's (repo's project name, given
     its public home, remote, as repo_remote found it), fails loudly instead
     of thawing into a guess. They are woven, as a run weaves the runner's
@@ -3758,17 +3792,18 @@ def read_ledger(path: Path, repo: Path, remote: str) -> dict[Exchange, str]:
     try:
         head = json_object(header)
         form = ({key: type(value).__name__ for key, value in head.items()}, head.get("ledger"))
-        if form != (HEADER_SHAPE, LEDGER_FORMAT):
-            raise ValueError(f"{form} != {(HEADER_SHAPE, LEDGER_FORMAT)}")
+        forms = [(HEADER_SHAPE, known) for known in ROW_SHAPES]
+        if form not in forms:
+            raise ValueError(f"{form} not in {forms}")
         cited: dict[Exchange, str] = {}
         for number, row in enumerate(rows, start=2):
-            cited.setdefault(thaw(json_object(row), path), f"{path}:{number}")
+            cited.setdefault(thaw(json_object(row), path, ROW_SHAPES[head["ledger"]]), f"{path}:{number}")
     except (ValueError, UserError) as exc:
         # TODO: Says this ledger cannot be read at this line, with the
         # reason: a ledger is a header line, then one exchange per line. If
-        # the header line names a ledger format other than LEDGER_FORMAT
-        # (named), another sourcery release wrote the ledger: run a release
-        # that reads that format, then rerun. If it holds git conflict
+        # the header line names a ledger format other than those ROW_SHAPES
+        # holds (named), another sourcery release wrote the ledger: run a
+        # release that reads that format, then rerun. If it holds git conflict
         # markers, resolve the conflict by keeping both sides' lines (the
         # header line once), then rerun. With the line
         # "sourcery.*.jsonl merge=union" added to the attributes file git
@@ -3783,7 +3818,8 @@ def read_ledger(path: Path, repo: Path, remote: str) -> dict[Exchange, str]:
         raise UserError(
             f"Tabula legi non potest: {path}:{number}\n{exc}\n"
             "Tabula est linea capitis, deinde una rogatio per lineam. "
-            f"Si linea capitis formam tabulae aliam quam {LEDGER_FORMAT} nominat, tabulam alia editio sourcery "
+            f"Si linea capitis formam tabulae aliam quam {' aut '.join(map(str, ROW_SHAPES))} nominat, "
+            "tabulam alia editio sourcery "
             "scripsit: curre editionem quae illam formam legit, deinde iterum curre. Si signa conflictus git fert, "
             "conflictum solve utriusque partis lineas servando (lineam capitis semel), deinde iterum curre.\n"
             "Linea 'sourcery.*.jsonl merge=union' in fasciculo attributorum quem git omnibus repositoriis "
