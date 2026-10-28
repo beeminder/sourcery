@@ -2117,14 +2117,15 @@ class ClaudeQuals(Fixture):
         # beside user, assistant, and attachment, is harness bookkeeping:
         # system notices, the prompt queue, titles, the last prompt's echo,
         # request logs, file-history snapshots, the session's mode, bridge,
-        # frame, artifact, and cost state. None changes what a file yields.
+        # frame, artifact, and cost state, and the tools a session used.
+        # None changes what a file yields.
         cwd = str(self.repo)
         quiet = [
             {"type": kind, "sessionId": "cs1"}
             for kind in ["system", "queue-operation", "ai-title", "api-request", "api-request-blob",
                          "api-request-shape", "atis-latch", "file-history-snapshot", "file-history-delta",
                          "bridge-session", "mode", "frame-link", "artifact-autoreact-ledger",
-                         "artifact-comment-monitor", "cost-state"]
+                         "artifact-comment-monitor", "cost-state", "tools-used"]
         ] + [{"type": "last-prompt", "lastPrompt": "go", "leafUuid": "u1", "sessionId": "cs1"}]
         got = ace.claude_exchanges(
             self.path([*quiet, cu("go", cwd=cwd), ca([{"type": "text", "text": "done"}], cwd=cwd)]), self.repo
@@ -2965,6 +2966,20 @@ class CodexQuals(Fixture):
                 elsewhere = self.path([cxmeta("/elsewhere"), record], f"{name}-elsewhere.jsonl")
                 self.assertEqual(ace.codex_exchanges(elsewhere, self.repo), ([], set()))
 
+    def test_event_kinds_the_stores_show_pass(self):
+        # Every first-form event kind the stores show, beside the ones
+        # sourcery reads, is turn, token, settings, subagent, search,
+        # compaction, or tool-call bookkeeping. None changes what a session
+        # yields.
+        quiet = [
+            {"type": "event_msg", "timestamp": T1, "payload": {"type": kind}}
+            for kind in ["token_count", "task_started", "task_complete", "thread_settings_applied", "turn_aborted",
+                         "sub_agent_activity", "web_search_end", "context_compacted", "mcp_tool_call_end"]
+        ]
+        got = ace.codex_exchanges(self.path([cxmeta(str(self.repo)), cxuser("go"), *quiet, cxagent("done", ts=T2)]),
+                                  self.repo)[0]
+        self.assertEqual([(e.prompt, e.reply) for e in got], [("go", "done")])
+
     def test_response_item_forms_the_stores_show_pass(self):
         # Every response_item type, message role, and content piece the
         # stores show changes nothing a session yields; a user-role message
@@ -2984,7 +2999,8 @@ class CodexQuals(Fixture):
             cxuser("go", ts=T0),
             *(item({"type": kind}, T1) for kind in ["reasoning", "function_call", "function_call_output", "custom_tool_call",
                                                     "custom_tool_call_output", "agent_message", "web_search_call",
-                                                    "compaction", "tool_search_call", "tool_search_output"]),
+                                                    "compaction", "tool_search_call", "tool_search_output",
+                                                    "additional_tools"]),
             item({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]}, T1),
             cxagent("done", ts=T2),
         ]

@@ -558,7 +558,8 @@ CLAUDE_CANNED = re.compile(r"\[Request interrupted by user[^\]]*\]")
 # or knowingly passed over: the dialogue (user, assistant, attachment) and
 # harness bookkeeping (system notices, the prompt queue, titles, the last
 # prompt's echo, request logs, file-history snapshots, the session's mode,
-# bridge, frame, artifact, and cost state). Typed prompts once hid in
+# bridge, frame, artifact, and cost state, and the names of the tools the
+# session used, from 2026-10-27 on). Typed prompts once hid in
 # attachment records nobody had classified, so a record of any other type,
 # or of none, in a file holding records read for the repo, is refused: it
 # may hold the human's words.
@@ -566,7 +567,7 @@ CLAUDE_RECORDS = frozenset({
     "user", "assistant", "attachment", "system", "queue-operation", "ai-title", "last-prompt",
     "api-request", "api-request-blob", "api-request-shape", "atis-latch", "file-history-snapshot",
     "file-history-delta", "bridge-session", "mode", "frame-link", "artifact-autoreact-ledger",
-    "artifact-comment-monitor", "cost-state",
+    "artifact-comment-monitor", "cost-state", "tools-used",
 })
 
 # Attachment types the stores show that carry no typing: reminders, tool and
@@ -1562,7 +1563,8 @@ CODEX_MUTE_ITEMS = frozenset({
 # rewritten form's), and a voice session keeps the human's speech in a
 # record type sourcery does not read (realtime_item), so a record of any
 # other type or kind, in a session read for the repo, is refused: it may
-# hold the human's words.
+# hold the human's words. mcp_tool_call_end (from Codex 0.164, 2026-10-27)
+# is an MCP tool call's arguments and result, the first form's McpToolCall.
 CODEX_RECORDS = frozenset({
     "session_meta", "turn_context", "response_item", "event_msg", "compacted", "world_state",
     "token_usage_record", "inter_agent_communication_metadata",
@@ -1570,14 +1572,16 @@ CODEX_RECORDS = frozenset({
 CODEX_EVENTS = frozenset({
     "user_message", "agent_message", "agent_reasoning", "patch_apply_end", "item_completed",
     "token_count", "task_started", "task_complete", "thread_settings_applied", "turn_aborted",
-    "sub_agent_activity", "web_search_end", "context_compacted",
+    "sub_agent_activity", "web_search_end", "context_compacted", "mcp_tool_call_end",
 })
 # The response_item types the stores show (the model's input and output),
-# and the content pieces a message of each role holds.
+# and the content pieces a message of each role holds. additional_tools
+# (from Codex 0.164, 2026-10-27) is the tool definitions offered to the
+# model, in the developer role.
 CODEX_RESPONSE_ITEMS = frozenset({
     "message", "reasoning", "function_call", "function_call_output", "custom_tool_call",
     "custom_tool_call_output", "agent_message", "web_search_call", "compaction", "tool_search_call",
-    "tool_search_output",
+    "tool_search_output", "additional_tools",
 })
 CODEX_MESSAGE_PIECES = {
     "user": frozenset({"input_text", "input_image"}),
