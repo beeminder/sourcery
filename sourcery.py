@@ -25,6 +25,11 @@ stores are pruned or machines change. A page sourcery 5 wrote, which
 carries its own snapshot instead, is refused until adopt.py has imported
 it.
 
+An OUTPUT name ending in .md, exactly, gets the page as Markdown instead,
+for reading where Markdown renders, as on GitHub: the same masthead, day
+headers, credits, prompts, and summaries, each reply collapsed under its
+summary as Markdown, quoted; no style, script, rail, or minimap.
+
 Nonstandard store locations can be supplied with path-separated environment
 variables: AI_CHAT_CLAUDE_ROOTS, AI_CHAT_CODEX_ROOTS, AI_CHAT_VSCODE_USER_ROOTS,
 AI_CHAT_ANTIGRAVITY_ROOTS.
@@ -183,7 +188,8 @@ def help_text() -> str:
 Arguments:
   REPODIR         Directory containing the project to extract the dialog from.
   OUTPUT.html     Generate new html.
-  --open          Open the generated HTML in the browser.
+  OUTPUT.md       Generate markdown.
+  --open         Open the generated HTML in the browser.
   -h, --help      This help text.
   --version       Show version.
 
@@ -3401,6 +3407,12 @@ def elapsed_text(seconds: float) -> str:
     return "".join(f"{n}{unit}" for n, unit in ((hours, "h"), (minutes, "m"), (secs, "s")) if n) or "0s"
 
 
+def tally_text(added: int, deleted: int) -> str:
+    """Signed line counts, added then deleted, as every diffstat writes
+    them."""
+    return f"+{added:,} −{deleted:,}"
+
+
 def diffstat(added: int, deleted: int) -> str:
     """The prompt's infographic: signed line counts and five blocks split by
     the added:deleted ratio (each whole line a block when five would cover
@@ -3422,7 +3434,7 @@ def diffstat(added: int, deleted: int) -> str:
         + '<span class="nil"></span>' * (5 - plus - minus)
     )
     return (
-        f'\n<div class="diffstat">+{added:,} −{deleted:,}'
+        f'\n<div class="diffstat">{tally_text(added, deleted)}'
         f' <span class="blocks" aria-hidden="true">{blocks}</span></div>'
     )
 
@@ -3443,7 +3455,7 @@ def minimap(exchanges: Sequence[Exchange], instants: Sequence[dt.datetime]) -> s
     for i, (e, at) in enumerate(zip(exchanges, instants)):
         x = 3 * i
         stamp = at.strftime("%H:%M")
-        title = f"{stamp} +{e.added:,} −{e.deleted:,}" if e.added or e.deleted else stamp
+        title = f"{stamp} {tally_text(e.added, e.deleted)}" if e.added or e.deleted else stamp
         bars = f'<rect class="hit" x="{x}" y="0" width="3" height="64"/>'
         if e.added:
             rise = round(30 * (e.added / peak) ** 0.5, 1)
@@ -3479,32 +3491,154 @@ PROVIDER_SLUGS = {
 assert len(set(PROVIDER_SLUGS.values())) == len(PROVIDER_SLUGS)
 
 
-def render(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = "") -> str:
-    """The page for every row of the ledgers, given as login to rows, all
-    in one chronology."""
+# The parts of a page that its Markdown form (render_markdown) shares, as
+# render writes them.
+
+
+def chronicle(ledgers: Mapping[str, Sequence[Exchange]]) -> tuple[list[tuple[str, Exchange]], list[dt.datetime]]:
+    """Every row of the ledgers, given as login to rows, as login and
+    exchange, all in one chronology; and each row's instant in UTC. Every
+    time and date a page shows is written in UTC, so the file is a function
+    of the ledgers alone, whoever runs sourcery; the page's script (JS)
+    re-renders them in the viewer's own zone."""
     rows = sorted(
         ((login, exchange) for login, exchanges in ledgers.items() for exchange in exchanges),
         key=lambda row: chronology(row[1]),
     )
-    assert rows, "render() requires at least one exchange"
-    exchanges = [exchange for _, exchange in rows]
-    # Every time and date on the page is written in UTC, so the file is a
-    # function of the ledgers alone, whoever runs sourcery; the page's
-    # script (JS) re-renders them in the viewer's own zone.
-    instants = [e.timestamp.astimezone(UTC) for e in exchanges]
+    assert rows, "a page requires at least one exchange"
+    return rows, [exchange.timestamp.astimezone(UTC) for _, exchange in rows]
+
+
+def deck_text(
+    exchanges: Sequence[Exchange],
+    instants: Sequence[dt.datetime],
+    ranged: Callable[[Sequence[str]], str] = " – ".join,
+) -> str:
+    """The masthead's deck: how many prompts, the days they span (the one,
+    or the first and last), written by `ranged`, and the lines they
+    changed."""
     first, last = instants[0].date().isoformat(), instants[-1].date().isoformat()
     count = len(exchanges)
     noun = "prompt" if count == 1 else "prompts"
     dates = (first,) if first == last else (first, last)
     total_added = sum(e.added for e in exchanges)
     total_deleted = sum(e.deleted for e in exchanges)
-    totals = f" · +{total_added:,} −{total_deleted:,}" if (total_added, total_deleted) != (0, 0) else ""
-    deck = f"{count} {noun} · {' – '.join(dates)}{totals}"
+    totals = f" · {tally_text(total_added, total_deleted)}" if (total_added, total_deleted) != (0, 0) else ""
+    return f"{count} {noun} · {ranged(dates)}{totals}"
+
+
+def day_label(at: dt.datetime) -> str:
+    """A day header's text: the instant's date and weekday."""
+    return f"{at.date().isoformat()} {WEEKDAYS[at.date().weekday()]}"
+
+
+def credit_tag(number: int, login: str, exchange: Exchange) -> str:
+    """The article's opening tag, which carries its credit (see CREDIT)."""
+    return (
+        f'<article class="exchange {PROVIDER_SLUGS[exchange.provider]}" id="p{number}"'
+        f' data-login="{html.escape(login, quote=True)}">'
+    )
+
+
+def ballots_html(exchange: Exchange) -> str:
+    """The exchange's ballots, one after another; "" when none."""
+    return "\n".join(
+        '<div class="ballot machine">'
+        f'\n<div class="ballot-question">{html.escape(ballot.question, quote=False)}</div>'
+        + "".join(
+            f'\n<div class="option{" picked" if label in ballot.picked else ""}">'
+            f'{"✓" if label in ballot.picked else "·"} {html.escape(label, quote=False)}</div>'
+            for label in ballot.options
+        )
+        + "\n</div>"
+        for ballot in exchange.ballots
+    )
+
+
+def prompt_html(exchange: Exchange) -> str:
+    return (
+        f'<pre class="prompt">{html.escape(exchange.prompt, quote=False)}</pre>'
+        if exchange.prompt != ""
+        else ""
+    )
+
+
+def attachments_html(exchange: Exchange) -> str:
+    attached = "".join(
+        f'<img class="attachment" src="{html.escape(uri, quote=True)}" alt="">'
+        for uri in exchange.images
+    )
+    return f'<div class="attachments">{attached}</div>' if attached else ""
+
+
+def summary_html(number: int, exchange: Exchange, at: dt.datetime) -> str:
+    """The exchange's disclosure line: its time, linking to its article,
+    then its agent, model, effort, working time, and session title."""
+    model = f' <span class="model">{html.escape(exchange.model)}</span>' if exchange.model else ""
+    effort = f' <span class="effort">({html.escape(exchange.effort)})</span>' if exchange.effort else ""
+    # The wall span renders only when it reads longer than the working
+    # time: an equal-at-display-precision span repeats the number beside
+    # it, and a shorter one (activity credited off records later than the
+    # last reply) answers a question nobody asked.
+    # TODO: Says the turn's full span by the wall clock, prompt to final
+    # reply, beside the active working time already shown.
+    wall = (
+        f" · {elapsed_text(exchange.wall)} wall-clock time"
+        if exchange.wall > exchange.elapsed
+        and elapsed_text(exchange.wall) != elapsed_text(exchange.elapsed)
+        else ""
+    )
+    thought = (
+        f' <span class="elapsed">thought for {elapsed_text(exchange.elapsed)}{wall}</span>'
+        if exchange.elapsed >= 0.5
+        else ""
+    )
+    # The session's title tells apart sessions the chronology interleaves.
+    # It is as often made up as typed, so it rides the meta line, never
+    # beside the human's words.
+    session_title = f' <span class="title">{html.escape(exchange.title)}</span>' if exchange.title else ""
+    return (
+        f'<a class="anchor" href="#p{number}">'
+        f'<time datetime="{exchange.timestamp.isoformat()}">{at.strftime("%H:%M")}</time></a>'
+        f' <span class="chip"></span>'
+        f' <span class="agent">{html.escape(exchange.provider)}</span>{model}{effort}{thought}{session_title}'
+    )
+
+
+def empty_reply_note(last: bool) -> str:
+    """What an exchange whose reply is empty shows in its place. The final
+    exchange of the export is the only one that can plausibly still be in
+    flight, so an empty reply there gets the still-generating note; an
+    empty reply anywhere else means there is none."""
+    return "Response still generating when this transcript was captured" if last else "No response."
+
+
+# TODO: Says this file is generated by sourcery and never hand-edited;
+# the memory of the dialog lives in the ledgers beside it
+# (sourcery.LOGIN.jsonl), from which the next generation renders it
+# anew, overwriting it, so don't edit it in place.
+WARNING_COMMENT = """<!-- Fasciculus hic a sourcery generatus est, numquam manu scriptus.
+     Memoria dialogi in tabulis iuxta positis (sourcery.LOGIN.jsonl)
+     servatur, ex quibus generatio proxima eum denuo reddit atque
+     superscribit. Noli emendare. -->"""
+
+
+def render(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = "") -> str:
+    """The page for every row of the ledgers, given as login to rows, all
+    in one chronology."""
+    rows, instants = chronicle(ledgers)
+    exchanges = [exchange for _, exchange in rows]
+    deck = deck_text(exchanges, instants)
     # On the page, the deck's date range is time elements in a span of its
     # own, for the script to rewrite; the description meta tags carry the
     # deck as plain text.
-    range_html = " – ".join(f'<time datetime="{day}">{day}</time>' for day in dates)
-    deck_html = f'{count} {noun} · <span class="range">{range_html}</span>{totals}'
+    deck_html = deck_text(
+        exchanges,
+        instants,
+        lambda dates: '<span class="range">'
+        + " – ".join(f'<time datetime="{day}">{day}</time>' for day in dates)
+        + "</span>",
+    )
 
     chunks: list[str] = []
     days: list[tuple[str, str]] = []  # (day, header text), one per day header
@@ -3512,81 +3646,24 @@ def render(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = 
     for number, ((login, exchange), at) in enumerate(zip(rows, instants), start=1):
         day = at.date().isoformat()
         if day != current_day:
-            weekday = WEEKDAYS[at.date().weekday()]
             chunks.append(
-                f'<h2 class="day" id="d{day}"><time datetime="{day}">{day} {weekday}</time>'
+                f'<h2 class="day" id="d{day}"><time datetime="{day}">{day_label(at)}</time>'
                 f' <span class="zone">{ZONE}</span></h2>'
             )
-            days.append((day, f"{day} {weekday}"))
+            days.append((day, day_label(at)))
             current_day = day
-        model = f' <span class="model">{html.escape(exchange.model)}</span>' if exchange.model else ""
-        effort = f' <span class="effort">({html.escape(exchange.effort)})</span>' if exchange.effort else ""
-        # The final exchange of the export is the only one that can plausibly
-        # still be in flight, so an empty reply there gets the still-
-        # generating note; an empty reply anywhere else means there is none.
-        if exchange.reply == "" and number == count:
-            reply = (
-                '<div class="reply machine empty">'
-                "<p>Response still generating when this transcript was captured</p></div>"
-            )
-        elif exchange.reply == "":
-            reply = '<div class="reply machine empty"><p>No response.</p></div>'
+        if exchange.reply == "":
+            reply = f'<div class="reply machine empty"><p>{empty_reply_note(number == len(rows))}</p></div>'
         else:
             reply = f'<div class="reply machine">{markdown_html(exchange.reply)}</div>'
-        # The wall span renders only when it reads longer than the working
-        # time: an equal-at-display-precision span repeats the number beside
-        # it, and a shorter one (activity credited off records later than the
-        # last reply) answers a question nobody asked.
-        # TODO: Says the turn's full span by the wall clock, prompt to final
-        # reply, beside the active working time already shown.
-        wall = (
-            f" · {elapsed_text(exchange.wall)} wall-clock time"
-            if exchange.wall > exchange.elapsed
-            and elapsed_text(exchange.wall) != elapsed_text(exchange.elapsed)
-            else ""
-        )
-        thought = (
-            f' <span class="elapsed">thought for {elapsed_text(exchange.elapsed)}{wall}</span>'
-            if exchange.elapsed >= 0.5
-            else ""
-        )
-        # The session's title tells apart sessions the chronology interleaves.
-        # It is as often made up as typed, so it rides the meta line, never
-        # beside the human's words.
-        session_title = f' <span class="title">{html.escape(exchange.title)}</span>' if exchange.title else ""
-        summary = (
-            f'<a class="anchor" href="#p{number}">'
-            f'<time datetime="{exchange.timestamp.isoformat()}">{at.strftime("%H:%M")}</time></a>'
-            f' <span class="chip"></span>'
-            f' <span class="agent">{html.escape(exchange.provider)}</span>{model}{effort}{thought}{session_title}'
-        )
-        attached = "".join(
-            f'<img class="attachment" src="{html.escape(uri, quote=True)}" alt="">'
-            for uri in exchange.images
-        )
-        attachments = f'\n<div class="attachments">{attached}</div>' if attached else ""
-        ballots = "".join(
-            '\n<div class="ballot machine">'
-            f'\n<div class="ballot-question">{html.escape(ballot.question, quote=False)}</div>'
-            + "".join(
-                f'\n<div class="option{" picked" if label in ballot.picked else ""}">'
-                f'{"✓" if label in ballot.picked else "·"} {html.escape(label, quote=False)}</div>'
-                for label in ballot.options
-            )
-            + "\n</div>"
-            for ballot in exchange.ballots
-        )
-        prompt = (
-            f'\n<pre class="prompt">{html.escape(exchange.prompt, quote=False)}</pre>'
-            if exchange.prompt != ""
-            else ""
+        parts = "".join(
+            f"\n{part}" for part in (ballots_html(exchange), prompt_html(exchange), attachments_html(exchange)) if part
         )
         chunks.append(
-            f'<article class="exchange {PROVIDER_SLUGS[exchange.provider]}" id="p{number}"'
-            f' data-login="{html.escape(login, quote=True)}">'
+            f"{credit_tag(number, login, exchange)}"
             f'\n<header><p class="speaker">{html.escape(display_name(login))}</p>'
-            f"{diffstat(exchange.added, exchange.deleted)}</header>{ballots}{prompt}{attachments}\n"
-            f"<details>\n<summary>{summary}</summary>\n{reply}\n</details>\n"
+            f"{diffstat(exchange.added, exchange.deleted)}</header>{parts}\n"
+            f"<details>\n<summary>{summary_html(number, exchange, at)}</summary>\n{reply}\n</details>\n"
             "</article>"
         )
 
@@ -3616,15 +3693,8 @@ def render(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = 
         where = html.escape(str(repo))
     # The warning comment must follow the doctype — a comment before it
     # would throw browsers into quirks mode.
-    # TODO: Says this file is generated by sourcery and never hand-edited;
-    # the memory of the dialog lives in the ledgers beside it
-    # (sourcery.LOGIN.jsonl), from which the next generation renders it
-    # anew, overwriting it, so don't edit it in place.
     return f"""<!doctype html>
-<!-- Fasciculus hic a sourcery generatus est, numquam manu scriptus.
-     Memoria dialogi in tabulis iuxta positis (sourcery.LOGIN.jsonl)
-     servatur, ex quibus generatio proxima eum denuo reddit atque
-     superscribit. Noli emendare. -->
+{WARNING_COMMENT}
 <html lang="und">
 <head>
 <meta charset="utf-8">
@@ -3654,6 +3724,91 @@ def render(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = 
 </body>
 </html>
 """
+
+
+# The "Markdown page" is the page as Markdown, for reading where Markdown
+# renders, as on GitHub: written instead of the page when the output's name
+# ends in .md (see renderer). It keeps the page's articles, credits and all,
+# and writes the data it shares with the page (prompts, ballots, images,
+# summaries) as the page writes it, in HTML blocks; its own text (masthead,
+# day headers, speaker lines) is Markdown, and each reply stays Markdown,
+# quoted. Markdown ends most HTML blocks at a blank line, so every block
+# stands apart from the next by one.
+
+
+# Every ASCII punctuation character: CommonMark lets a backslash escape any
+# of them.
+ASCII_PUNCTUATION = re.compile(r"[!-/:-@\[-`{-~]")
+
+
+def markdown_text(text: str) -> str:
+    """Data as Markdown text that reads as itself: every ASCII punctuation
+    character escaped, whether or not it would be markup where it lands.
+    Text holding a line ending is refused: no escape keeps it on its line."""
+    assert "\n" not in text and "\r" not in text, text
+    return ASCII_PUNCTUATION.sub(r"\\\g<0>", text)
+
+
+def markdown_destination(url: str) -> str:
+    """A link destination that is url exactly: in angle brackets, which
+    allow anything but a line ending, escaping the angle brackets and
+    backslashes url holds."""
+    assert "\n" not in url and "\r" not in url, url
+    return "<" + re.sub(r"[<>\\]", r"\\\g<0>", url) + ">"
+
+
+def quoted(text: str) -> str:
+    """Markdown as a blockquote: every line, at each of Markdown's line
+    endings (CRLF, CR, LF), behind a quote marker, a blank line behind a
+    bare one. Whatever block the text opens (a code fence it never closes,
+    say) ends with the quote, and no line of it starts a line of the
+    Markdown page, where a credit would be read."""
+    return "\n".join(f"> {line}" if line else ">" for line in re.split(r"\r\n|\r|\n", text))
+
+
+def render_markdown(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = "") -> str:
+    """The Markdown page for every row of the ledgers, given as login to
+    rows, all in one chronology."""
+    rows, instants = chronicle(ledgers)
+    exchanges = [exchange for _, exchange in rows]
+    if remote:
+        label = remote.removeprefix("https://").removeprefix("http://")
+        where = f"[{markdown_text(label)}]({markdown_destination(remote)})"
+    else:
+        where = markdown_text(str(repo))
+    blocks = [
+        WARNING_COMMENT,
+        "[generated by sourcery](https://github.com/beeminder/sourcery)",
+        f"# {markdown_text(repo.name)}",
+        deck_text(exchanges, instants),
+        where,
+    ]
+    current_day = None
+    for number, ((login, exchange), at) in enumerate(zip(rows, instants), start=1):
+        day = at.date().isoformat()
+        if day != current_day:
+            blocks.append(f"## {day_label(at)} {ZONE}")
+            current_day = day
+        changed = (exchange.added, exchange.deleted) != (0, 0)
+        tally = f" · {tally_text(exchange.added, exchange.deleted)}" if changed else ""
+        blocks += [
+            credit_tag(number, login, exchange),
+            f"**{markdown_text(display_name(login))}**{tally}",
+            ballots_html(exchange),
+            prompt_html(exchange),
+            attachments_html(exchange),
+            f"<details>\n<summary>{summary_html(number, exchange, at)}</summary>",
+            quoted(exchange.reply or empty_reply_note(number == len(rows))),
+            "</details>",
+            "</article>",
+        ]
+    return "\n\n".join(block for block in blocks if block) + "\n"
+
+
+def renderer(output: Path) -> Callable[[Path, Mapping[str, Sequence[Exchange]], str], str]:
+    """What renders the output, by its name: the Markdown page when its last
+    suffix is exactly .md, the page otherwise."""
+    return render_markdown if output.suffix == ".md" else render
 
 
 # ------------------------------------------------------------------- ledgers
@@ -3900,13 +4055,17 @@ def read_ledgers(
 # each article carries the login in a data-login attribute, beside the row's
 # provider (the article's class) and time (its summary's time element), so a
 # run can check the page against the ledgers without reading display names.
-# Typed text is escaped on the page, so none can forge a credit.
+# Typed text is escaped on the page, so none can forge a credit. The
+# Markdown page keeps each reply unescaped, but quoted, so no line of it
+# starts a line of the page: credits and articles are read only at a line's
+# start.
 PROVIDER_NAMES = {slug: name for name, slug in PROVIDER_SLUGS.items()}
 CREDIT = re.compile(
-    rf'<article class="exchange ({"|".join(map(re.escape, PROVIDER_NAMES))})" id="p[0-9]+"'
+    rf'^<article class="exchange ({"|".join(map(re.escape, PROVIDER_NAMES))})" id="p[0-9]+"'
     r' data-login="([^"]*)">.*?<time datetime="([^"]*)">',
-    re.DOTALL,
+    re.DOTALL | re.MULTILINE,
 )
+ARTICLE = re.compile(r"^<article ", re.MULTILINE)
 
 
 def page_credits(output: Path) -> set[tuple[str, Holding]]:
@@ -3926,7 +4085,7 @@ def page_credits(output: Path) -> set[tuple[str, Holding]]:
             f"Pagina exsistens legi non potest: {output}\n{exc}\nNihil scriptum est."
         ) from exc
     credits = CREDIT.findall(page)
-    if not 0 < len(credits) == page.count("<article "):
+    if not 0 < len(credits) == len(ARTICLE.findall(page)):
         # TODO: Says the existing output was not written by sourcery 6: it
         # does not credit every prompt it shows to a ledger, so it cannot be
         # checked against the ledgers. A page sourcery 5 wrote, carrying a
@@ -4221,7 +4380,7 @@ def run(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None)
             raise no_exchanges_error(repo, roots)
         # The page is rendered before anything is written, so a refusal found
         # while rendering it writes nothing.
-        page = render(repo, ledgers, remote)
+        page = renderer(options.output)(repo, ledgers, remote)
         ledger = ledger_path(options.output, login)
         write_output(ledger, ledger_text(project, mine))
         write_output(options.output, page)
