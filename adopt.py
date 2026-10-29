@@ -183,7 +183,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         # The page is rendered before anything is written, so a refusal found
         # while rendering it writes nothing.
-        rendered = sourcery.render(repo, ledgers, remote)
+        rendered = sourcery.renderer(output)(repo, ledgers, remote)
         ledger = sourcery.ledger_path(output, login)
         sourcery.write_output(ledger, sourcery.ledger_text(project, ledgers[login]))
         sourcery.write_output(output, rendered)
