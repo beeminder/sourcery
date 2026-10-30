@@ -1,7 +1,7 @@
 #!/usr/bin/env python3.14
 """Export the human side of a repo's AI coding dialogue to one HTML page.
 
-Reads the local transcript stores of four coding agents and produces a
+Reads the local transcript stores of five coding agents and produces a
 single self-contained HTML document, ordered by timestamp. The human's
 prompts are the only text visible by default, each under a label naming
 the human who typed it; everything machine-generated is collapsed behind a
@@ -13,6 +13,8 @@ stores:
 - Copilot Chat: VS Code User/workspaceStorage/*/chatSessions/*.{json,jsonl}
 - Antigravity:  ~/.gemini/antigravity/conversations/*.pb (sealed protobuf;
                 opened through the system cipher, macOS only)
+- Codebuff:     ~/.config/manicode/projects/NAME/chats/*/ (NAME the repo
+                directory's name)
 
 Usage:
     python3 sourcery.py REPODIR OUTPUT.html [--open]
@@ -32,7 +34,7 @@ summary as Markdown, quoted; no style, script, rail, or minimap.
 
 Nonstandard store locations can be supplied with path-separated environment
 variables: AI_CHAT_CLAUDE_ROOTS, AI_CHAT_CODEX_ROOTS, AI_CHAT_VSCODE_USER_ROOTS,
-AI_CHAT_ANTIGRAVITY_ROOTS.
+AI_CHAT_ANTIGRAVITY_ROOTS, AI_CHAT_CODEBUFF_ROOTS.
 
 Jargon: an "exchange" is one human prompt plus everything the agent said
 back before the next human prompt; "weaving" merges every store's exchanges
@@ -75,7 +77,7 @@ from compression import zstd
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "6.3.0"
+VERSION = "6.4.0"
 UTC = dt.timezone.utc
 
 
@@ -166,9 +168,10 @@ class Roots:
     codex: tuple[Path, ...]
     vscode: tuple[Path, ...]
     antigravity: tuple[Path, ...]
+    codebuff: tuple[Path, ...]
 
     def all(self) -> tuple[Path, ...]:
-        return self.claude + self.codex + self.vscode + self.antigravity
+        return self.claude + self.codex + self.vscode + self.antigravity + self.codebuff
 
 
 @dataclasses.dataclass(frozen=True)
@@ -198,6 +201,7 @@ Environment variables (separated by {os.pathsep!r}) for nonstandard transcript l
   AI_CHAT_CODEX_ROOTS
   AI_CHAT_VSCODE_USER_ROOTS
   AI_CHAT_ANTIGRAVITY_ROOTS
+  AI_CHAT_CODEBUFF_ROOTS
 """
 
 
@@ -374,6 +378,7 @@ def discover_roots(env: Mapping[str, str]) -> Roots:
         codex=env_paths(env, "AI_CHAT_CODEX_ROOTS", (codex_default,)),
         vscode=env_paths(env, "AI_CHAT_VSCODE_USER_ROOTS", default_vscode_roots(home)),
         antigravity=env_paths(env, "AI_CHAT_ANTIGRAVITY_ROOTS", (home / ".gemini" / "antigravity",)),
+        codebuff=env_paths(env, "AI_CHAT_CODEBUFF_ROOTS", (home / ".config" / "manicode",)),
     )
 
 
@@ -2591,6 +2596,552 @@ def antigravity_parse(path: Path, repo: Path, key: bytes) -> tuple[list[Exchange
     return paired("Antigravity", session, messages, path, (pending, 0, 0)), holdings
 
 
+# ------------------------------------------------------------------- Codebuff
+
+# Codebuff, a coding agent run in the terminal (first named Manicode), keeps
+# each chat in a folder of its own, ~/.config/manicode/projects/NAME/chats/ID:
+# NAME is the name of the directory Codebuff ran in, its last path segment
+# alone (so two directories of one name share a folder), and ID the time
+# the chat began, its colons written as hyphens. Beside chats/, a project's
+# folder may hold Codebuff's file checkpoints (a bare git repository named
+# by 64 hex digits) and the profile of a browser it drives; neither holds a
+# transcript.
+#
+# A chat's folder holds Codebuff's debug log, log.jsonl, and one of two
+# histories, in this file's jargon the "messages" history (Codebuff before
+# 2025-11-19: messages.json, what it sent the model, the words typed among
+# text it wrote itself) and the "blocks" history (after: chat-messages.json,
+# what the chat showed, beside run-state.json). A log may stand alone, its
+# history never written. From 2025-09 the log stamps each input as it is
+# typed, which gives a messages history its prompts' times; before then
+# nothing records them (see codebuff_after). A blocks history's log runs to
+# hundreds of megabytes and is never read: the history records all a page
+# shows.
+#
+# To drop Codebuff, delete this section, its loop in collect(), and the
+# codebuff field of Roots with its variable. Rows already in ledgers stay
+# and render, kept from the ledgers as claude.ai's are, since no store then
+# holds them.
+CODEBUFF_CHAT = re.compile(r"(\d{4}-\d\d-\d\dT)(\d\d)-(\d\d)-(\d\d\.\d{3}Z)")
+CODEBUFF_BESIDE = frozenset({"chats", "_browser_profile"})
+CODEBUFF_CHECKPOINTS = re.compile(r"[0-9a-f]{64}")
+# Every tool a chat has called. A tool no chat has called may carry words
+# for the human (a question, say), so it is refused, not passed; tools of
+# MCP servers (SERVER__TOOL) pass, as server output.
+CODEBUFF_TOOLS = frozenset({
+    "add_subgoal", "browser_logs", "code_search", "create_plan", "end_turn", "glob", "list_directory",
+    "parse_error", "propose_str_replace", "propose_write_file", "read_docs", "read_files", "read_subtree",
+    "run_terminal_command", "set_messages", "set_output", "spawn_agents", "str_replace", "suggest_followups",
+    "think_deeply", "update_subgoal", "web_search", "write_file", "write_todos",
+})
+CODEBUFF_MCP_TOOL = re.compile(r"[a-z0-9-]+__[a-z0-9_]+")
+# The tools whose results report a change made to a file. (A best-of-n run's
+# candidates are proposals, which change nothing.) A created file's change
+# is its whole content; any other is a diff's hunks.
+CODEBUFF_EDITS = frozenset({"str_replace", "write_file"})
+CODEBUFF_CREATED = "Created new file"
+
+# The messages history puts in the user role, beside the words typed, text
+# Codebuff wrote: wrappers that open it,
+CODEBUFF_WRAPPERS = (
+    "<system>", "<system_instructions>", "<tool_result>", "<tool_results>", "<previous_assistant_message>",
+    "<user_edits_since_last_chat>", "<subgoal>", "<terminal_command_result>",
+)
+# its standing instructions, after any knowledge files it sent along,
+CODEBUFF_INSTRUCTIONS = re.compile(r"<system_instructions>.*</system_instructions>", re.DOTALL)
+# and the openings of its other injections, a browser tool's result among
+# them, which early versions sent as the human's.
+CODEBUFF_INJECTIONS = (
+    "Instructions for THIS turn (Follow ALL applicable points below):",
+    "If the tool result above is of a terminal command succeeding",
+    "Please summarize briefly the action taken, but do not call the think_deeply tool again",
+    "\n\n## Tools\nUse the tools below to complete the user request",
+    '{"success":',
+)
+# Words typed, as the history wraps them from 2025-06; before, they stand
+# bare.
+CODEBUFF_TYPED = re.compile(r"<user_message>(.*)</user_message>", re.DOTALL)
+# The agent's words among those wrappers: a reply of an earlier turn, which
+# Codebuff resent wrapped (in 2025-05 the whole conversation went in the
+# user role); what had arrived of a reply the human cancelled; and
+# Codebuff's own placeholder for history it truncated away, which stands
+# where the replies it replaced stood, so the page says what the store says
+# ("No response." would be false: there was one, Codebuff dropped it).
+CODEBUFF_SAID = re.compile(
+    r"<previous_assistant_message>(.*)</previous_assistant_message>"
+    r"|<system><assistant_message>(.*)</assistant_message>\[RESPONSE_CANCELED_BY_USER\]</system>"
+    r"|(<system>Previous message\(s\) omitted due to length</system>)",
+    re.DOTALL,
+)
+# Tool calls in the agent's words, in each form Codebuff wrote them, cut from
+# the reply as other agents' tool calls are.
+CODEBUFF_CALLS = re.compile(
+    r"<codebuff_tool_call>.*?</codebuff_tool_call>|<tool_call name=\"[^\"]*\">.*?</tool_call>"
+    r"|<(add_subgoal|await_tool_results|browser_logs|code_search|create_plan|end_turn|read_files|research"
+    r"|run_terminal_command|spawn_agents|str_replace|think_deeply|update_subgoal|write_file)>.*?</\1>",
+    re.DOTALL,
+)
+CODEBUFF_MESSAGE_KEYS = (
+    frozenset({"role", "content"}),
+    frozenset({"tags", "keepDuringTruncation", "keepLastTags", "providerOptions", "timeToLive"}),
+)
+CODEBUFF_TAGS = frozenset({"USER_PROMPT", "INSTRUCTIONS_PROMPT"})
+# The pieces a user message's content may be: words, and an image (only
+# ever a screenshot a browser tool took).
+CODEBUFF_PIECES = {
+    "text": (frozenset({"type", "text"}), frozenset({"cache_control"})),
+    "image": (frozenset({"type", "source"}), frozenset()),
+}
+# The label of the log record of an input as it is typed.
+CODEBUFF_STAMP = "CLI auto-detect: Extracted image paths"
+
+# The keys each message of a blocks history has, then those only some have.
+CODEBUFF_PROMPT_KEYS = (frozenset({"id", "variant", "content", "timestamp"}), frozenset({"textAttachments", "validationErrors"}))
+CODEBUFF_REPLY_KEYS = (
+    frozenset({"id", "variant", "content", "blocks", "timestamp"}),
+    frozenset({"completionTime", "credits", "isComplete", "metadata", "userError"}),
+)
+CODEBUFF_ATTACHMENT_KEYS = (frozenset({"id", "content"}), frozenset({"preview", "charCount"}))
+CODEBUFF_QUESTION_KEYS = (frozenset({"question", "options", "multiSelect"}), frozenset({"header"}))
+CODEBUFF_PROMPT_ID = re.compile(r"user-(\d+)")
+CODEBUFF_REPLY_ID = re.compile(r"ai-(\d+)-[0-9a-f]+")
+CODEBUFF_DIVIDER_ID = re.compile(r"divider-\d+")
+CODEBUFF_COMPLETION = re.compile(r"(\d+)s|(\d+)m(?: (\d+)s)?")
+# A reply's content: empty, its words being in its blocks, or Codebuff's
+# notice of a failed run, which, like a reply's userError, is no word of
+# the agent's and is not shown.
+CODEBUFF_REPLY_CONTENT = re.compile(r"|\*\*Error:\*\* Agent run error: .*", re.DOTALL)
+# The blocks a reply holds: words, reasoning (never shown), tool calls,
+# subagents, the agent's questions, its plans. A subagent's own blocks are
+# read only for the lines they changed.
+CODEBUFF_BLOCKS = frozenset({"text", "tool", "agent", "ask-user", "plan"})
+CODEBUFF_SUBAGENT_BLOCKS = frozenset({"text", "tool", "agent"})
+CODEBUFF_TEXT_KINDS = frozenset({"text", "reasoning"})
+
+
+def codebuff_keys(record: Any, keys: tuple[frozenset[str], frozenset[str]], what: str) -> None:
+    """Refuse a record that lacks a key every such record has, or holds one
+    no store has shown."""
+    required, optional = keys
+    if not (isinstance(record, dict) and required <= record.keys() <= required | optional):
+        raise ValueError(f"{what} {sorted(record) if isinstance(record, dict) else type(record).__name__}")
+
+
+def codebuff_match(pattern: re.Pattern[str], text: Any, what: str) -> re.Match[str]:
+    found = pattern.fullmatch(text) if isinstance(text, str) else None
+    if found is None:
+        raise ValueError(f"{what} {text!r:.80}")
+    return found
+
+
+def codebuff_after(at: dt.datetime, count: int) -> dt.datetime:
+    """The time given a human act the store records no time for: a prompt
+    in a chat older than the log's stamps, or answers to the agent's
+    questions. It is the last time the store records before the act, plus
+    the act's place among such acts in microseconds, so the acts keep their
+    order and each its own holding; the page, showing minutes, shows that
+    recorded time."""
+    return at + dt.timedelta(microseconds=count)
+
+
+def codebuff_tool(name: Any) -> str:
+    if not isinstance(name, str) or not (name in CODEBUFF_TOOLS or CODEBUFF_MCP_TOOL.fullmatch(name)):
+        raise ValueError(f"tool {name!r}")
+    return name
+
+
+def codebuff_change_tally(created: bool, change: str) -> tuple[int, int]:
+    """A created file's lines, every one added; otherwise a diff's hunks."""
+    if created:
+        return (len(change.splitlines()), 0)
+    lines = change.split("\n")
+    if not lines[0].startswith("@@"):
+        raise ValueError(f"change {change!r:.80}")
+    return diff_tally(lines)
+
+
+def codebuff_edit_tally(output: Any) -> tuple[int, int]:
+    """The lines a blocks-history edit changed, from its output: the file,
+    a message, and the change, set out as an indented block. An edit that
+    changed nothing says so instead."""
+    if not isinstance(output, str):
+        raise ValueError(f"edit output {output!r:.80}")
+    if not output.startswith("file: "):
+        if not output.endswith("No change to the file"):
+            raise ValueError(f"edit output {output!r:.80}")
+        return (0, 0)
+    lines = output.split("\n")
+    body = lines[lines.index("unifiedDiff: |") + 1:]
+    if not all(line.startswith("    ") for line in body):
+        raise ValueError(f"edit output {output!r:.80}")
+    return codebuff_change_tally(lines[1] == f"message: {CODEBUFF_CREATED}", "\n".join(line[4:] for line in body))
+
+
+def codebuff_block_tally(block: Mapping[str, Any]) -> tuple[int, int]:
+    """The lines a block changed: an edit's, every edit of a subagent's
+    (Codebuff's main agent hands most edits to subagents), or none."""
+    match block["type"]:
+        case "tool":
+            name = codebuff_tool(block["toolName"])
+            return codebuff_edit_tally(block["output"]) if name in CODEBUFF_EDITS else (0, 0)
+        case "agent":
+            added = deleted = 0
+            for inner in block["blocks"]:
+                if inner["type"] not in CODEBUFF_SUBAGENT_BLOCKS:
+                    raise ValueError(f"subagent block {inner['type']!r}")
+                a, d = codebuff_block_tally(inner)
+                added, deleted = added + a, deleted + d
+            return (added, deleted)
+        case _:
+            return (0, 0)
+
+
+def codebuff_answers(block: Mapping[str, Any]) -> tuple[str, tuple[Ballot, ...]] | None:
+    """The human's answers to the agent's questions: the words typed, and a
+    ballot for each question answered, its picked options those clicked
+    (none for a typed answer). None when the human skipped the questions."""
+    codebuff_keys(block, (frozenset({"type", "toolCallId", "questions"}), frozenset({"answers", "skipped"})), "questions")
+    questions: list[tuple[str, tuple[str, ...]]] = []
+    for question in block["questions"]:
+        codebuff_keys(question, CODEBUFF_QUESTION_KEYS, "question")
+        for option in question["options"]:
+            codebuff_keys(option, (frozenset({"label", "description"}), frozenset()), "option")
+        questions.append((question["question"], tuple(option["label"] for option in question["options"])))
+    match block:
+        case {"skipped": True} if "answers" not in block:
+            return None
+        case {"answers": list() as answers} if "skipped" not in block:
+            pass
+        case _:
+            raise ValueError("questions neither answered nor skipped")
+    typed: list[str] = []
+    ballots: list[Ballot] = []
+    for answer in answers:
+        match answer:
+            case {"questionIndex": int() as index, "selectedOption": str() as label} if len(answer) == 2:
+                picked: tuple[str, ...] = (label,)
+            case {"questionIndex": int() as index, "selectedOptions": list() as labels} if len(answer) == 2:
+                picked = tuple(labels)
+            case {"questionIndex": int() as index, "otherText": str() as words} if len(answer) == 2:
+                picked = ()
+                typed.append(words)
+            case _:
+                raise ValueError(f"answer {answer!r:.80}")
+        question, options = questions[index]
+        if not set(picked) <= set(options):
+            raise ValueError(f"answer naming no option {picked!r:.80}")
+        ballots.append(Ballot(question=question, options=options, picked=picked))
+    return "\n\n".join(typed), tuple(ballots)
+
+
+def codebuff_reply(message: Mapping[str, Any], prompted: dt.datetime, logged: str) -> list[Message]:
+    """A blocks-history reply to the prompt sent at `prompted`, as messages:
+    the agent's words, and, at each set of questions the human answered,
+    the answers, which begin an exchange of their own. The reply's run
+    records the model, in its run state's template of the main agent (a
+    reply cut short has no run state; one from before 2025-12 has no
+    templates, and takes the model its chat's log names, `logged`), and the
+    run's span, the agent's work unless the run waited on the human."""
+    codebuff_keys(message, CODEBUFF_REPLY_KEYS, "reply")
+    codebuff_match(CODEBUFF_REPLY_CONTENT, message["content"], "reply content")
+    began = parse_time(int(codebuff_match(CODEBUFF_REPLY_ID, message["id"], "reply id")[1]))
+    model = logged
+    if "metadata" in message:
+        state = message["metadata"]["runState"]["sessionState"]
+        templates = state["fileContext"]["agentTemplates"]
+        model = templates[state["mainAgentState"]["agentType"]]["model"] if templates else logged
+    blocks = message["blocks"]
+    seconds = 0.0
+    if "completionTime" in message and not any(block["type"] == "ask-user" for block in blocks):
+        found = codebuff_match(CODEBUFF_COMPLETION, message["completionTime"], "completion time")
+        seconds = float(int(found[1] or 0) + 60 * int(found[2] or 0) + int(found[3] or 0))
+    messages: list[Message] = []
+    words: list[str] = []
+    added = deleted = 0
+    at = prompted
+    for block in blocks:
+        kind = block["type"]
+        if kind not in CODEBUFF_BLOCKS:
+            raise ValueError(f"block {kind!r}")
+        a, d = codebuff_block_tally(block)
+        added, deleted = added + a, deleted + d
+        match kind:
+            case "text":
+                if block["textType"] not in CODEBUFF_TEXT_KINDS:
+                    raise ValueError(f"text kind {block['textType']!r}")
+                if block["textType"] == "text" and block["content"].strip():
+                    words.append(block["content"])
+            case "plan":
+                codebuff_keys(block, (frozenset({"type", "content"}), frozenset()), "plan")
+                words.append(block["content"])
+            case "ask-user":
+                answers = codebuff_answers(block)
+                if answers is not None:
+                    messages.append(Message("assistant", at, "\n\n".join(words), model, added=added, deleted=deleted))
+                    words, added, deleted = [], 0, 0
+                    at = codebuff_after(began, sum(m.role == "user" for m in messages) + 1)
+                    messages.append(Message("user", at, answers[0], ballots=answers[1]))
+    messages.append(Message(
+        "assistant", at + dt.timedelta(seconds=seconds), "\n\n".join(words), model,
+        active=seconds, added=added, deleted=deleted,
+    ))
+    return messages
+
+
+def codebuff_logged_model(log: Path) -> str:
+    """The model a blocks chat's log names at every step its main agent
+    took; "" when the steps name several (nothing says which reply used
+    which) or none."""
+    models: set[str] = set()
+    for line in log.read_bytes().split(b"\n"):
+        if b"main-agent" in line and b"Start agent " in line:
+            record = json.loads(line)
+            if record["msg"].startswith("Start agent ") and record["data"].get("agentId") == "main-agent":
+                models.add(record["data"]["model"])
+    return models.pop() if len(models) == 1 else ""
+
+
+def codebuff_blocks(chat: Path, repo: Path) -> tuple[list[Exchange], set[Holding]] | None:
+    """A chat's blocks history: its prompts, the replies (a reply the human
+    stopped may be followed by a second, the agent summing up), and the
+    human's answers to the agent's questions. None when its run state says
+    Codebuff ran in another directory of the repo's name."""
+    context = read_json(chat / "run-state.json")["sessionState"]["fileContext"]
+    if not under_dir(context["projectRoot"], repo, chat):
+        return None
+    # Before 2025-12 a run state held no agent templates, so only the log
+    # names the main agent's model; only then is the log opened.
+    logged = "" if context["agentTemplates"] else codebuff_logged_model(chat / "log.jsonl")
+    messages: list[Message] = []
+    sent: dt.datetime | None = None  # when the last prompt was sent
+    for message in read_json(chat / "chat-messages.json"):
+        match message["variant"]:
+            case "user":
+                codebuff_keys(message, CODEBUFF_PROMPT_KEYS, "prompt")
+                sent = parse_time(int(codebuff_match(CODEBUFF_PROMPT_ID, message["id"], "prompt id")[1]))
+                # A long paste Codebuff kept apart, as a text attachment
+                # (beside a preview and a count of its characters).
+                pasted = []
+                for attachment in message.get("textAttachments", []):
+                    codebuff_keys(attachment, CODEBUFF_ATTACHMENT_KEYS, "attachment")
+                    pasted.append(attachment["content"])
+                messages.append(Message("user", sent, "\n\n".join(part for part in [message["content"], *pasted] if part)))
+            case "ai" if message["id"].startswith("divider-"):
+                # The marker shown where the chat's mode changed.
+                codebuff_keys(message, CODEBUFF_REPLY_KEYS, "divider")
+                codebuff_match(CODEBUFF_DIVIDER_ID, message["id"], "divider id")
+                match message["content"], message["blocks"]:
+                    case "", [{"type": "mode-divider", "mode": str()} as divider] if len(divider) == 2:
+                        pass
+                    case _:
+                        raise ValueError(f"divider {message['blocks']!r:.80}")
+            case "ai":
+                if sent is None:
+                    raise ValueError("a reply to no prompt")
+                messages.extend(codebuff_reply(message, sent, logged))
+            case variant:
+                raise ValueError(f"message {variant!r}")
+    holdings = {("Codebuff", message.timestamp) for message in messages if message.role == "user"}
+    return paired("Codebuff", chat.name, messages, chat), holdings
+
+
+def codebuff_typed(text: str) -> str | None:
+    """The words a messages-history text in the user role holds as typed,
+    or None when Codebuff wrote it. A text that is no known injection is
+    typed, as a prompt opening with markup may be."""
+    found = CODEBUFF_TYPED.fullmatch(text)
+    if found is not None:
+        return found[1]
+    if text.startswith(CODEBUFF_WRAPPERS + CODEBUFF_INJECTIONS) or CODEBUFF_INSTRUCTIONS.search(text):
+        return None
+    return text
+
+
+def codebuff_said(text: str) -> str:
+    """The agent's words a messages-history text in the user role holds,
+    without its tool calls; "" when it holds none."""
+    found = CODEBUFF_SAID.fullmatch(text)
+    return CODEBUFF_CALLS.sub("", "".join(part for part in found.groups() if part)) if found else ""
+
+
+def codebuff_stamps(log: Path) -> list[tuple[dt.datetime, str]] | None:
+    """The inputs the log stamps as typed, in order, with their times; an
+    empty input (Return on an empty line) types nothing. None when the log
+    stamps no input, as Codebuff's logs did not before 2025-09."""
+    label = json.dumps(CODEBUFF_STAMP).encode()
+    stamps: list[tuple[dt.datetime, str]] = []
+    stamping = False  # whether the log stamps inputs at all
+    for line in log.read_bytes().split(b"\n"):
+        if label not in line:
+            continue
+        record = json.loads(line)
+        if record.get("data") != CODEBUFF_STAMP:
+            continue  # a record quoting the label, which is no stamp
+        match record["msg"]:
+            case {"input": str() as words, "imagePaths": [], "count": 0} if len(record["msg"]) == 3:
+                stamping = True
+            case stamp:
+                raise ValueError(f"stamp {stamp!r:.80}")
+        if words:
+            stamps.append((parse_time(record["timestamp"]), words))
+    return stamps if stamping else None
+
+
+def codebuff_history(chat: Path, repo: Path) -> tuple[list[Exchange], set[Holding]]:
+    """A chat's messages history, or its log alone: the prompts and replies,
+    each prompt at the time the log stamped it, or, in a chat whose log
+    stamps none, at the time the chat began, in order (see codebuff_after).
+    An input the log stamps that never reached the history is a prompt
+    with no reply; a prompt in the history the log never stamped is a shape
+    no store has shown. Such a chat records no directory, so its folder
+    alone makes it the repo's, and `repo` goes unread."""
+    source = chat / "messages.json"
+    history: list[Any] = []
+    if source.exists():
+        record = read_json(source)
+        codebuff_keys(record, (frozenset({"id", "messages", "updatedAt"}), frozenset()), "history")
+        if record["id"] != chat.name:
+            raise ValueError(f"history of {record['id']!r}")
+        history = record["messages"]
+    log = chat / "log.jsonl"
+    stamped = codebuff_stamps(log) if log.exists() else None
+    stamps = iter(stamped or [])
+    start = codebuff_time(chat)
+    messages: list[Message] = []
+    added = deleted = 0  # lines changed since the last message
+    at = start  # when the last prompt was typed
+
+    def emit(role: str, when: dt.datetime, text: str) -> None:
+        nonlocal added, deleted
+        messages.append(Message(role, when, text, added=added, deleted=deleted))
+        added = deleted = 0
+
+    for message in history:
+        codebuff_keys(message, CODEBUFF_MESSAGE_KEYS, "message")
+        if not {*message.get("tags", []), *message.get("keepLastTags", [])} <= CODEBUFF_TAGS:
+            raise ValueError(f"tags {message.get('tags')!r} {message.get('keepLastTags')!r}")
+        match message["role"], message["content"]:
+            case "tool", content:
+                a, d = codebuff_result_tally(content)
+                added, deleted = added + a, deleted + d
+            case "assistant", str() as content:
+                words = CODEBUFF_CALLS.sub("", content)
+                if words.strip():
+                    emit("assistant", at, words)
+            case "user", content:
+                pieces = [{"type": "text", "text": content}] if isinstance(content, str) else content
+                for piece in pieces:
+                    if piece["type"] not in CODEBUFF_PIECES:
+                        raise ValueError(f"piece {piece['type']!r}")
+                    codebuff_keys(piece, CODEBUFF_PIECES[piece["type"]], "piece")
+                texts = [piece["text"] for piece in pieces if piece["type"] == "text"]
+                typed = [words for words in map(codebuff_typed, texts) if words is not None]
+                if typed and len(texts) < len(pieces):
+                    raise ValueError("an image beside typed words")
+                for text in texts:
+                    said = codebuff_said(text)
+                    if said.strip():
+                        emit("assistant", at, said)
+                for words in typed:
+                    if stamped is None:
+                        at = codebuff_after(start, sum(m.role == "user" for m in messages))
+                    else:
+                        for at, entered in stamps:
+                            if entered == words:
+                                break
+                            emit("user", at, entered)  # typed, but it never reached the history
+                        else:
+                            raise ValueError(f"a prompt no stamp names {words!r:.80}")
+                    emit("user", at, words)
+            case role, _:
+                raise ValueError(f"message {role!r}")
+    for at, entered in stamps:
+        emit("user", at, entered)
+    holdings = {("Codebuff", message.timestamp) for message in messages if message.role == "user"}
+    return paired("Codebuff", chat.name, messages, chat, (0.0, added, deleted)), holdings
+
+
+def codebuff_result_tally(content: Any) -> tuple[int, int]:
+    """The lines a messages-history tool result says it changed: only an
+    edit's result kept whole says by how much."""
+    codebuff_keys(content, (frozenset({"type", "toolCallId", "toolName", "output"}), frozenset()), "tool result")
+    if content["type"] != "tool-result":
+        raise ValueError(f"tool result {content['type']!r}")
+    name = codebuff_tool(content["toolName"])
+    added = deleted = 0
+    for item in content["output"]:
+        codebuff_keys(item, (frozenset({"type", "value"}), frozenset()), "tool output")
+        if item["type"] != "json":
+            raise ValueError(f"tool output {item['type']!r}")
+        value = item["value"]
+        if name in CODEBUFF_EDITS and isinstance(value, dict) and "unifiedDiff" in value:
+            a, d = codebuff_change_tally(value["message"] == CODEBUFF_CREATED, value["unifiedDiff"])
+            added, deleted = added + a, deleted + d
+    return (added, deleted)
+
+
+def codebuff_time(chat: Path) -> dt.datetime:
+    """When the chat began, as its folder's name records it."""
+    found = codebuff_match(CODEBUFF_CHAT, chat.name, "chat")
+    return parse_time(f"{found[1]}{found[2]}:{found[3]}:{found[4]}")
+
+
+# The files a chat's folder holds, by layout, and the reader of each.
+CODEBUFF_LAYOUTS: dict[frozenset[str], Callable[[Path, Path], tuple[list[Exchange], set[Holding]] | None]] = {
+    frozenset({"log.jsonl"}): codebuff_history,
+    frozenset({"messages.json"}): codebuff_history,
+    frozenset({"messages.json", "log.jsonl"}): codebuff_history,
+    frozenset({"chat-messages.json", "run-state.json", "log.jsonl"}): codebuff_blocks,
+}
+
+
+def codebuff_chats(root: Path, repo: Path) -> list[Path]:
+    """The chat folders Codebuff keeps under the repo's directory name. Any
+    entry there that is neither a chat nor what Codebuff keeps beside its
+    chats may hold a transcript, and is refused."""
+    project = root / "projects" / repo.name
+    if not project.is_dir():
+        return []
+    for entry in sorted(p for p in project.iterdir() if p.name not in STORE_LITTER):
+        if not entry.is_dir() or not (entry.name in CODEBUFF_BESIDE or CODEBUFF_CHECKPOINTS.fullmatch(entry.name)):
+            raise unread_file(entry, "Codebuff", "chats/")
+    chats = project / "chats"
+    if not chats.is_dir():
+        return []
+    found = sorted(p for p in chats.iterdir() if p.name not in STORE_LITTER)
+    for chat in found:
+        if not chat.is_dir() or CODEBUFF_CHAT.fullmatch(chat.name) is None:
+            raise unread_file(chat, "Codebuff", "chats/YYYY-MM-DDTHH-MM-SS.mmmZ/")
+    return found
+
+
+def codebuff_exchanges(
+    chat: Path, repo: Path, session_seen: Callable[[str, bool], None] = lambda session, held: None
+) -> tuple[list[Exchange], set[Holding]]:
+    """Every exchange a chat folder holds for the repo, with its holdings.
+    `session_seen` hears of the chat when it is the repo's, with whether it
+    holds any holding."""
+    layout = frozenset(p.name for p in chat.iterdir() if p.name not in STORE_LITTER)
+    read = CODEBUFF_LAYOUTS.get(layout)
+    if read is None:
+        raise unread_file(chat, "Codebuff", "messages.json, log.jsonl; chat-messages.json, run-state.json, log.jsonl")
+    try:
+        parsed = read(chat, repo)
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+        # TODO: Says a Codebuff chat has a shape this tool does not
+        # understand (what, and the chat's folder) — the store's format
+        # seems to have changed — and that nothing is exported until it can
+        # be read.
+        raise UserError(
+            f"Forma colloquii Codebuff ignota ({exc}): {chat}\n"
+            "Forma repositi mutata videtur; nihil exportatur dum legi possit."
+        ) from exc
+    if parsed is None:
+        return [], set()
+    session_seen(chat.name, bool(parsed[1]))
+    return parsed
+
+
 def chronology(exchange: Exchange) -> tuple[dt.datetime, str, str, str]:
     """The page's order: by time, ties broken by provider, session, prompt."""
     return (exchange.timestamp, exchange.provider, exchange.session, exchange.prompt)
@@ -2748,6 +3299,12 @@ def collect(
             if not (path.is_file() and path.suffix == ".pb"):
                 raise unread_file(path, "Antigravity", ".pb")
             gather(antigravity_exchanges(path, repo, antigravity_key()))
+    # Codebuff keeps a project's chats under the name of the directory it ran
+    # in, so only the folder of the repo's name is opened.
+    for root in roots.codebuff:
+        if require_dir(root):
+            for chat in codebuff_chats(root, repo):
+                gather(codebuff_exchanges(chat, repo, lambda session, held: seen("Codebuff", session, chat, held)))
     return exchanges, holdings
 
 
@@ -3112,6 +3669,7 @@ summary a.anchor:hover { text-decoration: underline; }
 .exchange.copilot { --provider: var(--copilot); }
 .exchange.antigravity { --provider: var(--antigravity); }
 .exchange.claudeai { --provider: var(--claude); }
+.exchange.codebuff { --provider: var(--claude); }
 /* The exchange's header: the speaker label — the human's display name
    set above their turn, the way a play script or an interview transcript
    names whoever speaks next — and across from it, on the label's
@@ -3485,6 +4043,9 @@ PROVIDER_SLUGS = {
     # by being seeded into a ledger from outside sourcery, and every run
     # keeps them, since no store holds them. They wear Claude Code's color.
     "claude.ai": "claudeai",
+    # Codebuff chats wear Claude Code's color too: a color of their own
+    # would need the provider palette's validation (see CSS) redone.
+    "Codebuff": "codebuff",
 }
 # page_credits reads a page's provider back from its slug, so no two
 # providers may share one.
@@ -4305,7 +4866,8 @@ def no_exchanges_error(repo: Path, roots: Roots) -> UserError:
         f"No prompts found: {repo}\n\n"
         f"Radices inspectae:\n{sought}\n\n"
         "Si transcripta alibi sunt, variabiles AI_CHAT_CLAUDE_ROOTS, "
-        "AI_CHAT_CODEX_ROOTS, AI_CHAT_VSCODE_USER_ROOTS, vel AI_CHAT_ANTIGRAVITY_ROOTS constitue.\n"
+        "AI_CHAT_CODEX_ROOTS, AI_CHAT_VSCODE_USER_ROOTS, AI_CHAT_ANTIGRAVITY_ROOTS, "
+        "vel AI_CHAT_CODEBUFF_ROOTS constitue.\n"
         "VS Code: inceptum ipsum ut folder aperi, non workspace multiplex."
     )
 

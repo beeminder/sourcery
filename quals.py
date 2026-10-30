@@ -3802,6 +3802,17 @@ class RenderQuals(Fixture):
         self.assertIn(".exchange.claudeai { --provider: var(--claude); }", ace.CSS)
         self.assertEqual(ace.CSS.count("--claude:"), 2)
 
+    def test_codebuff_exchange_wears_claude_codes_color(self):
+        # Replicata: an exchange from a Codebuff chat.
+        # Expectata: its article carries the class codebuff, whose stripe
+        # and chip take Claude Code's color, and its meta line names
+        # Codebuff. Resultata (v6.3.0): KeyError, Codebuff being no known
+        # provider.
+        page = ace.render(self.repo, {LOGIN: [exchange(provider="Codebuff", model="anthropic/claude-sonnet-4.5")]})
+        self.assertIn('<article class="exchange codebuff"', page)
+        self.assertIn('<span class="agent">Codebuff</span>', page)
+        self.assertIn(".exchange.codebuff { --provider: var(--claude); }", ace.CSS)
+
     def test_provider_slugs_are_unique(self):
         # Replicata: invert PROVIDER_SLUGS, as page_credits does to read a
         # page's provider back from its article class. Expectata: no slug
@@ -4436,13 +4447,15 @@ class CliQuals(Fixture):
         self.codex_root = self.tmp / "codex"
         self.vscode_root = self.tmp / "vscode"
         self.antigravity_root = self.tmp / "antigravity"
-        for root in (self.claude_root, self.codex_root, self.vscode_root, self.antigravity_root):
+        self.codebuff_root = self.tmp / "codebuff"
+        for root in (self.claude_root, self.codex_root, self.vscode_root, self.antigravity_root, self.codebuff_root):
             root.mkdir()
         self.env = {
             "AI_CHAT_CLAUDE_ROOTS": str(self.claude_root),
             "AI_CHAT_CODEX_ROOTS": str(self.codex_root),
             "AI_CHAT_VSCODE_USER_ROOTS": str(self.vscode_root),
             "AI_CHAT_ANTIGRAVITY_ROOTS": str(self.antigravity_root),
+            "AI_CHAT_CODEBUFF_ROOTS": str(self.codebuff_root),
         }
         # Fixtures are sealed with the test key; the real finder would look
         # for the application's key in the installed binary.
@@ -4928,6 +4941,130 @@ class CliQuals(Fixture):
             [(row["provider"], row["prompt"]) for row in ledger_rows(ledger)[1:]],
             [("claude.ai", "chat prompt"), ("Claude Code", "claude prompt")],
         )
+
+    def test_seeded_codebuff_exchange_survives_rerun(self):
+        # Replicata: a ledger holding a Codebuff chat exchange whose chat no
+        # store holds (deleted, or kept on another machine) is rerun beside
+        # a Claude Code session. Expectata: the Codebuff exchange is kept
+        # from the ledger, since no store holds it, and rendered in time
+        # order beside the store's exchange; nothing is reported deleted.
+        # Resultata (v6.3.0): the ledger was refused as unreadable, Codebuff
+        # being no known provider.
+        cwd = str(self.repo)
+        write_jsonl(
+            self.claude_root / "p" / "s.jsonl",
+            [
+                cu("claude prompt", ts=T1, cwd=cwd),
+                ca([{"type": "text", "text": "claude reply"}], ts=T2, cwd=cwd),
+            ],
+        )
+        seed = exchange(provider="Codebuff", model="anthropic/claude-sonnet-4.5", session="2025-11-19T00-59-03.332Z",
+                        prompt="codebuff prompt", reply="codebuff reply", elapsed=188.0, wall=188.0)
+        out_path = self.tmp / "out.html"
+        ledger = self.tmp / f"sourcery.{LOGIN}.jsonl"
+        ledger.write_text(ledger_text(self.repo.name, [seed]), encoding="utf-8")
+        out, page = self.generate(out_path)
+        self.assertIn(f"Prompts: 2\n  {LOGIN}: 2\nPrompts deleted: 0\n", out)
+        self.assertLess(page.index('<article class="exchange codebuff"'), page.index('<article class="exchange claude"'))
+        self.assertEqual(
+            [(row["provider"], row["prompt"]) for row in ledger_rows(ledger)[1:]],
+            [("Codebuff", "codebuff prompt"), ("Claude Code", "claude prompt")],
+        )
+
+    def test_codebuff_chats_exported_beside_the_other_agents(self):
+        # Replicata: beside a prompt in each of three other stores, a
+        # Codebuff chat in the folder Codebuff keeps under the repo's
+        # directory name, and a damaged chat in another project's folder.
+        # Expectata: the repo's chat exported with the rest, in time order;
+        # the other project's folder never opened. Resultata (v6.3.0):
+        # Codebuff's store unread.
+        self.populate()
+        write_cb_blocks(self.codebuff_root, [cbuser("codebuff prompt", T3), cbai([cbtext("codebuff reply")], T3)],
+                        self.repo)
+        damaged = write_cb_messages(self.codebuff_root, [], project="other")
+        (damaged / "messages.json").write_text("not json", encoding="utf-8")
+        out, page = self.generate(self.tmp / "out.html")
+        self.assertIn(f"Prompts: 4\n  {LOGIN}: 4\n", out)
+        self.assertLess(page.index("copilot prompt"), page.index("codebuff prompt"))
+        self.assertIn('<article class="exchange codebuff"', page)
+
+    def test_codebuff_store_entries_of_unknown_form_refused(self):
+        # Replicata: in the folder Codebuff keeps for the repo, an entry
+        # sourcery reads nothing from: an unknown folder beside the chats; a
+        # file among the chats; a folder among them not named as a chat
+        # is; a chat holding an unknown file; a chat missing a file of its
+        # layout. Expectata: exit 2 naming the entry, nothing written, since
+        # it may hold the human's words.
+        project = self.codebuff_root / "projects" / self.repo.name
+
+        def beside_the_chats():
+            write_cb_messages(self.codebuff_root, [])
+            (project / "sessions").mkdir()
+            return project / "sessions"
+
+        def file_among_the_chats():
+            write_cb_messages(self.codebuff_root, [])
+            (project / "chats" / "notes.txt").write_text("x", encoding="utf-8")
+            return project / "chats" / "notes.txt"
+
+        def unnamed_chat():
+            return write_cb_messages(self.codebuff_root, [], chat="old-chat")
+
+        def unknown_file():
+            folder = write_cb_messages(self.codebuff_root, [])
+            (folder / "voice.wav").write_bytes(b"x")
+            return folder
+
+        def missing_file():
+            folder = write_cb_blocks(self.codebuff_root, [], self.repo)
+            (folder / "run-state.json").unlink()
+            return folder
+
+        for make in (beside_the_chats, file_among_the_chats, unnamed_chat, unknown_file, missing_file):
+            with self.subTest(make.__name__):
+                stray = make()
+                err = self.refused([str(self.repo), str(self.tmp / "out.html")])
+                self.assertIn(f"{stray}\n", err)
+                shutil.rmtree(self.codebuff_root / "projects")
+
+    def test_codebuff_checkpoints_and_browser_profile_pass(self):
+        # Replicata: beside the repo's chats, Codebuff's checkpoint
+        # repository (a folder named by 64 hex digits), its browser
+        # profile, and Finder's metadata, among the chats and in one.
+        # Expectata: the export goes on as if none were there.
+        folder = write_cb_blocks(self.codebuff_root, [cbuser("p", T0), cbai([cbtext("r")], T0)], self.repo)
+        project = folder.parent.parent
+        (project / hashlib.sha256(str(self.repo).encode()).hexdigest() / "objects").mkdir(parents=True)
+        (project / "_browser_profile" / "Default").mkdir(parents=True)
+        for place in (project, folder.parent, folder):
+            (place / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+        out, page = self.generate(self.tmp / "out.html")
+        self.assertIn(f"Prompts: 1\n  {LOGIN}: 1\n", out)
+
+    def test_codebuff_store_reading_replaces_the_ledger_copy(self):
+        # Replicata: a ledger seeded by hand with a Codebuff prompt (as the
+        # one-off converter that preceded the reader did), its reply stale,
+        # while the store still holds the chat. Expectata: the ledger's row
+        # becomes the store's reading, one row, nothing reported deleted.
+        write_cb_blocks(self.codebuff_root, [cbuser("p", T0), cbai([cbtext("fresh")], T0)], self.repo)
+        ledger = self.tmp / f"sourcery.{LOGIN}.jsonl"
+        stale = exchange(provider="Codebuff", model="", session=CB_CHAT, prompt="p", reply="stale")
+        ledger.write_text(ledger_text(self.repo.name, [stale]), encoding="utf-8")
+        out, page = self.generate(self.tmp / "out.html")
+        self.assertIn(f"Prompts: 1\n  {LOGIN}: 1\nPrompts deleted: 0\n", out)
+        self.assertEqual([row["reply"] for row in ledger_rows(ledger)[1:]], ["fresh"])
+
+    def test_codebuff_chat_yielding_no_prompt_refused(self):
+        # Replicata: the runner's ledger holds a prompt read from a Codebuff
+        # chat the store still holds, which now yields no prompt (as when
+        # Codebuff records prompts in a form sourcery does not read).
+        # Expectata: exit 2 naming the chat, nothing written: the check
+        # every store's sessions get.
+        folder = write_cb_blocks(self.codebuff_root, [cbdivider(T0)], self.repo)
+        seed = exchange(provider="Codebuff", session=CB_CHAT, prompt="p")
+        (self.tmp / f"sourcery.{LOGIN}.jsonl").write_text(ledger_text(self.repo.name, [seed]), encoding="utf-8")
+        err = self.refused([str(self.repo), str(self.tmp / "out.html")])
+        self.assertIn(str(folder), err)
 
     def test_shrunk_live_session_keeps_typed_prompt(self):
         # Replicata: a store restored from an older backup still holds the
@@ -8067,6 +8204,605 @@ MAXIMAL = dict(
 )
 
 
+# ------------------------------------------------------------------- Codebuff
+
+# A chat's id, as Codebuff names its folder: the time the chat began, its
+# colons written as hyphens.
+CB_CHAT = "2026-03-01T09-59-58.250Z"
+CB_START = "2026-03-01T09:59:58.250Z"
+CB_TYPED = "CLI auto-detect: Extracted image paths"
+
+
+def cbms(iso):
+    """An ISO time as the epoch milliseconds Codebuff writes into ids."""
+    return int(utc(iso).timestamp() * 1000)
+
+
+def cbuser(text, ts=T0, **extra):
+    """A user message of the blocks layout, its id carrying when it was sent."""
+    return {"id": f"user-{cbms(ts)}", "variant": "user", "content": text, "timestamp": "10:00 AM", **extra}
+
+
+def cbai(blocks, ts=T0, completion="65s", model="anthropic/claude-opus-4.5"):
+    """A reply of the blocks layout, begun at ts. Given a completion time,
+    it has the keys of a reply Codebuff saw finish, among them its run
+    state, which names the main agent and the model of that agent's
+    template; given None, it is a reply cut short, which has neither."""
+    message = {"id": f"ai-{cbms(ts)}-8fc3368b50977", "variant": "ai", "content": "", "blocks": blocks,
+               "timestamp": "10:00 AM"}
+    if completion is None:
+        return message
+    state = {"fileContext": {"agentTemplates": {"base2": {"model": model}}}, "mainAgentState": {"agentType": "base2"}}
+    return {**message, "isComplete": True, "completionTime": completion, "credits": 42,
+            "metadata": {"runState": {"sessionState": state}}}
+
+
+def cbdivider(ts=T0, mode="MAX"):
+    """The marker Codebuff shows when the chat's mode changes."""
+    return {"id": f"divider-{cbms(ts)}", "variant": "ai", "content": "",
+            "blocks": [{"type": "mode-divider", "mode": mode}], "timestamp": "10:00 AM"}
+
+
+def cbtext(content, kind="text"):
+    return {"type": "text", "content": content, "textType": kind}
+
+
+def cbtool(name, output="", call="t1"):
+    return {"type": "tool", "toolCallId": call, "toolName": name, "input": {}, "output": output,
+            "agentId": "main-agent", "includeToolCall": True}
+
+
+def cbedit(path, body, message="Updated file"):
+    """A str_replace or write_file output as the blocks layout records it:
+    the change as an indented block."""
+    indented = "\n".join("    " + line for line in body.split("\n"))
+    return f"file: {path}\nmessage: {message}\nunifiedDiff: |\n{indented}"
+
+
+def cbagent(blocks):
+    """A subagent the reply spawned, with its own blocks."""
+    return {"type": "agent", "agentId": "a1", "agentName": "Ed", "agentType": "editor-implementor-opus",
+            "blocks": blocks, "content": "", "initialPrompt": "edit it", "status": "complete"}
+
+
+def cbask(questions, answers=None):
+    """An ask-user block: questions as (question, option labels) pairs, and
+    the answers as Codebuff records them, or None for questions the human
+    skipped."""
+    block = {"type": "ask-user", "toolCallId": "q1", "questions": [
+        {"question": question, "header": "H", "multiSelect": False,
+         "options": [{"label": label, "description": "d"} for label in labels]}
+        for question, labels in questions]}
+    return {**block, "answers": answers} if answers is not None else {**block, "skipped": True}
+
+
+def write_cb_blocks(root, messages, project_root, project="repo", chat=CB_CHAT, templates=True, log=()):
+    """A chat of the blocks layout: what the chat showed, the run state
+    naming the directory Codebuff ran in and holding the agents' templates
+    (none, as before 2025-12, when templates is false), and its log, after
+    its first record the lines given, already serialized."""
+    folder = root / "projects" / project / "chats" / chat
+    folder.mkdir(parents=True)
+    (folder / "chat-messages.json").write_text(json.dumps(messages), encoding="utf-8")
+    (folder / "run-state.json").write_text(json.dumps({"sessionState": {"fileContext": {
+        "projectRoot": str(project_root), "cwd": str(project_root),
+        "agentTemplates": {"base2": {"model": "anthropic/claude-opus-4.5"}} if templates else {}}}}), encoding="utf-8")
+    first = json.dumps({"level": "DEBUG", "timestamp": T0, "msg": "App launched"})
+    (folder / "log.jsonl").write_text("".join(line + "\n" for line in (first, *log)), encoding="utf-8")
+    return folder
+
+
+def cbstep(model, agent="main-agent"):
+    """A log line, as Codebuff serializes it, of an agent starting a step."""
+    return json.dumps({"level": "DEBUG", "timestamp": T0, "data": {"agentId": agent, "model": model},
+                       "msg": "Start agent base2 step 3 (y33l5x1x3qk - Prompt: p)"}, separators=(",", ":"))
+
+
+def cbprompt(text):
+    """A typed prompt as the history of a tagged messages-layout chat holds
+    it."""
+    return {"role": "user", "content": f"<user_message>{text}</user_message>", "tags": ["USER_PROMPT"],
+            "keepDuringTruncation": True}
+
+
+def cbsaid(text):
+    return {"role": "assistant", "content": text}
+
+
+def cbresult(tool, value):
+    return {"role": "tool", "content": {"type": "tool-result", "toolCallId": "c1", "toolName": tool,
+                                        "output": [{"type": "json", "value": value}]}}
+
+
+def cbstamp(text, ts):
+    """The record Codebuff's log holds of each input as it was typed."""
+    return {"level": "DEBUG", "timestamp": ts, "data": CB_TYPED, "msg": {"input": text, "imagePaths": [], "count": 0}}
+
+
+def write_cb_messages(root, messages, log=None, project="repo", chat=CB_CHAT):
+    """A chat of the messages layout: the history sent to the model (none
+    when messages is None) and, unless log is None, a log holding those
+    records."""
+    folder = root / "projects" / project / "chats" / chat
+    folder.mkdir(parents=True)
+    if messages is not None:
+        (folder / "messages.json").write_text(
+            json.dumps({"id": chat, "messages": messages, "updatedAt": T3}), encoding="utf-8")
+    if log is not None:
+        write_jsonl(folder / "log.jsonl", [{"level": "DEBUG", "timestamp": T0, "msg": "App launched"}, *log])
+    return folder
+
+
+# Instructions Codebuff injected into the user role, one of each shape its
+# chats hold, none of them typed.
+CB_MACHINE = {
+    "tool result": "<system><tool_result>\n<tool>read_files</tool>\n<result>x</result>\n</tool_result></system>",
+    "omitted": "<system>Previous message(s) omitted due to length</system>",
+    "cancelled": "<system><assistant_message></assistant_message>[RESPONSE_CANCELED_BY_USER]</system>",
+    "instructions": "<system_instructions>Proceed toward the user request.</system_instructions>",
+    "bare tool result": "<tool_result>\n<tool>meta</tool>\n<result>WARN</result>\n</tool_result>",
+    "tool results": "<tool_results><tool_result><tool>x</tool></tool_result></tool_results>",
+    "previous reply": "<previous_assistant_message>Done.</previous_assistant_message>",
+    "edits": "<user_edits_since_last_chat>a.js</user_edits_since_last_chat>",
+    "subgoal": "<subgoal><id>1</id></subgoal>",
+    "terminal": "<terminal_command_result>ok</terminal_command_result>",
+    "knowledge": "```CLAUDE.md\n# Rules\n```\n\n<system_instructions>Proceed.</system_instructions>\n\n## Tools\nUse them.",
+    "placeholder": "{CODEBUFF_KNOWLEDGE_FILES_CONTENTS}\n\n<system_instructions>Proceed.</system_instructions>",
+    "turn": "Instructions for THIS turn (Follow ALL applicable points below):\n\n* be brief",
+    "after tool": "If the tool result above is of a terminal command succeeding and you have completed the user's request, end",
+    "summary": "Please summarize briefly the action taken, but do not call the think_deeply tool again for this",
+    "tools": "\n\n## Tools\nUse the tools below to complete the user request, if applicable.",
+    "browser": '{"success":true,"logs":[{"type":"info","message":"Browser started"}]}',
+}
+
+
+class CodebuffQuals(Fixture):
+    def root(self):
+        return Path(tempfile.mkdtemp(dir=self.tmp))
+
+    def blocks(self, messages, project_root=None):
+        return ace.codebuff_exchanges(write_cb_blocks(self.root(), messages, project_root or self.repo), self.repo)
+
+    def history(self, messages, log=None):
+        return ace.codebuff_exchanges(write_cb_messages(self.root(), messages, log), self.repo)
+
+    def refused(self, folder):
+        with self.assertRaises(ace.UserError) as ctx:
+            ace.codebuff_exchanges(folder, self.repo)
+        self.assertIn(str(folder), str(ctx.exception))
+
+    def test_blocks_chat_yields_prompts_replies_models_times_and_tallies(self):
+        # Replicata: a chat of the blocks layout (Codebuff from 2025-11): a
+        # mode divider; a prompt; its reply — reasoning, visible text, an
+        # edit by the main agent, one by a subagent, an MCP tool's call,
+        # more visible text — finished in 1m 5s by a run whose template
+        # names its model; a second prompt, its reply cut short. Expectata:
+        # two exchanges, each at the time its id carries; the first's reply
+        # the visible text alone, its model the template's, elapsed and wall
+        # the recorded 65 s, its tally both edits; the second's reply its
+        # text, no model or span recorded for it; a holding for each prompt.
+        # Resultata (v6.3.0): no reader for Codebuff's store.
+        messages = [
+            cbdivider(T0),
+            cbuser("first prompt", T0),
+            cbai([cbtext("Weighing it.", "reasoning"), cbtext("Looking."),
+                  cbtool("str_replace", cbedit("a.js", "@@ -1,2 +1,2 @@\n-old\n+new\n same")),
+                  cbagent([cbtext("Sub thinking.", "reasoning"),
+                           cbtool("str_replace", cbedit("b.js", "@@ -1 +1,2 @@\n+added\n kept"))]),
+                  cbtool("chrome-devtools__click"),
+                  cbtext("Done.")], "2026-03-01T10:00:00.150Z", completion="1m 5s"),
+            cbuser("second prompt", T1),
+            cbai([cbtext("Partial.")], T1, completion=None),
+        ]
+        exchanges, holdings = self.blocks(messages)
+        first, second = exchanges
+        self.assertEqual((first.timestamp, first.provider, first.session), (utc(T0), "Codebuff", CB_CHAT))
+        self.assertEqual((first.prompt, first.reply), ("first prompt", "Looking.\n\nDone."))
+        self.assertEqual((first.model, first.elapsed, first.wall), ("anthropic/claude-opus-4.5", 65.0, 65.0))
+        self.assertEqual((first.added, first.deleted), (2, 1))
+        self.assertEqual((second.timestamp, second.prompt, second.reply), (utc(T1), "second prompt", "Partial."))
+        self.assertEqual((second.model, second.elapsed, second.wall, second.added), ("", 0.0, 0.0, 0))
+        self.assertEqual(holdings, {("Codebuff", utc(T0)), ("Codebuff", utc(T1))})
+
+    def test_tools_blocks_and_fields_the_stores_show_pass(self):
+        # Every tool the chats show called, in either history (one an MCP
+        # server's), every kind of block a reply holds, a subagent's blocks,
+        # and every optional field a history's messages carry, yield
+        # plumbing only: the prompt and the agent's words are all a chat
+        # yields.
+        names = ["add_subgoal", "browser_logs", "code_search", "create_plan", "end_turn", "glob", "list_directory",
+                 "parse_error", "propose_str_replace", "propose_write_file", "read_docs", "read_files",
+                 "read_subtree", "run_terminal_command", "set_messages", "set_output", "spawn_agents",
+                 "suggest_followups", "think_deeply", "update_subgoal", "web_search", "write_todos",
+                 "chrome-devtools__take_snapshot"]
+        blocks = [cbtext("Weighing it.", "reasoning"), *(cbtool(name, call=f"t{n}") for n, name in enumerate(names)),
+                  {"type": "plan", "content": "# Plan"},
+                  cbagent([cbtext("Sub.", "reasoning"), {"type": "text", "content": "Sub said."}, cbtool("read_files"),
+                           cbagent([])]),
+                  {**cbtext("Done."), "thinkingId": "k", "thinkingOpen": False, "isCollapsed": True}]
+        exchanges, _ = self.blocks([cbuser("p", T0), cbai(blocks, T0)])
+        self.assertEqual([(e.prompt, e.reply) for e in exchanges], [("p", "# Plan\n\nDone.")])
+        instructions = {"role": "user", "content": CB_MACHINE["instructions"], "keepLastTags": ["INSTRUCTIONS_PROMPT"],
+                        "providerOptions": {"anthropic": {}}, "timeToLive": "userPrompt"}
+        history = [instructions, cbprompt("p"), *(cbresult(name, {"message": "ok"}) for name in names),
+                   {**cbsaid("Done."), "keepDuringTruncation": True}]
+        exchanges, _ = self.history(history, [cbstamp("p", T0)])
+        self.assertEqual([(e.prompt, e.reply) for e in exchanges], [("p", "Done.")])
+
+    def test_completion_times_in_each_recorded_form(self):
+        # Replicata: replies finished in "188s", "2m 3s", and "4m".
+        # Expectata: 188, 123, and 240 seconds. Resultata (v6.3.0): no
+        # reader for Codebuff's store.
+        for recorded, seconds in (("188s", 188.0), ("2m 3s", 123.0), ("4m", 240.0)):
+            with self.subTest(recorded):
+                exchanges, _ = self.blocks([cbuser("p", T0), cbai([cbtext("r")], T0, completion=recorded)])
+                self.assertEqual((exchanges[0].elapsed, exchanges[0].wall), (seconds, seconds))
+
+    def test_created_file_counts_every_line_and_proposals_count_nothing(self):
+        # Replicata: a reply whose agents propose edits (a best-of-n run's
+        # candidates), create a three-line file, and fail one edit.
+        # Expectata: the tally is the created file's three lines; proposals
+        # changed no file, and the failed edit changed nothing. Resultata
+        # (v6.3.0): no reader for Codebuff's store.
+        blocks = [
+            cbagent([cbtool("propose_str_replace", cbedit("a.js", "@@ -1 +1 @@\n-x\n+y", "Proposed string replacement")),
+                     cbtool("propose_write_file", cbedit("n.js", "@@ -0,0 +1 @@\n+z", "Proposed new file n.js"))]),
+            cbtool("write_file", cbedit("c.js", "one\n+two\n-three", "Created new file")),
+            cbtool("str_replace", 'The old string "q" was not found in the file, skipping.\n\nNo change to the file'),
+        ]
+        exchanges, _ = self.blocks([cbuser("p", T0), cbai(blocks, T0)])
+        self.assertEqual((exchanges[0].added, exchanges[0].deleted), (3, 0))
+
+    def test_pasted_text_is_part_of_the_prompt(self):
+        # Replicata: prompts whose paste Codebuff turned into a text
+        # attachment, holding carriage returns: one with nothing else typed,
+        # one with typed words too. Expectata: each prompt is its typed
+        # words, if any, then the paste, every character kept. Resultata
+        # (v6.3.0): no reader for Codebuff's store.
+        paste = "can you fix this:\r\r$ ./x.py \rTraceback"
+        attachment = [{"id": "85c51132-e0ea-4a9e-a846-48831890e837", "content": paste, "preview": paste[:20],
+                       "charCount": len(paste)}]
+        exchanges, _ = self.blocks([
+            cbuser("", T0, textAttachments=attachment), cbai([cbtext("Fixed.")], T0),
+            cbuser("and this", T1, textAttachments=attachment), cbai([cbtext("Also.")], T1),
+        ])
+        self.assertEqual([e.prompt for e in exchanges], [paste, "and this\n\n" + paste])
+
+    def test_reply_after_a_stopped_reply_continues_it(self):
+        # Replicata: a prompt answered by two replies, the second begun when
+        # the human stopped the first (the agent summing up what it did),
+        # each with its run's span. Expectata: one exchange, its reply both
+        # replies' words in order, its elapsed both spans. Resultata
+        # (v6.4.0 draft): refused as a reply to no prompt; reciplier's
+        # store holds one such pair.
+        exchanges, _ = self.blocks([
+            cbuser("p", T0),
+            cbai([cbtext("Working.")], T0, completion="1m 29s"),
+            cbai([cbtext("Stopped. Summary.")], "2026-03-01T10:00:00.240Z", completion="6s"),
+        ])
+        self.assertEqual([(e.prompt, e.reply, e.elapsed) for e in exchanges], [("p", "Working.\n\nStopped. Summary.", 95.0)])
+
+    def test_chat_without_templates_takes_the_model_its_log_names(self):
+        # Replicata: a chat from before 2025-12, whose run states hold no
+        # agent templates, so only its log names the main agent's model, at
+        # every step it took (a subagent's steps name others): one reply
+        # with a run state, one cut short; then a chat whose log names two
+        # models for the main agent. Expectata: both replies of the first
+        # take the model the log names; the second chat's replies, no
+        # model, since nothing says which reply used which. Resultata
+        # (v6.4.0 draft): refused, the template missing; eat-the-richtext's
+        # two chats from 2025-11 are such chats.
+        reply = cbai([cbtext("r")], T0)
+        reply["metadata"]["runState"]["sessionState"]["fileContext"]["agentTemplates"] = {}
+        messages = [cbuser("p", T0), reply, cbuser("q", T1), cbai([cbtext("s")], T1, completion=None)]
+        for log, model in (([cbstep("anthropic/claude-sonnet-4.5"), cbstep("x-ai/grok-4-fast", agent="mZ_WMK9")],
+                            "anthropic/claude-sonnet-4.5"),
+                           ([cbstep("anthropic/claude-sonnet-4.5"), cbstep("anthropic/claude-haiku-4.5")], "")):
+            with self.subTest(model):
+                folder = write_cb_blocks(self.root(), messages, self.repo, templates=False, log=log)
+                exchanges, _ = ace.codebuff_exchanges(folder, self.repo)
+                self.assertEqual([(e.reply, e.model) for e in exchanges], [("r", model), ("s", model)])
+
+    def test_chat_with_templates_never_opens_its_log(self):
+        # Replicata: a chat whose run state holds the agents' templates,
+        # its log damaged where a main agent's step would be. Expectata:
+        # the chat reads as if the log were whole: a blocks chat's log,
+        # hundreds of megabytes in the real stores, is opened only when the
+        # history names no model. Resultata (v6.4.0 draft): as expected.
+        folder = write_cb_blocks(self.root(), [cbuser("p", T0), cbai([cbtext("r")], T0)], self.repo,
+                                 log=['{"msg":"Start agent base2 step 1 (x)","data":{"agentId":"main-agent"'])
+        exchanges, _ = ace.codebuff_exchanges(folder, self.repo)
+        self.assertEqual([(e.reply, e.model) for e in exchanges], [("r", "anthropic/claude-opus-4.5")])
+
+    def test_prompt_that_failed_to_send_is_kept(self):
+        # Replicata: a prompt Codebuff could not send (its validation failed
+        # on a network error), so no reply follows. Expectata: the prompt,
+        # with no reply. Resultata (v6.3.0): no reader for Codebuff's store.
+        failed = [{"id": "network_error", "message": "Agent validation failed."}]
+        exchanges, _ = self.blocks([cbuser("add URL quals", T0, validationErrors=failed)])
+        self.assertEqual([(e.prompt, e.reply) for e in exchanges], [("add URL quals", "")])
+
+    def test_harness_error_is_not_the_agents_words(self):
+        # Replicata: replies Codebuff ended with an error of its own, in
+        # each form its chats hold: out of credits, as the reply's user
+        # error; a failed run, as the reply's content. Expectata: each
+        # reply holds only the agent's text; no error is shown as the
+        # agent's words. Resultata (v6.3.0): no reader for Codebuff's
+        # store; (v6.4.0 draft) the failed run refused as words outside the
+        # reply's blocks, which reciplier's store holds twice.
+        cut = {**cbai([cbtext("Starting.")], T0, completion=None), "isComplete": False}
+        for error in ({"userError": "Out of credits. Please add credits at https://www.codebuff.com/usage"},
+                      {"content": "**Error:** Agent run error: Payment Required"}):
+            with self.subTest(error):
+                exchanges, _ = self.blocks([cbuser("p", T0), {**cut, **error}])
+                self.assertEqual(exchanges[0].reply, "Starting.")
+
+    def test_answered_questions_are_their_own_exchange(self):
+        # Replicata: in its reply the agent asks two questions at once (an
+        # ask-user block); the human clicks an option for the first and
+        # types an answer to the second; the agent writes before asking and
+        # after. Expectata: the prompt's exchange ends at the questions, its
+        # reply the text before them; the answers are an exchange of their
+        # own, one microsecond after the time the reply began (the store
+        # records no time for an answer), its ballots both questions with
+        # the click picked and nothing picked for the typed answer, its
+        # prompt the typed answer, its reply the text after; neither gets
+        # the run's recorded span, which includes the wait on the human;
+        # both are holdings. Resultata (v6.3.0): no reader for Codebuff's
+        # store.
+        began = "2026-03-01T10:00:00.150Z"
+        ask = cbask([("Scope?", ("Top chart only", "All charts")), ("Name?", ("rate", "speed"))],
+                    [{"questionIndex": 0, "selectedOption": "All charts"},
+                     {"questionIndex": 1, "otherText": "call it pace"}])
+        exchanges, holdings = self.blocks([
+            cbuser("p", T0),
+            cbai([cbtext("Before."), ask, cbtext("After."),
+                  cbtool("str_replace", cbedit("a.js", "@@ -1 +1 @@\n-x\n+y"))], began),
+        ])
+        asked, answered = exchanges
+        answered_at = utc(began) + dt.timedelta(microseconds=1)
+        self.assertEqual((asked.prompt, asked.reply, asked.ballots), ("p", "Before.", ()))
+        self.assertEqual((answered.timestamp, answered.prompt, answered.reply), (answered_at, "call it pace", "After."))
+        self.assertEqual(answered.ballots, (
+            ace.Ballot(question="Scope?", options=("Top chart only", "All charts"), picked=("All charts",)),
+            ace.Ballot(question="Name?", options=("rate", "speed"), picked=()),
+        ))
+        self.assertEqual([(e.elapsed, e.wall) for e in exchanges], [(0.0, 0.0), (0.0, 0.0)])
+        self.assertEqual([(e.added, e.deleted) for e in exchanges], [(0, 0), (1, 1)])
+        self.assertEqual(answered.model, asked.model)
+        self.assertEqual(holdings, {("Codebuff", utc(T0)), ("Codebuff", answered_at)})
+
+    def test_several_options_picked_at_once(self):
+        # Replicata: a multi-select question answered with two options.
+        # Expectata: one ballot, both picked, no prompt typed. Resultata
+        # (v6.3.0): no reader for Codebuff's store.
+        ask = cbask([("Which?", ("a", "b", "c"))], [{"questionIndex": 0, "selectedOptions": ["a", "c"]}])
+        exchanges, _ = self.blocks([cbuser("p", T0), cbai([ask], T0)])
+        self.assertEqual((exchanges[1].prompt, exchanges[1].ballots),
+                         ("", (ace.Ballot(question="Which?", options=("a", "b", "c"), picked=("a", "c")),)))
+
+    def test_skipped_question_types_nothing(self):
+        # Replicata: the agent asks a question the human skips. Expectata:
+        # no exchange for it and the reply runs on past it; the run's span,
+        # which includes the wait on the human, is not taken for the
+        # agent's. Resultata (v6.3.0): no reader for Codebuff's store.
+        exchanges, holdings = self.blocks([cbuser("p", T0), cbai([cbtext("Before."), cbask([("Q?", ("a", "b"))]),
+                                                                  cbtext("After.")], T0)])
+        self.assertEqual([(e.prompt, e.reply, e.elapsed) for e in exchanges], [("p", "Before.\n\nAfter.", 0.0)])
+        self.assertEqual(holdings, {("Codebuff", utc(T0))})
+
+    def test_chat_run_in_another_directory_of_the_same_name_is_not_read(self):
+        # Replicata: a blocks-layout chat in the repo's project folder whose
+        # run state says Codebuff ran in another directory with the repo's
+        # name (Codebuff names project folders by the directory's name
+        # alone). Expectata: none of its exchanges or holdings. Resultata
+        # (v6.3.0): no reader for Codebuff's store.
+        elsewhere = self.tmp / "elsewhere" / "repo"
+        elsewhere.mkdir(parents=True)
+        self.assertEqual(self.blocks([cbuser("p", T0), cbai([cbtext("r")], T0)], elsewhere), ([], set()))
+
+    def test_blocks_shapes_the_store_has_not_shown_refused(self):
+        # Replicata: a blocks-layout chat holding, in turn, a shape no store
+        # has shown: an unknown block type; a question asked by a subagent;
+        # a tool no chat has called; an unknown field on a prompt, on a
+        # reply, on a question's answer, or on an attachment; a reply with
+        # words outside its blocks; an unknown kind of text; a prompt id
+        # without its time; a reply before any prompt; templates that lack
+        # the main agent's. Expectata: a loud refusal naming the chat. Each
+        # may hold words the human typed or read that sourcery would
+        # otherwise drop.
+        lacking = cbai([cbtext("r")], T0)
+        lacking["metadata"]["runState"]["sessionState"]["fileContext"]["agentTemplates"] = {"editor": {"model": "m"}}
+        ok_user, ok_ai = cbuser("p", T0), cbai([cbtext("r")], T0)
+        answer = cbask([("Q?", ("a",))], [{"questionIndex": 0, "selectedOption": "a"}])
+        for name, messages in {
+            "block type": [ok_user, cbai([{"type": "poll", "content": "?"}], T0)],
+            "nested question": [ok_user, cbai([cbagent([answer])], T0)],
+            "tool": [ok_user, cbai([cbtool("ask_human")], T0)],
+            "prompt field": [cbuser("p", T0, voiceNote="hi"), ok_ai],
+            "reply field": [ok_user, {**ok_ai, "followups": ["more"]}],
+            "answer field": [ok_user, cbai([{**answer, "answers": [{"questionIndex": 0, "spoken": "a"}]}], T0)],
+            "attachment field": [cbuser("", T0, textAttachments=[{"id": "u", "content": "x", "image": "y"}]), ok_ai],
+            "reply content": [ok_user, {**ok_ai, "content": "words"}],
+            "text kind": [ok_user, cbai([cbtext("r", "speech")], T0)],
+            "prompt id": [{**ok_user, "id": "user-x"}, ok_ai],
+            "orphan reply": [ok_ai],
+            "lacking template": [ok_user, lacking],
+        }.items():
+            with self.subTest(name):
+                self.refused(write_cb_blocks(self.root(), messages, self.repo))
+
+    def test_stamped_history_takes_words_and_times_from_the_log(self):
+        # Replicata: a messages-layout chat (Codebuff 2025-09 to 2025-11)
+        # whose log stamps each input as it was typed: the standing
+        # instructions; a prompt answered with a tool call, its result (an
+        # edit), and words; a second prompt whose reply Codebuff truncated
+        # away, leaving its placeholder; a typed shell command, recorded
+        # twice. Expectata: one exchange per stamp, at the stamp's time, its
+        # prompt the typed words; replies the assistant's words without the
+        # tool calls, the placeholder standing where Codebuff dropped one;
+        # the edit's tally; no model or span (the layout records neither);
+        # a holding per prompt. Resultata (v6.3.0): no reader for
+        # Codebuff's store.
+        call = '<codebuff_tool_call>\n{"cb_tool_name": "str_replace", "path": "a.js"}\n</codebuff_tool_call>'
+        messages = [
+            {"role": "user", "content": CB_MACHINE["instructions"], "tags": ["INSTRUCTIONS_PROMPT"],
+             "keepLastTags": ["INSTRUCTIONS_PROMPT"]},
+            cbprompt("fix it"),
+            cbsaid(f"Fixing.\n\n{call}"),
+            cbresult("str_replace", {"file": "a.js", "message": "Updated", "unifiedDiff": "@@ -1 +1,2 @@\n-a\n+b\n+c"}),
+            cbsaid("Fixed."),
+            cbprompt("thanks"),
+            {"role": "user", "content": CB_MACHINE["omitted"]},
+            {"role": "user", "content": "git status"},
+            {"role": "user", "content": "git status"},
+        ]
+        log = [cbstamp("fix it", T0), cbstamp("thanks", T1), cbstamp("git status", T2), cbstamp("git status", T3)]
+        exchanges, holdings = self.history(messages, log)
+        self.assertEqual([(e.timestamp, e.prompt) for e in exchanges],
+                         [(utc(T0), "fix it"), (utc(T1), "thanks"), (utc(T2), "git status"), (utc(T3), "git status")])
+        self.assertEqual([e.reply for e in exchanges], ["Fixing.\n\n\n\nFixed.", CB_MACHINE["omitted"], "", ""])
+        self.assertEqual((exchanges[0].added, exchanges[0].deleted), (2, 1))
+        self.assertEqual({(e.provider, e.session, e.model, e.elapsed) for e in exchanges}, {("Codebuff", CB_CHAT, "", 0.0)})
+        self.assertEqual(holdings, {("Codebuff", utc(t)) for t in (T0, T1, T2, T3)})
+
+    def test_replies_resent_in_the_user_role_are_replies(self):
+        # Replicata: an unstamped chat of 2025-05, whose history holds the
+        # whole conversation in the user role: two prompts, the reply to
+        # the first resent wrapped as the previous assistant message, tool
+        # calls inside it; the reply to the second cancelled by the human
+        # partway, what had arrived kept in Codebuff's cancellation marker;
+        # a cancellation before anything arrived. Expectata: each reply the
+        # agent's words without the tool calls; the empty cancellation adds
+        # nothing. Resultata (v6.4.0 draft): both dropped as injections, the
+        # page saying "No response." of replies the store holds.
+        cancelled = "<system><assistant_message>{}</assistant_message>[RESPONSE_CANCELED_BY_USER]</system>"
+        exchanges, _ = self.history([
+            {"role": "user", "content": "<user_message>one</user_message>"},
+            {"role": "user", "content": "<previous_assistant_message><read_files>\n<paths>a.js</paths>\n</read_files>"
+                                        "Read it.</previous_assistant_message>"},
+            {"role": "user", "content": "<user_message>two</user_message>"},
+            {"role": "user", "content": cancelled.format("Let me revert")},
+            {"role": "user", "content": cancelled.format("")},
+        ])
+        self.assertEqual([(e.prompt, e.reply) for e in exchanges], [("one", "Read it."), ("two", "Let me revert")])
+
+    def test_typed_input_the_history_lacks_is_kept_from_the_log(self):
+        # Replicata: the log stamps three inputs; the history holds the
+        # first and third (the second never reached the model). Expectata:
+        # three exchanges at their stamps' times, the second with no reply;
+        # the replies stay with the prompts they answered. Resultata
+        # (v6.3.0): no reader for Codebuff's store.
+        exchanges, _ = self.history([cbprompt("one"), cbsaid("r1"), cbprompt("three"), cbsaid("r3")],
+                                    [cbstamp("one", T0), cbstamp("two", T1), cbstamp("three", T2)])
+        self.assertEqual([(e.timestamp, e.prompt, e.reply) for e in exchanges],
+                         [(utc(T0), "one", "r1"), (utc(T1), "two", ""), (utc(T2), "three", "r3")])
+
+    def test_empty_input_types_nothing(self):
+        # Replicata: the log stamps an empty input (Return on an empty
+        # line) between two prompts. Expectata: no exchange for it.
+        # Resultata (v6.3.0): no reader for Codebuff's store.
+        exchanges, holdings = self.history([cbprompt("one"), cbsaid("r1")], [cbstamp("", T0), cbstamp("one", T1)])
+        self.assertEqual([(e.timestamp, e.prompt) for e in exchanges], [(utc(T1), "one")])
+        self.assertEqual(holdings, {("Codebuff", utc(T1))})
+
+    def test_history_prompt_the_log_never_stamped_refused(self):
+        # Replicata: a stamped chat whose history holds a prompt no stamp
+        # names, or names out of order. Expectata: a loud refusal naming
+        # the chat: either the words were misread as typed, or the log no
+        # longer stamps what it did. Resultata (v6.3.0): no reader for
+        # Codebuff's store.
+        for name, stamps in {"unstamped": [cbstamp("one", T0)],
+                             "out of order": [cbstamp("two", T0), cbstamp("one", T1)]}.items():
+            with self.subTest(name):
+                self.refused(write_cb_messages(self.root(), [cbprompt("one"), cbprompt("two")], stamps))
+
+    def test_unstamped_history_places_prompts_at_the_chat_start_in_order(self):
+        # Replicata: a messages-layout chat from before Codebuff stamped
+        # inputs (2025-02 to 2025-09), no log at all: prompts bare and
+        # wrapped, one in a piece list, between injected instructions, tool
+        # results, and replies holding XML tool calls of each form.
+        # Expectata: the typed prompts, in order, the first at the time the
+        # chat began and each next one a microsecond later (the store
+        # records no time for them); replies without the tool calls; a
+        # holding per prompt. Resultata (v6.3.0): no reader for Codebuff's
+        # store.
+        messages = [
+            {"role": "user", "content": CB_MACHINE["turn"]},
+            {"role": "user", "content": "can you center it?"},
+            cbsaid('Centering.\n<tool_call name="browser_action"><type>navigate</type></tool_call>'),
+            {"role": "user", "content": CB_MACHINE["browser"]},
+            cbsaid("<write_file>\n<path>a.css</path>\n<content>x</content>\n</write_file>\nCentered."),
+            {"role": "user", "content": "<user_message>closer</user_message>", "keepDuringTruncation": True},
+            {"role": "user", "content": CB_MACHINE["tool result"]},
+            {"role": "user", "content": [{"type": "text", "text": "that made it worse", "cache_control": {"type": "ephemeral"}}]},
+            cbsaid("<end_turn></end_turn>"),
+        ]
+        exchanges, holdings = self.history(messages)
+        start = utc(CB_START)
+        times = [start + dt.timedelta(microseconds=n) for n in range(3)]
+        self.assertEqual([(e.timestamp, e.prompt) for e in exchanges],
+                         list(zip(times, ["can you center it?", "closer", "that made it worse"])))
+        self.assertEqual([e.reply for e in exchanges], ["Centering.\n\n\n\nCentered.", "", ""])
+        self.assertEqual(holdings, {("Codebuff", t) for t in times})
+
+    def test_injected_instructions_are_never_prompts(self):
+        # Replicata: an unstamped chat holding, between two prompts, one of
+        # each shape Codebuff injected into the user role. Expectata: only
+        # the two prompts. A prompt that merely starts with markup is still
+        # typed. Resultata (v6.3.0): no reader for Codebuff's store.
+        for name, injected in CB_MACHINE.items():
+            with self.subTest(name):
+                exchanges, _ = self.history([{"role": "user", "content": "first"},
+                                             {"role": "user", "content": injected},
+                                             {"role": "user", "content": "<div>second</div>"}])
+                self.assertEqual([e.prompt for e in exchanges], ["first", "<div>second</div>"])
+
+    def test_screenshot_with_a_tool_result_is_no_paste(self):
+        # Replicata: a browser tool's result, its log as JSON beside the
+        # screenshot it took, in the user role. Expectata: no prompt and no
+        # image. Resultata (v6.3.0): no reader for Codebuff's store.
+        image = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "/9j/"}}
+        exchanges, _ = self.history([{"role": "user", "content": "look"},
+                                     {"role": "user", "content": [{"type": "text", "text": CB_MACHINE["browser"]}, image]}])
+        self.assertEqual([(e.prompt, e.images) for e in exchanges], [("look", ())])
+
+    def test_log_without_history_yields_its_stamps(self):
+        # Replicata: a chat Codebuff left with a log alone: one whose log
+        # stamps a typed input, one whose log stamps none (never prompted).
+        # Expectata: the stamped input as a prompt with no reply; nothing
+        # from the other. Resultata (v6.3.0): no reader for Codebuff's
+        # store.
+        self.assertEqual(ace.codebuff_exchanges(write_cb_messages(self.root(), None, []), self.repo), ([], set()))
+        exchanges, holdings = ace.codebuff_exchanges(
+            write_cb_messages(self.root(), None, [cbstamp("hello?", T0)]), self.repo)
+        self.assertEqual([(e.timestamp, e.prompt, e.reply) for e in exchanges], [(utc(T0), "hello?", "")])
+        self.assertEqual(holdings, {("Codebuff", utc(T0))})
+
+    def test_history_shapes_the_store_has_not_shown_refused(self):
+        # Replicata: a messages-layout chat holding, in turn, a shape no
+        # store has shown: an unknown role; an unknown field on a message;
+        # an unknown tag; a piece of an unknown type; an image beside typed
+        # words (a paste no chat has shown); a tool no chat has called; a
+        # history naming another chat; an input stamped with an image path.
+        # Expectata: a loud refusal naming the chat.
+        image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBO"}}
+        for name, (messages, log) in {
+            "role": ([{"role": "system", "content": "x"}], None),
+            "field": ([{**cbsaid("r"), "pinned": True}], None),
+            "tag": ([{**cbprompt("p"), "tags": ["USER_VOICE"]}], None),
+            "piece": ([{"role": "user", "content": [{"type": "audio", "data": "x"}]}], None),
+            "pasted image": ([{"role": "user", "content": [{"type": "text", "text": "see"}, image]}], None),
+            "tool": ([cbresult("ask_human", {"answer": "x"})], None),
+            "image path": ([cbprompt("p")], [{**cbstamp("p", T0), "msg": {"input": "p", "imagePaths": ["/a.png"], "count": 1}}]),
+        }.items():
+            with self.subTest(name):
+                self.refused(write_cb_messages(self.root(), messages, log))
+        folder = write_cb_messages(self.root(), [cbprompt("p")])
+        (folder / "messages.json").write_text(json.dumps({"id": "2026-01-01T00-00-00.000Z", "messages": [], "updatedAt": T3}))
+        self.refused(folder)
+
+
 def maximal_exchange(**overrides):
     return exchange(**{**MAXIMAL, **overrides})
 
@@ -8103,6 +8839,14 @@ class LedgerQuals(Fixture):
         # exactly. Resultata (v5.5.0): ValueError, claude.ai being no known
         # provider.
         given = maximal_exchange(provider="claude.ai", model="claude-opus-5-5", effort="max")
+        thawed = ace.thaw(json.loads(json.dumps(ace.freeze(given))), given.source)
+        self.assertEqual(thawed, given)
+
+    def test_codebuff_exchange_thaws(self):
+        # Replicata: a ledger holding a Codebuff chat exchange. Expectata: it
+        # thaws back exactly. Resultata (v6.3.0): ValueError, Codebuff being
+        # no known provider.
+        given = maximal_exchange(provider="Codebuff", model="anthropic/claude-sonnet-4.5")
         thawed = ace.thaw(json.loads(json.dumps(ace.freeze(given))), given.source)
         self.assertEqual(thawed, given)
 
