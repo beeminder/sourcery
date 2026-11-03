@@ -2121,8 +2121,10 @@ class ClaudeQuals(Fixture):
         # system notices, the prompt queue, titles, the last prompt's echo,
         # request logs, file-history snapshots, the session's mode and
         # permission mode, bridge, frame, artifact, and cost state, the
-        # tools a session used, the name its agent goes by, and the pull
-        # requests it opened. None changes what a file yields.
+        # tools a session used, the name its agent goes by, the pull
+        # requests it opened, the id of the session it was continued in,
+        # and the account and organization that own it. None changes what a
+        # file yields.
         cwd = str(self.repo)
         quiet = [
             {"type": kind, "sessionId": "cs1"}
@@ -2134,7 +2136,9 @@ class ClaudeQuals(Fixture):
              {"type": "permission-mode", "permissionMode": "auto", "sessionId": "cs1"},
              {"type": "agent-name", "agentName": "elf-reminders", "sessionId": "cs1"},
              {"type": "pr-link", "sessionId": "cs1", "prNumber": "58", "prUrl": "https://github.com/o/r/pull/58",
-              "prRepository": "o/r", "timestamp": T0}]
+              "prRepository": "o/r", "timestamp": T0},
+             {"type": "continued-in", "timestamp": T0, "sessionId": "cs1", "continuedInSessionId": "cs2"},
+             {"type": "session-owner", "accountUuid": "a1", "organizationUuid": "o1", "sessionId": "cs1"}]
         got = ace.claude_exchanges(
             self.path([*quiet, cu("go", cwd=cwd), ca([{"type": "text", "text": "done"}], cwd=cwd)]), self.repo
         )[0]
@@ -2200,12 +2204,15 @@ class ClaudeQuals(Fixture):
     def test_attachment_types_the_stores_show_pass(self):
         # Every attachment type the stores show beside queued_command is
         # harness bookkeeping: reminders, tool and skill listings, prompt
-        # and context snapshots, mode switches, file notices. None changes
-        # what a file yields.
+        # and context snapshots, mode switches, file notices, and a
+        # session_cron_carry and a task_reminder, which every store shows
+        # holding no tasks. None changes what a file yields.
         cwd = str(self.repo)
         quiet = [
-            {"type": "attachment", "attachment": {"type": kind}, "cwd": cwd, "sessionId": "cs1", "timestamp": T0}
-            for kind in [
+            {"type": "attachment", "attachment": attachment, "cwd": cwd, "sessionId": "cs1", "timestamp": T0}
+            for attachment in [{"type": "session_cron_carry", "tasks": []},
+                               {"type": "task_reminder", "content": [], "itemCount": 0},
+                               *({"type": kind} for kind in [
                 "total_tokens_reminder", "deferred_tools_record", "batching_reminder_sent", "deferred_tools_delta",
                 "skill_listing", "prompt_snapshot", "remote_session_change", "auto_mode", "date", "session_context",
                 "environment", "instructions", "structured_output", "model", "edited_text_file",
@@ -2214,13 +2221,47 @@ class ClaudeQuals(Fixture):
                 "hook_additional_context", "file", "command_permissions", "thinking_drop", "compact_file_reference",
                 "invoked_skills", "auto_mode_exit", "ultra_effort_exit", "task_status", "plan_mode",
                 "plan_mode_exit", "hook_non_blocking_error", "plan_mode_reentry",
-            ]
+            ])]
         ]
         got = ace.claude_exchanges(
             self.path([*quiet, cu("go", ts=T1, cwd=cwd), ca([{"type": "text", "text": "done"}], ts=T2, cwd=cwd)]),
             self.repo,
         )[0]
         self.assertEqual([(e.prompt, e.reply) for e in got], [("go", "done")])
+
+    def test_attachments_the_stores_show_only_empty_refused_holding_anything(self):
+        # Replicata: a session_cron_carry or task_reminder attachment, in a
+        # file holding records read for the repo, that is not the bare empty
+        # form every store shows: it holds a task, lacks a field, has a field
+        # of another form, or has another field. Expectata: refused, citing
+        # the file and line, since a task's words may be the human's; the
+        # same record in a file holding nothing read for the repo is ignored.
+        # Resultata (v6.4.0): as expected, each being of an unseen type; this
+        # guards passing the empty ones against passing the rest.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        carry = {"type": "session_cron_carry"}
+        reminder = {"type": "task_reminder"}
+        task = {"id": "1", "subject": "check the deploy", "status": "pending"}
+        for name, attachment in {
+            "carry with a task": {**carry, "tasks": [{"prompt": "check the deploy", "cron": "*/5 * * * *"}]},
+            "carry with no tasks": carry,
+            "carry with tasks null": {**carry, "tasks": None},
+            "carry with tasks an object": {**carry, "tasks": {}},
+            "carry with another field": {**carry, "tasks": [], "prompt": "check the deploy"},
+            "reminder with a task": {**reminder, "content": [task], "itemCount": 1},
+            "reminder with a task counted as none": {**reminder, "content": [task], "itemCount": 0},
+            "reminder with none counted as one": {**reminder, "content": [], "itemCount": 1},
+            "reminder with no content": {**reminder, "itemCount": 0},
+            "reminder with no count": {**reminder, "content": []},
+            "reminder with content text": {**reminder, "content": "words", "itemCount": 0},
+            "reminder with another field": {**reminder, "content": [], "itemCount": 0, "text": "words"},
+        }.items():
+            with self.subTest(name):
+                odd = lambda where: {"type": "attachment", "attachment": attachment,
+                                     "cwd": where, "sessionId": "cs1", "timestamp": T0}
+                self.refused_at([odd(cwd), cu("go", ts=T1, cwd=cwd)], 1, name)
+                self.refused_at([odd(elsewhere), cu("go", ts=T1, cwd=cwd)], 1, f"{name} elsewhere")
+                self.assertEqual(ace.claude_exchanges(self.path([odd(elsewhere)]), self.repo), ([], set()))
 
     def test_user_content_of_unseen_forms_refused(self):
         # Replicata: a user record read for the repo holds a content piece of
@@ -2371,6 +2412,76 @@ class ClaudeQuals(Fixture):
         self.refused_at([self.called("AskTheHuman"), result], 2, "unseen tool")
         self.refused_at([result], 1, "no call")
 
+    def test_result_carried_into_the_repo_from_a_call_outside_it_passes(self):
+        # Replicata: a tool call's cwd lies outside the repo and its result's
+        # inside it, as when the call is a Bash command starting with a cd
+        # into the repo. Expectata: the result is plumbing, known by its
+        # call's tool, and what follows it is read. Resultata (v6.4.0):
+        # refused as the result of an unknown tool, though the file holds the
+        # call, since only calls with their cwd inside the repo were noted.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        records = [
+            ca([{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": f"cd {cwd}"}}], ts=T0, cwd=elsewhere),
+            cu([{"type": "tool_result", "tool_use_id": "t1", "content": "out"}], ts=T1, cwd=cwd, toolUseResult={"stdout": "out"}),
+            cu("go", ts=T2, cwd=cwd),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual([e.prompt for e in got], ["go"])
+
+    def test_result_carried_into_the_repo_from_a_call_of_an_unseen_tool_refused(self):
+        # Replicata: a tool call's cwd lies outside the repo and its result's
+        # inside it, and the call names a tool no store has shown. Expectata:
+        # refused, citing the result's line, as with a call inside the repo.
+        # Resultata (v6.4.0): as expected; this guards noting calls wherever
+        # they lie against letting a new tool's result through.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        self.refused_at([
+            ca([{"type": "tool_use", "id": "t1", "name": "AskTheHuman", "input": {}}], cwd=elsewhere),
+            cu([{"type": "tool_result", "tool_use_id": "t1", "content": "out"}], cwd=cwd, toolUseResult={"answer": "out"}),
+        ], 2)
+
+    def test_result_carried_into_the_repo_from_a_malformed_call_refused(self):
+        # Replicata: a record with its cwd outside the repo holds a tool call
+        # in a form no store has shown, and a result with its cwd inside the
+        # repo answers that call's id. Expectata: refused, citing the
+        # result's line, the result's tool being unknown. Resultata (v6.4.0):
+        # as expected; this guards noting calls wherever they lie against
+        # crashing on, or believing, a form nothing has validated.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        result = cu([{"type": "tool_result", "tool_use_id": "t1", "content": "out"}], cwd=cwd, toolUseResult={"stdout": "out"})
+        for name, content in {
+            "no id": [{"type": "tool_use", "name": "Bash", "input": {}}],
+            "no tool": [{"type": "tool_use", "id": "t1", "input": {}}],
+            "unhashable id": [{"type": "tool_use", "id": ["t1"], "name": "Bash", "input": {}}],
+            "block not an object": ["t1"],
+            "content text": "t1",
+            "content number": 5,
+            "content null": None,
+        }.items():
+            with self.subTest(name):
+                self.refused_at([ca(content, cwd=elsewhere), result], 2, name)
+
+    def test_reply_outside_the_repo_in_any_form_changes_nothing(self):
+        # Replicata: an assistant record with its cwd outside the repo holds
+        # content in a form no store has shown, in a file holding records
+        # read for the repo, or in one holding none. Expectata: the file
+        # yields what it would without that record, the words being another
+        # directory's; only a result carried into the repo needs its call
+        # (see above). Resultata (v6.4.0): as expected; this guards noting
+        # calls wherever they lie against refusing another project's replies.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        without = ace.claude_exchanges(self.path([cu("go", cwd=cwd)]), self.repo)
+        for name, content in {
+            "unseen block": [{"type": "hologram", "text": "words"}],
+            "block not an object": ["words"],
+            "content text": "words",
+            "content number": 5,
+            "content null": None,
+        }.items():
+            with self.subTest(name):
+                self.assertEqual(ace.claude_exchanges(self.path([ca(content, cwd=elsewhere), cu("go", cwd=cwd)]), self.repo), without)
+                self.assertEqual(ace.claude_exchanges(self.path([ca(content, cwd=elsewhere)]), self.repo), ([], set()))
+
     def test_results_of_tools_the_stores_show_pass(self):
         # Every built-in tool the stores show, and every MCP tool (its result
         # is the server's output), yields plumbing only.
@@ -2403,6 +2514,100 @@ class ClaudeQuals(Fixture):
                 echo(long.replace("\n", " ")[:200] + "…"), echo("see this:pasted words")]
         self.assertEqual(len(ace.claude_exchanges(self.path(fine), self.repo)[0]), 2)
         self.refused_at([cu("go", cwd=cwd), echo("a prompt nobody read")], 2, "echo")
+
+    def echoed(self, text):
+        """The last-prompt record Claude Code writes after a typed prompt."""
+        return {"type": "last-prompt", "lastPrompt": text, "leafUuid": "u1", "sessionId": "cs1"}
+
+    def test_echo_of_a_prompt_typed_outside_the_repo_passes(self):
+        # Replicata: a session file read for the repo holds a prompt typed
+        # with the session's cwd outside the repo, as before a session moves
+        # into a repo it cloned, and that prompt's last-prompt echo.
+        # Expectata: the echo passes, being of a prompt sourcery can read, and
+        # the file yields what it would without the two, the prompt being
+        # another directory's. Resultata (v6.4.0): refused as words sourcery
+        # did not read, since only prompts with their cwd inside the repo
+        # were compared.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        long = "line one\nline two " + "x" * 300
+        pasted = 'see this:\n\n<pasted_content id="p1">\npasted words\n</pasted_content>'
+        without = ace.claude_exchanges(self.path([cu("go", ts=T1, cwd=cwd)]), self.repo)
+        for name, (prompt, echo) in {
+            "text": (cu("aside", cwd=elsewhere), "aside"),
+            "text pieces": (cu([{"type": "text", "text": "aside"}], cwd=elsewhere), "aside"),
+            "cut": (cu(long, cwd=elsewhere), long.replace("\n", " ")[:200] + "…"),
+            "pasted": (cu(pasted, cwd=elsewhere), "see this:pasted words"),
+            "queued": (cq("aside", T0, elsewhere), "aside"),
+        }.items():
+            with self.subTest(name):
+                records = [prompt, self.echoed(echo), cu("go", ts=T1, cwd=cwd)]
+                self.assertEqual(ace.claude_exchanges(self.path(records), self.repo), without)
+
+    def test_echo_of_no_prompt_refused_in_a_session_crossing_the_repos_boundary(self):
+        # Replicata: a session file holds prompts with their cwd inside and
+        # outside the repo, and an echo matching neither. Expectata: refused,
+        # citing the echo's line. Resultata (v6.4.0): as expected; this guards
+        # comparing echoes with prompts wherever they lie against excusing an
+        # echo of words nobody read.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        self.refused_at([cu("aside", cwd=elsewhere), cu("go", ts=T1, cwd=cwd), self.echoed("a prompt nobody read")], 3)
+
+    def test_echo_of_a_reply_outside_the_repo_refused(self):
+        # Replicata: a session file read for the repo holds an agent's reply
+        # with its cwd outside the repo, and an echo matching that reply.
+        # Expectata: refused, citing the echo's line, a reply being no prompt.
+        # Resultata (v6.4.0): as expected; this guards comparing echoes with
+        # prompts wherever they lie against counting an agent's words as read
+        # prompts.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        self.refused_at([ca([{"type": "text", "text": "done"}], cwd=elsewhere), cu("go", cwd=cwd), self.echoed("done")], 3)
+
+    def test_prompts_in_unseen_forms_outside_the_repo_refused_in_files_read_for_the_repo(self):
+        # Replicata: a session file holding records read for the repo also
+        # holds, with its cwd outside the repo, a user record whose content
+        # is in a form no store has shown. Expectata: refused, citing the file
+        # and that record's line, since it may hold the human's words and its
+        # echo could not be matched, as a record of an unseen type anywhere in
+        # such a file is refused; the same record in a file holding nothing
+        # read for the repo is ignored. Resultata (v6.4.0): passed over unread.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        for name, content in {
+            "unseen piece": [{"type": "hologram", "text": "words"}],
+            "number": 5,
+            "null": None,
+            "malformed command": "<command-name>/x",
+        }.items():
+            with self.subTest(name):
+                self.refused_at([cu(content, cwd=elsewhere), cu("go", ts=T1, cwd=cwd)], 1, name)
+                self.assertEqual(ace.claude_exchanges(self.path([cu(content, cwd=elsewhere)]), self.repo), ([], set()))
+
+    def test_session_walking_into_the_repo_and_out_yields_what_lies_inside(self):
+        # Replicata: a session starts outside the repo with a typed prompt,
+        # and a Bash call's cd carries it into the repo, where the human types
+        # a prompt and the agent replies; another call's cd carries it back
+        # out, where the human types again; each prompt is echoed. Expectata:
+        # no refusal, and only what lies inside the repo is on its page.
+        # Resultata (v6.4.0): refused at the first result carried in; had that
+        # passed, refused at the first echo.
+        cwd, elsewhere = str(self.repo), str(self.tmp / "elsewhere")
+        result = lambda tid, ts, where: cu([{"type": "tool_result", "tool_use_id": tid, "content": "out"}], ts=ts, cwd=where,
+                                           toolUseResult={"stdout": "out"})
+        call = lambda tid, ts, where: ca([{"type": "tool_use", "id": tid, "name": "Bash", "input": {}}], ts=ts, cwd=where)
+        records = [
+            cu("read the page", ts="2026-03-01T10:00:00.000Z", cwd=elsewhere),
+            self.echoed("read the page"),
+            call("t1", "2026-03-01T10:01:00.000Z", elsewhere),
+            result("t1", "2026-03-01T10:02:00.000Z", cwd),
+            cu("use more cores", ts="2026-03-01T10:03:00.000Z", cwd=cwd),
+            self.echoed("use more cores"),
+            ca([{"type": "text", "text": "Done."}], ts="2026-03-01T10:04:00.000Z", cwd=cwd),
+            call("t2", "2026-03-01T10:05:00.000Z", cwd),
+            result("t2", "2026-03-01T10:06:00.000Z", elsewhere),
+            cu("an aside", ts="2026-03-01T10:07:00.000Z", cwd=elsewhere),
+            self.echoed("an aside"),
+        ]
+        got = ace.claude_exchanges(self.path(records), self.repo)[0]
+        self.assertEqual([(e.prompt, e.reply) for e in got], [("use more cores", "Done.")])
 
     def test_records_without_a_cwd_refused(self):
         # Replicata: a user, assistant, or queued-prompt record with no cwd,

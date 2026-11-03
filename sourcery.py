@@ -77,7 +77,7 @@ from compression import zstd
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "6.4.0"
+VERSION = "6.4.1"
 UTC = dt.timezone.utc
 
 
@@ -576,7 +576,10 @@ CLAUDE_CANNED = re.compile(r"\[Request interrupted by user[^\]]*\]")
 # bridge, frame, artifact, and cost state, and the names of the tools the
 # session used, from 2026-10-27 on; its permission mode, auto or plan, as
 # {type, permissionMode, sessionId}; the name its agent goes by, a copy of
-# its custom-title or ai-title; and the pull requests it opened). The
+# its custom-title or ai-title; the pull requests it opened; the id of the
+# session it was continued in, as {type, timestamp, sessionId,
+# continuedInSessionId}; and the account and organization that own it, as
+# {type, accountUuid, organizationUuid, sessionId}). The
 # session's custom-title is read, in the one shape the stores show (see
 # claude_record_known). Typed prompts once hid in attachment records
 # nobody had classified, so a record of any other type, or of none, in a
@@ -587,6 +590,7 @@ CLAUDE_RECORDS = frozenset({
     "api-request", "api-request-blob", "api-request-shape", "atis-latch", "file-history-snapshot",
     "file-history-delta", "bridge-session", "mode", "frame-link", "artifact-autoreact-ledger",
     "artifact-comment-monitor", "cost-state", "tools-used", "permission-mode", "agent-name", "pr-link",
+    "continued-in", "session-owner",
 })
 
 # Attachment types the stores show that carry no typing: reminders, tool and
@@ -602,6 +606,16 @@ CLAUDE_MUTE_ATTACHMENTS = frozenset({
     "thinking_drop", "compact_file_reference", "invoked_skills", "auto_mode_exit", "ultra_effort_exit",
     "task_status", "plan_mode", "plan_mode_exit", "hook_non_blocking_error", "plan_mode_reentry",
 })
+
+# Attachments the stores show only empty, known in these exact forms and no
+# other (see claude_record_known): a session_cron_carry, its tasks by their
+# name scheduled ones, and a task_reminder, the harness's nudge to use its
+# task tools. A task's words may be the human's, so one holding anything is
+# refused like a record of an unseen type.
+CLAUDE_EMPTY_ATTACHMENTS = (
+    {"type": "session_cron_carry", "tasks": []},
+    {"type": "task_reminder", "content": [], "itemCount": 0},
+)
 
 # Assistant block types the stores show that carry no words for the human:
 # thinking, tool calls (but SendUserMessage, whose message is reply), and
@@ -803,6 +817,20 @@ def claude_tool_known(name: Any) -> bool:
     return isinstance(name, str) and (name in CLAUDE_TOOLS or name.startswith("mcp__"))
 
 
+def claude_calls(content: Any) -> dict[str, str]:
+    """Each tool call's tool, by call id, in a record's content of any form,
+    since this runs on records of every cwd. Content yielding none here loses
+    nothing: in a record read for the repo, claude_reply_blocks or
+    claude_prompt refuses a form no store has shown, and a tool result
+    answering a call not given here is refused."""
+    calls: dict[str, str] = {}
+    for block in content if isinstance(content, list) else []:
+        match block:
+            case {"type": "tool_use", "id": str() as call, "name": str() as tool}:
+                calls[call] = tool
+    return calls
+
+
 def claude_squash(text: str) -> str:
     """text without paste wrappers or whitespace, as a last-prompt echo is
     compared with it."""
@@ -1000,9 +1028,12 @@ def claude_tool_seconds(record: Mapping[str, Any]) -> float:
 
 def claude_record_known(record: Mapping[str, Any]) -> bool:
     """Whether a record is of a type the stores show: an attachment of a
-    type they show, a custom-title in the shape they show, or another
-    record of a type in CLAUDE_RECORDS."""
+    type they show, or in a form they show (see CLAUDE_EMPTY_ATTACHMENTS), a
+    custom-title in the shape they show, or another record of a type in
+    CLAUDE_RECORDS."""
     match record:
+        case {"type": "attachment", "attachment": attachment} if attachment in CLAUDE_EMPTY_ATTACHMENTS:
+            return True
         case {"type": "attachment", "attachment": {"type": str() as kind}}:
             return kind == "queued_command" or kind in CLAUDE_MUTE_ATTACHMENTS
         case {"type": "attachment"}:
@@ -1039,10 +1070,17 @@ def claude_exchanges(
     # Every tool call's tool, by call id, so each tool result is known by
     # its tool (see CLAUDE_TOOLS); the file's last-prompt echoes, by line;
     # and the prompts read, as claude_squash gives them, which every echo
-    # must be of (see claude_echo_read).
+    # must be of (see claude_echo_read). These checks concern the whole file,
+    # and a session can cross the repo's boundary mid-file: a Bash call's cd
+    # carries its result's cwd across, and an echo can be of a prompt typed
+    # outside the repo. So every call counts whatever its cwd, and
+    # `typed_elsewhere` keeps the line and content of each prompt outside
+    # the repo, to be read once the file proves to hold records read for the
+    # repo, as a record of an unseen type is refused only then.
     tools: dict[Any, Any] = {}
     echoes: list[tuple[int, Any]] = []
     read: set[str] = set()
+    typed_elsewhere: list[tuple[int, Any]] = []
     # Each session's last custom-title (see Exchange.title). Claude Code
     # stamps the title anew through the session, with no time or cwd, so
     # the last in the file is the session's own.
@@ -1168,7 +1206,11 @@ def claude_exchanges(
             )
         inside = under_dir(record.get("cwd"), repo, path)
         first_line, first_inside, first_kind = first_delivery.setdefault(delivery, (line_number, inside, kind))
+        content = attachment.get("prompt") if attachment is not None else message.get("content")
+        tools.update(claude_calls(content))
         if not inside:
+            if role == "user":
+                typed_elsewhere.append((line_number, content))
             continue
         sessions_read.add(session)
         if not first_inside:
@@ -1221,7 +1263,6 @@ def claude_exchanges(
             tallies[session] = (added + grew[0], deleted + grew[1])
         is_command = False
         if role == "user":
-            content = attachment.get("prompt") if attachment is not None else message.get("content")
             if attachment is None and isinstance(content, str) and content.startswith(
                 "<local-command-stdout>"
             ):
@@ -1318,10 +1359,7 @@ def claude_exchanges(
             item = Message(role, timestamp, text, images=images, ballots=ballots,
                            active=pending.pop(session, 0.0), added=added, deleted=deleted)
         else:
-            text = "\n\n".join(claude_reply_blocks(message.get("content"), path, line_number))
-            tools.update(
-                (block.get("id"), block.get("name")) for block in message["content"] if block.get("type") == "tool_use"
-            )
+            text = "\n\n".join(claude_reply_blocks(content, path, line_number))
             if text == "":
                 continue
             effort = record.get("effort") if isinstance(record.get("effort"), str) else ""
@@ -1347,17 +1385,19 @@ def claude_exchanges(
     # Claude Code echoes each typed prompt in a last-prompt record; an echo
     # of no prompt read means the human typed words sourcery did not read,
     # even in a session it never read before.
-    unechoed = [line for line, echo in echoes if not claude_echo_read(echo, read)]
-    if unechoed and sessions_read:
-        # TODO: Says this echo of a typed prompt, in a Claude transcript
-        # holding records read for the project, is of no prompt sourcery read
-        # there: the human typed words sourcery does not read, so the format
-        # seems to have changed and claude_exchanges needs updating.
-        raise UserError(
-            f"Imago rogationis nullam rogationem lectam reddit: {path}:{unechoed[0]}\n"
-            "Homo verba scripsit quae sourcery non legit; forma transcripti Claude mutata videtur, "
-            "claude_exchanges renovandum est."
-        )
+    if sessions_read:
+        read.update(claude_squash(claude_prompt(content, path, line)) for line, content in typed_elsewhere)
+        unechoed = [line for line, echo in echoes if not claude_echo_read(echo, read)]
+        if unechoed:
+            # TODO: Says this echo of a typed prompt, in a Claude transcript
+            # holding records read for the project, is of no prompt sourcery read
+            # there: the human typed words sourcery does not read, so the format
+            # seems to have changed and claude_exchanges needs updating.
+            raise UserError(
+                f"Imago rogationis nullam rogationem lectam reddit: {path}:{unechoed[0]}\n"
+                "Homo verba scripsit quae sourcery non legit; forma transcripti Claude mutata videtur, "
+                "claude_exchanges renovandum est."
+            )
     for session in sessions_read:
         session_seen(session, session in sessions_held)
     return [
