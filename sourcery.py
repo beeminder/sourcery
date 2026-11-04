@@ -77,7 +77,7 @@ from compression import zstd
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "6.4.0"
+VERSION = "6.4.1"
 UTC = dt.timezone.utc
 
 
@@ -576,7 +576,9 @@ CLAUDE_CANNED = re.compile(r"\[Request interrupted by user[^\]]*\]")
 # bridge, frame, artifact, and cost state, and the names of the tools the
 # session used, from 2026-10-27 on; its permission mode, auto or plan, as
 # {type, permissionMode, sessionId}; the name its agent goes by, a copy of
-# its custom-title or ai-title; and the pull requests it opened). The
+# its custom-title or ai-title; the pull requests it opened; and the
+# account and organization that own it, as {type, accountUuid,
+# organizationUuid, sessionId}, from Claude Code 2.1.318 on). The
 # session's custom-title is read, in the one shape the stores show (see
 # claude_record_known). Typed prompts once hid in attachment records
 # nobody had classified, so a record of any other type, or of none, in a
@@ -587,12 +589,16 @@ CLAUDE_RECORDS = frozenset({
     "api-request", "api-request-blob", "api-request-shape", "atis-latch", "file-history-snapshot",
     "file-history-delta", "bridge-session", "mode", "frame-link", "artifact-autoreact-ledger",
     "artifact-comment-monitor", "cost-state", "tools-used", "permission-mode", "agent-name", "pr-link",
+    "session-owner",
 })
 
 # Attachment types the stores show that carry no typing: reminders, tool and
 # skill listings, prompt and context snapshots, mode switches, and file
-# notices. A queued_command attachment, a prompt typed mid-turn, is read;
-# one of any other type is refused like a record of an unseen type.
+# notices. One reminder, workflow_keyword_request (from Claude Code 2.1.314
+# on), tells the model the human typed the keyword "ultracode"; the keyword
+# stays in the prompt, where it is read. A queued_command attachment, a
+# prompt typed mid-turn, is read; one of any other type is refused like a
+# record of an unseen type.
 CLAUDE_MUTE_ATTACHMENTS = frozenset({
     "total_tokens_reminder", "deferred_tools_record", "batching_reminder_sent", "deferred_tools_delta",
     "skill_listing", "prompt_snapshot", "remote_session_change", "auto_mode", "date", "session_context",
@@ -601,6 +607,7 @@ CLAUDE_MUTE_ATTACHMENTS = frozenset({
     "agent_listing_delta", "read_truncation_notice", "hook_additional_context", "file", "command_permissions",
     "thinking_drop", "compact_file_reference", "invoked_skills", "auto_mode_exit", "ultra_effort_exit",
     "task_status", "plan_mode", "plan_mode_exit", "hook_non_blocking_error", "plan_mode_reentry",
+    "workflow_keyword_request",
 })
 
 # Assistant block types the stores show that carry no words for the human:
@@ -637,6 +644,19 @@ CLAUDE_PASTE_TAG = re.compile(r"</?pasted_content[^>]*>")
 # origin predate the field and are classified by content instead.
 CLAUDE_HUMAN_ORIGINS = frozenset({"human"})
 CLAUDE_MACHINE_ORIGINS = frozenset({"task-notification", "peer"})
+# From Claude Code 2.1.285 on, a user record can also carry a turnOrigin:
+# who started the turn the record belongs to, in a spelling of its own. A
+# prompt starts its turn, so its turnOrigin restates its own origin, and the
+# two must agree; a compaction summary carries its turn's, which says
+# nothing of who wrote the summary, so flagged records are judged without it
+# (see claude_flagged_human). Beside origin's kinds, turnOrigin names
+# "scheduled", a scheduled task's wakeup, and "sdk": a prompt the VS Code
+# extension sends for the human, which the stores show only as a late
+# answer (see claude_late_answer). A turnOrigin of any other kind is refused,
+# as an unknown origin kind is.
+CLAUDE_SDK_TURN = "sdk"
+CLAUDE_HUMAN_TURNS = frozenset({"human", CLAUDE_SDK_TURN})
+CLAUDE_MACHINE_TURNS = frozenset({"task_notification", "peer", "scheduled"})
 
 
 def claude_origin_kind(record: Mapping[str, Any]) -> Any:
@@ -646,16 +666,25 @@ def claude_origin_kind(record: Mapping[str, Any]) -> Any:
 
 
 def claude_origin_is_machine(record: Mapping[str, Any], path: Path, line_number: int) -> bool:
+    """Whether a record's origin kind and turnOrigin, each absent or known,
+    agree that a machine sent it."""
     kind = claude_origin_kind(record)
-    if kind is None or kind in CLAUDE_HUMAN_ORIGINS:
+    turn = record.get("turnOrigin")
+    if (kind is None or kind in CLAUDE_HUMAN_ORIGINS) and (turn is None or turn in CLAUDE_HUMAN_TURNS):
         return False
-    if kind in CLAUDE_MACHINE_ORIGINS:
+    if (kind is None or kind in CLAUDE_MACHINE_ORIGINS) and (turn is None or turn in CLAUDE_MACHINE_TURNS):
         return True
-    # TODO: Says this record has an unrecognized origin kind and to add it
-    # deliberately to CLAUDE_HUMAN_ORIGINS or CLAUDE_MACHINE_ORIGINS.
+    # TODO: Says this record states an unrecognized origin kind or
+    # turnOrigin, or an origin kind and turnOrigin that disagree about whether
+    # a human or a machine sent it, naming both; new kinds are to be added
+    # deliberately to CLAUDE_HUMAN_ORIGINS, CLAUDE_MACHINE_ORIGINS,
+    # CLAUDE_HUMAN_TURNS, or CLAUDE_MACHINE_TURNS, and a disagreement means
+    # claude_origin_is_machine needs updating.
     raise UserError(
-        f"Origo recordi ignota: {kind!r} in {path}:{line_number}\n"
-        "Adde hanc originem consulto in CLAUDE_HUMAN_ORIGINS vel CLAUDE_MACHINE_ORIGINS."
+        f"Origines recordi ignotae aut inter se repugnantes: origin {kind!r}, turnOrigin {turn!r} "
+        f"in {path}:{line_number}\n"
+        "Adde novas origines consulto in CLAUDE_HUMAN_ORIGINS, CLAUDE_MACHINE_ORIGINS, CLAUDE_HUMAN_TURNS "
+        "vel CLAUDE_MACHINE_TURNS; si inter se repugnant, claude_origin_is_machine renovandum est."
     )
 
 # Human typing that arrives wrapped in tool plumbing instead of as a chat
@@ -702,11 +731,50 @@ def claude_denial_text(result: str, path: Path, line_number: int) -> str:
     )
 
 
-def claude_recovered(record: Mapping[str, Any], path: Path, line_number: int) -> tuple[str, tuple[Ballot, ...]]:
-    """Return (typed, ballots): the human's typed words plus one Ballot per
-    answered multiple-choice question. An answer matching one option label —
+def claude_ballots(
+    questions: Sequence[Any], answers: Mapping[str, Any], path: Path, line_number: int
+) -> tuple[str, tuple[Ballot, ...]]:
+    """Return (typed, ballots) for AskUserQuestion's `questions` and the
+    `answers` given them, by question text: the human's typed words plus
+    one Ballot per question answered. An answer matching one option label —
     or a comma-joined list of them (multi-select) — is a click; anything
     else is typing and the ballot's picked set stays empty."""
+    ballots: list[Ballot] = []
+    typed: list[str] = []
+    for question in questions:
+        match question:
+            case {"question": str() as prompt_text, "options": list() as options} if isinstance(
+                answers.get(prompt_text), str
+            ) and all(isinstance(option, dict) and isinstance(option.get("label"), str) for option in options):
+                answer = answers[prompt_text]
+            case _:
+                # TODO: Says a question the human answered is in an
+                # unrecognized form (no question text, options missing or
+                # without labels, or no answer recorded) — the answers
+                # structure seems to have changed and claude_ballots needs
+                # updating.
+                raise UserError(
+                    f"Interrogatio in forma ignota: {path}:{line_number}\n"
+                    "Structura answers mutata videtur; claude_ballots renovandum est."
+                )
+        if answer == "":
+            continue
+        labels = tuple(option["label"] for option in options)
+        parts = answer.split(", ")
+        if answer in labels:
+            picked: tuple[str, ...] = (answer,)
+        elif len(parts) > 1 and all(part in labels for part in parts):
+            picked = tuple(parts)
+        else:
+            picked = ()
+            typed.append(answer)
+        ballots.append(Ballot(question=prompt_text, options=labels, picked=picked))
+    return "\n\n".join(typed), tuple(ballots)
+
+
+def claude_recovered(record: Mapping[str, Any], path: Path, line_number: int) -> tuple[str, tuple[Ballot, ...]]:
+    """Return (typed, ballots): the human's typed words plus one Ballot per
+    answered multiple-choice question (see claude_ballots)."""
     result = record.get("toolUseResult")
     match result:
         case str() if CLAUDE_DENIAL_FAMILY in result:
@@ -714,37 +782,7 @@ def claude_recovered(record: Mapping[str, Any], path: Path, line_number: int) ->
         case str() if result == CLAUDE_REJECTED:
             return claude_denial_text(claude_result_text(record, path, line_number), path, line_number), ()
         case {"questions": list() as questions, "answers": dict() as answers}:
-            ballots: list[Ballot] = []
-            typed: list[str] = []
-            for question in questions:
-                match question:
-                    case {"question": str() as prompt_text, "options": list() as options} if isinstance(
-                        answers.get(prompt_text), str
-                    ) and all(isinstance(option, dict) and isinstance(option.get("label"), str) for option in options):
-                        answer = answers[prompt_text]
-                    case _:
-                        # TODO: Says a question the human answered is in an
-                        # unrecognized form (no question text, options
-                        # missing or without labels, or no answer recorded)
-                        # — the answers structure seems to have changed and
-                        # claude_recovered needs updating.
-                        raise UserError(
-                            f"Interrogatio in forma ignota: {path}:{line_number}\n"
-                            "Structura answers mutata videtur; claude_recovered renovandum est."
-                        )
-                if answer == "":
-                    continue
-                labels = tuple(option["label"] for option in options)
-                parts = answer.split(", ")
-                if answer in labels:
-                    picked: tuple[str, ...] = (answer,)
-                elif len(parts) > 1 and all(part in labels for part in parts):
-                    picked = tuple(parts)
-                else:
-                    picked = ()
-                    typed.append(answer)
-                ballots.append(Ballot(question=prompt_text, options=labels, picked=picked))
-            return "\n\n".join(typed), tuple(ballots)
+            return claude_ballots(questions, answers, path, line_number)
         case {"questions": _}:
             # TODO: Says question answers are in an unrecognized form — the
             # answers structure seems to have changed and claude_recovered
@@ -755,6 +793,51 @@ def claude_recovered(record: Mapping[str, Any], path: Path, line_number: int) ->
             )
         case _:
             return "", ()
+
+
+# A "late answer" is the human's answer to an AskUserQuestion the agent
+# stopped waiting for (its call cut off, as by the session's end), which the
+# VS Code extension sends as a new prompt, turnOrigin "sdk", in this
+# template (its webview's code, Claude Code 2.1.318): the agent's question,
+# then the answer as AskUserQuestion's answers give it. The extension reads
+# it back against the questions of the latest such call before it.
+# Answers to several questions at once take another form, which no store
+# shows.
+CLAUDE_LATE_ANSWER = 'Answering your earlier question "{question}": {answer}'
+
+
+def claude_late_answer(
+    text: str, call: Mapping[str, Any] | None, path: Path, line_number: int
+) -> tuple[str, tuple[Ballot, ...]]:
+    """Read a prompt the VS Code extension sent for the human as a late
+    answer to one question of `call`, its session's latest AskUserQuestion
+    call: (typed, ballots), as claude_ballots reads an answer given in
+    time. Words that are no late answer, with an answer, to exactly one of
+    that call's questions are refused."""
+    match call:
+        case {"input": {"questions": list() as questions}}:
+            pass
+        case _:
+            questions = []
+    markers = [
+        (question, CLAUDE_LATE_ANSWER.format(question=question.get("question"), answer=""))
+        for question in questions
+        if isinstance(question, dict)
+    ]
+    match [(question, text[len(marker):]) for question, marker in markers if text.startswith(marker)]:
+        case [(question, answer)] if answer != "":
+            return claude_ballots([question], {question.get("question"): answer}, path, line_number)
+        case _:
+            # TODO: Says this prompt, which the VS Code extension sent for
+            # the human (turnOrigin "sdk"), is no late answer, in the one
+            # form the stores show, to its session's latest AskUserQuestion,
+            # so what the human did is unknown: the format seems to have
+            # changed, so claude_late_answer needs updating.
+            raise UserError(
+                f"Rogatio ab extensione VS Code missa responsum serum ad ultimam interrogationem non est: "
+                f"{path}:{line_number}\n"
+                "Forma mutata videtur; claude_late_answer renovandum est."
+            )
 
 
 def claude_result_text(record: Mapping[str, Any], path: Path, line_number: int) -> str:
@@ -801,6 +884,17 @@ def claude_flagged_human(
 def claude_tool_known(name: Any) -> bool:
     """Whether a tool's results are ones the stores show (see CLAUDE_TOOLS)."""
     return isinstance(name, str) and (name in CLAUDE_TOOLS or name.startswith("mcp__"))
+
+
+def claude_calls(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The tool calls a record makes: an assistant record's tool_use blocks,
+    read whatever the record's cwd, so without refusing any shape
+    (claude_reply_blocks checks the blocks of records read for the repo)."""
+    match record:
+        case {"type": "assistant", "message": {"content": list() as blocks}}:
+            return [block for block in blocks if isinstance(block, dict) and block.get("type") == "tool_use"]
+        case _:
+            return []
 
 
 def claude_squash(text: str) -> str:
@@ -1036,11 +1130,14 @@ def claude_exchanges(
     # and whether one of them names the repo as its own cwd.
     unseen: list[int] = []
     unseen_inside = False
-    # Every tool call's tool, by call id, so each tool result is known by
-    # its tool (see CLAUDE_TOOLS); the file's last-prompt echoes, by line;
-    # and the prompts read, as claude_squash gives them, which every echo
-    # must be of (see claude_echo_read).
+    # Every tool call's tool, by call id, whatever the call's cwd, so each
+    # tool result is known by its tool (see CLAUDE_TOOLS); each session's
+    # latest AskUserQuestion call, which a late answer answers (see
+    # claude_late_answer); the file's last-prompt echoes, by line; and the
+    # prompts read, as claude_squash gives them, which every echo must be of
+    # (see claude_echo_read).
     tools: dict[Any, Any] = {}
+    asked: dict[str, Mapping[str, Any]] = {}
     echoes: list[tuple[int, Any]] = []
     read: set[str] = set()
     # Each session's last custom-title (see Exchange.title). Claude Code
@@ -1152,6 +1249,13 @@ def claude_exchanges(
         # one file, and collect() refuses a session registered from two
         # files. Read alone, a file's registrations go unheard.
         session_file(session, path, line_number, record.get("timestamp"))
+        # Every tool call registers, whatever its cwd: a command that cds
+        # into the repo moves the session there, so a call made outside can
+        # have its result, or a late answer to its question, land inside.
+        for call in claude_calls(record):
+            tools[call.get("id")] = call.get("name")
+            if call.get("name") == "AskUserQuestion":
+                asked[session] = call
         delivery = (session, claude_delivery_key(attachment, path, line_number))
         # The fields that say who sent the record: a queued prompt's
         # attachment, or the record itself.
@@ -1280,6 +1384,11 @@ def claude_exchanges(
                     "Instrumentum novum aut vocatio absens; claude_exchanges renovandum est."
                 )
             read.add(claude_squash(text))
+            # A late answer's words are the harness's (its last-prompt echo
+            # echoes them, so they count as read); the human's act is the
+            # answer they carry.
+            if typed_source.get("turnOrigin") == CLAUDE_SDK_TURN:
+                text, ballots = claude_late_answer(text, asked.get(session), path, line_number)
             images = claude_images(content, path, line_number)
             # Compare and record every delivery before the checks below
             # decide whether it is a prompt, so a redelivery is refused or
@@ -1319,9 +1428,6 @@ def claude_exchanges(
                            active=pending.pop(session, 0.0), added=added, deleted=deleted)
         else:
             text = "\n\n".join(claude_reply_blocks(message.get("content"), path, line_number))
-            tools.update(
-                (block.get("id"), block.get("name")) for block in message["content"] if block.get("type") == "tool_use"
-            )
             if text == "":
                 continue
             effort = record.get("effort") if isinstance(record.get("effort"), str) else ""

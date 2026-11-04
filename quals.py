@@ -937,6 +937,62 @@ class ClaudeQuals(Fixture):
                 self.path([cu("x", cwd=cwd, origin={"kind": "hologram"})]), self.repo
             )[0]
 
+    def test_turn_origins_the_stores_show_pass(self):
+        # Every turnOrigin the stores show, on the records they show it on: a
+        # typed prompt's "human" beside origin human; a background task's
+        # notification's "task_notification" beside origin task-notification;
+        # compaction summaries carrying, with no origin, their turn's
+        # "human", "task_notification", or "peer"; and meta records carrying
+        # "peer" beside origin peer, or "scheduled". Only the typed prompt
+        # is read, and nothing is refused.
+        cwd = str(self.repo)
+        summary = {"isCompactSummary": True, "isVisibleInTranscriptOnly": True}
+        got = ace.claude_exchanges(self.path([
+            cu("<task-notification>\n<task-id>b1</task-id>\n</task-notification>", ts=T0, cwd=cwd,
+               origin={"kind": "task-notification"}, turnOrigin="task_notification", promptSource="system"),
+            *(cu("This session is being continued...", ts=T0, cwd=cwd, turnOrigin=turn, **summary)
+              for turn in ("human", "task_notification", "peer")),
+            cu("<agent-message>done</agent-message>", ts=T0, cwd=cwd, isMeta=True, origin={"kind": "peer"},
+               turnOrigin="peer", promptSource="system"),
+            cu("Check the deploy.", ts=T0, cwd=cwd, isMeta=True, turnOrigin="scheduled", promptSource="system"),
+            cu("go", ts=T1, cwd=cwd, origin={"kind": "human"}, turnOrigin="human", promptSource="sdk"),
+            ca([{"type": "text", "text": "done"}], ts=T2, cwd=cwd),
+        ]), self.repo)[0]
+        self.assertEqual([(e.prompt, e.reply) for e in got], [("go", "done")])
+
+    def test_turn_origins_unseen_or_at_odds_with_origin_refused(self):
+        # Replicata: a user record read for the repo whose turnOrigin no
+        # store has shown, or whose turnOrigin and origin disagree about who
+        # started its turn. Expectata: refused, citing the file and line.
+        # Resultata (v6.4.0): turnOrigin ignored, the record judged by its
+        # origin alone, or, stating none, read as typing.
+        cwd = str(self.repo)
+        for name, record in {
+            "unseen, with origin": cu("go", cwd=cwd, origin={"kind": "human"}, turnOrigin="cron"),
+            "unseen, alone": cu("go", cwd=cwd, turnOrigin="cron"),
+            "human origin, machine turn": cu("go", cwd=cwd, origin={"kind": "human"}, turnOrigin="task_notification"),
+            "machine origin, human turn": cu("<task-notification>x</task-notification>", cwd=cwd,
+                                             origin={"kind": "task-notification"}, turnOrigin="human"),
+        }.items():
+            with self.subTest(name):
+                self.refused_at([record], 1, name)
+
+    def test_record_stating_only_a_machine_turn_origin_dropped(self):
+        # Replicata: user records read for the repo that state no origin,
+        # only a turnOrigin naming a machine: a background task, another
+        # agent, a scheduled wakeup. No store shows one outside compaction
+        # summaries. Expectata: each dropped as machine text and held, as
+        # one whose origin names that machine is; a record stating only
+        # turnOrigin "human" is read. Resultata (v6.4.0): each read as typing.
+        cwd = str(self.repo)
+        got, held = ace.claude_exchanges(self.path([
+            *(cu("Wake up and check the deploy.", ts=T0, cwd=cwd, turnOrigin=turn)
+              for turn in ("task_notification", "peer", "scheduled")),
+            cu("typed", ts=T1, cwd=cwd, turnOrigin="human"),
+        ]), self.repo)
+        self.assertEqual([e.prompt for e in got], ["typed"])
+        self.assertIn(("Claude Code", utc(T0)), held)
+
     def test_peer_agent_handback_queued_midturn_is_machine_not_prompt(self):
         # Replicata: a background agent hands its result back mid-turn; Claude
         # Code records it as a queued_command attachment in prompt mode whose
@@ -2059,6 +2115,117 @@ class ClaudeQuals(Fixture):
         self.assertEqual(got[0].ballots[0].picked, ("Tutorial", "Sandbox"))
         self.assertEqual(got[0].prompt, "")
 
+    # A late answer as the VS Code extension sends one (its webview, Claude
+    # Code 2.1.318): the human answers an AskUserQuestion the agent stopped
+    # waiting for, and the extension sends the answer as a new prompt,
+    # turnOrigin "sdk" and no origin, in this template.
+    LATE = 'Answering your earlier question "{question}": {answer}'
+    # The result Claude Code records for a call the session's end cut off.
+    SHUTDOWN = ("[Tool call interrupted: the session ended before this call's result was recorded, so its outcome "
+                "is unknown. Check whether it took effect before relying on it or running it again.]")
+    CHECK = ("Loosen the comma check?", ("Loosen it (Recommended)", "Keep it"))
+    FILE = ("Which file?", ("a.py", "b.py"))
+
+    def asked(self, *questions, tid="q1", ts=T1, cwd=None):
+        """An assistant record asking AskUserQuestion's `questions`, each
+        (question, option labels), then the call's result as the session's
+        end cuts it off, both at `ts`."""
+        cwd = str(self.repo) if cwd is None else cwd
+        options = [
+            {"question": question, "header": "h", "multiSelect": False,
+             "options": [{"label": label, "description": "d"} for label in labels]}
+            for question, labels in questions
+        ]
+        call = ca([{"type": "text", "text": "Asking."},
+                   {"type": "tool_use", "id": tid, "name": "AskUserQuestion", "input": {"questions": options}}],
+                  ts=ts, cwd=cwd, mid=f"m-{tid}")
+        cut = cu([{"type": "tool_result", "tool_use_id": tid, "is_error": True, "content": self.SHUTDOWN}],
+                 ts=ts, cwd=cwd, toolUseResult=self.SHUTDOWN)
+        return [call, cut]
+
+    def late(self, text, ts=T2, cwd=None):
+        """A prompt the VS Code extension sent for the human, holding
+        `text`, as the store shows a late answer, then its last-prompt
+        echo."""
+        cwd = str(self.repo) if cwd is None else cwd
+        return [cu([{"type": "text", "text": text}], ts=ts, cwd=cwd, promptSource="sdk", turnOrigin="sdk"),
+                {"type": "last-prompt", "lastPrompt": text, "leafUuid": "u1", "sessionId": "cs1"}]
+
+    def test_late_answer_clicked_reads_as_a_ballot(self):
+        # Replicata: the agent asks an AskUserQuestion, the session ends
+        # before the human answers, and the human then picks an option in the
+        # VS Code extension, which sends the answer as a new prompt in its
+        # late-answer template (turnOrigin "sdk", no origin), echoed by a
+        # last-prompt record; then the reply. Expectata: the late answer is
+        # a pure ballot exchange, the option picked, as a click given in
+        # time is. Resultata (v6.4.0): the template, the agent's question
+        # and the option's label, read as the human's typing.
+        cwd = str(self.repo)
+        question, labels = self.CHECK
+        got = ace.claude_exchanges(self.path([
+            cu("check the quals", ts=T0, cwd=cwd, origin={"kind": "human"}),
+            *self.asked(self.CHECK),
+            *self.late(self.LATE.format(question=question, answer=labels[0])),
+            ca([{"type": "text", "text": "Loosened."}], ts=T3, cwd=cwd, mid="m2"),
+        ]), self.repo)[0]
+        self.assertEqual(
+            [(e.prompt, e.ballots, e.reply) for e in got],
+            [("check the quals", (), "Asking."), ("", (ace.Ballot(question, labels, (labels[0],)),), "Loosened.")],
+        )
+
+    def test_late_answer_in_the_humans_words_reads_as_typing(self):
+        # Replicata: as above, but the human types an answer of their own
+        # instead of picking an option. Expectata: the typed words are the
+        # prompt, beside the question's ballot with no option picked.
+        # Resultata (v6.4.0): the whole template read as typing.
+        cwd = str(self.repo)
+        question, labels = self.CHECK
+        got = ace.claude_exchanges(self.path([
+            cu("check the quals", ts=T0, cwd=cwd, origin={"kind": "human"}),
+            *self.asked(self.CHECK),
+            *self.late(self.LATE.format(question=question, answer="loosen it, but only before digits")),
+        ]), self.repo)[0]
+        self.assertEqual(
+            [(e.prompt, e.ballots) for e in got],
+            [("check the quals", ()), ("loosen it, but only before digits", (ace.Ballot(question, labels, ()),))],
+        )
+
+    def test_late_answer_to_a_question_asked_outside_the_repo_read(self):
+        # Replicata: the agent asks its question while working in the repo's
+        # parent directory, and the human answers it late once the session's
+        # cwd is the repo. Expectata: the late answer is read against that
+        # question: a click. Resultata (v6.4.0): the template read as typing.
+        question, labels = self.CHECK
+        got = ace.claude_exchanges(self.path([
+            *self.asked(self.CHECK, ts=T0, cwd=str(self.tmp)),
+            *self.late(self.LATE.format(question=question, answer=labels[1]), ts=T1),
+        ]), self.repo)[0]
+        self.assertEqual([(e.prompt, e.ballots) for e in got], [("", (ace.Ballot(question, labels, (labels[1],)),))])
+
+    def test_late_answers_of_unseen_forms_refused(self):
+        # Replicata: a prompt the VS Code extension sent (turnOrigin "sdk")
+        # that is no late answer, in the one form the stores show, to the
+        # session's latest AskUserQuestion: other words; a late answer to a
+        # question that call never asked, or to one asked before a later
+        # call; one in a session that asked nothing; one with no answer; and
+        # the form the extension sends for several questions at once, which
+        # no store shows. Expectata: refused, citing the file and line.
+        # Resultata (v6.4.0): each read as the human's typing.
+        cwd = str(self.repo)
+        check, (label, _) = self.CHECK
+        for name, (records, line) in {
+            "other words": ([*self.asked(self.CHECK), *self.late("Explain this file")], 3),
+            "unasked question": ([*self.asked(self.CHECK), *self.late(self.LATE.format(question="Which flag?", answer=label))], 3),
+            "superseded question": ([*self.asked(self.CHECK), *self.asked(self.FILE, tid="q2"),
+                                     *self.late(self.LATE.format(question=check, answer=label))], 5),
+            "nothing asked": ([cu("go", ts=T0, cwd=cwd), *self.late(self.LATE.format(question=check, answer=label))], 2),
+            "no answer": ([*self.asked(self.CHECK), *self.late(self.LATE.format(question=check, answer=""))], 3),
+            "several questions": ([*self.asked(self.CHECK, self.FILE),
+                                   *self.late(f'Answering your earlier questions:\n- "{check}": {label}\n- "Which file?": a.py')], 3),
+        }.items():
+            with self.subTest(name):
+                self.refused_at(records, line, name)
+
     def test_missing_timestamp_fails_loudly(self):
         path = self.path([cu("go", ts=None, cwd=str(self.repo))])
         with self.assertRaises(ace.UserError):
@@ -2121,8 +2288,9 @@ class ClaudeQuals(Fixture):
         # system notices, the prompt queue, titles, the last prompt's echo,
         # request logs, file-history snapshots, the session's mode and
         # permission mode, bridge, frame, artifact, and cost state, the
-        # tools a session used, the name its agent goes by, and the pull
-        # requests it opened. None changes what a file yields.
+        # tools a session used, the name its agent goes by, the pull
+        # requests it opened, and the account and organization that own it.
+        # None changes what a file yields.
         cwd = str(self.repo)
         quiet = [
             {"type": kind, "sessionId": "cs1"}
@@ -2134,7 +2302,8 @@ class ClaudeQuals(Fixture):
              {"type": "permission-mode", "permissionMode": "auto", "sessionId": "cs1"},
              {"type": "agent-name", "agentName": "elf-reminders", "sessionId": "cs1"},
              {"type": "pr-link", "sessionId": "cs1", "prNumber": "58", "prUrl": "https://github.com/o/r/pull/58",
-              "prRepository": "o/r", "timestamp": T0}]
+              "prRepository": "o/r", "timestamp": T0},
+             {"type": "session-owner", "accountUuid": "acct1", "organizationUuid": "org1", "sessionId": "cs1"}]
         got = ace.claude_exchanges(
             self.path([*quiet, cu("go", cwd=cwd), ca([{"type": "text", "text": "done"}], cwd=cwd)]), self.repo
         )[0]
@@ -2213,7 +2382,7 @@ class ClaudeQuals(Fixture):
                 "ultra_effort_enter", "date_change", "agent_listing_delta", "read_truncation_notice",
                 "hook_additional_context", "file", "command_permissions", "thinking_drop", "compact_file_reference",
                 "invoked_skills", "auto_mode_exit", "ultra_effort_exit", "task_status", "plan_mode",
-                "plan_mode_exit", "hook_non_blocking_error", "plan_mode_reentry",
+                "plan_mode_exit", "hook_non_blocking_error", "plan_mode_reentry", "workflow_keyword_request",
             ]
         ]
         got = ace.claude_exchanges(
@@ -2221,6 +2390,32 @@ class ClaudeQuals(Fixture):
             self.repo,
         )[0]
         self.assertEqual([(e.prompt, e.reply) for e in got], [("go", "done")])
+
+    def test_workflow_keyword_reminder_leaves_the_keyword_in_the_prompt(self):
+        # Replicata: a prompt holding the keyword "ultracode", followed in the
+        # file, as Claude Code 2.1.314 writes it, by a workflow_keyword_request
+        # attachment stamped 2ms before the prompt, whose rendered reminder
+        # tells the model the user typed that keyword; then the reply.
+        # Expectata: one exchange whose prompt is the typed text, keyword
+        # and all, and the reply; the reminder adds nothing. Resultata
+        # (v6.4.0): refused, the attachment being of a type no store had
+        # shown.
+        cwd = str(self.repo)
+        reminder = {
+            "type": "attachment", "attachment": {"type": "workflow_keyword_request"},
+            "rendered": [{"content": "<system-reminder>\nThe user included the keyword \"ultracode\", opting this "
+                                     "turn into multi-agent orchestration — use the Workflow tool to fulfill "
+                                     "the request.\n</system-reminder>"}],
+            "renderedRole": "system", "cwd": cwd, "sessionId": "cs1", "timestamp": "2026-03-01T10:04:59.998Z",
+        }
+        got = ace.claude_exchanges(
+            self.path([
+                cu("sweep the logs, ultracode", ts=T1, cwd=cwd, origin={"kind": "human"}), reminder,
+                ca([{"type": "text", "text": "swept"}], ts=T2, cwd=cwd),
+            ]),
+            self.repo,
+        )[0]
+        self.assertEqual([(e.prompt, e.reply) for e in got], [("sweep the logs, ultracode", "swept")])
 
     def test_user_content_of_unseen_forms_refused(self):
         # Replicata: a user record read for the repo holds a content piece of
@@ -2370,6 +2565,25 @@ class ClaudeQuals(Fixture):
                     toolUseResult={"answer": "the human's answer"})
         self.refused_at([self.called("AskTheHuman"), result], 2, "unseen tool")
         self.refused_at([result], 1, "no call")
+
+    def test_result_of_a_call_made_outside_the_repo_known(self):
+        # Replicata: the agent, working in the repo's parent directory, runs
+        # a command that cds into the repo: Claude Code records the call with
+        # the parent's cwd and its result with the repo's. The human then
+        # types a prompt in the repo. Expectata: the result is known as the
+        # Bash result it is, and the prompt is read. Resultata (v6.4.0):
+        # refused as a result whose call the file does not hold, since only
+        # calls recorded inside the repo were registered.
+        cwd = str(self.repo)
+        got = ace.claude_exchanges(self.path([
+            cu("go in", ts=T0, cwd=str(self.tmp), origin={"kind": "human"}),
+            ct("Bash", "t1", T0, str(self.tmp)),
+            cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}], ts=T1, cwd=cwd,
+               toolUseResult={"stdout": "ok"}),
+            cu("now here", ts=T2, cwd=cwd, origin={"kind": "human"}),
+            ca([{"type": "text", "text": "done"}], ts=T3, cwd=cwd),
+        ]), self.repo)[0]
+        self.assertEqual([(e.prompt, e.reply) for e in got], [("now here", "done")])
 
     def test_results_of_tools_the_stores_show_pass(self):
         # Every built-in tool the stores show, and every MCP tool (its result
