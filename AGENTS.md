@@ -52,3 +52,7 @@ Codex rewrote and compressed its transcript store in 2026-09/10 and sourcery rea
 - Before claiming a reader change is safe, dry-run every lab page on scratch copies; the real stores contradict surveys (Copilot mention parts carry no text).
 - A refusal is never put to the human as a question. It is the default.
 - Missing metadata is never a reason to leave out typed words. Codebuff (6.4.0) recorded no time for prompts before 2025-09-23 or for answers to the agent's questions, so `codebuff_after` places them after the last time it did record, in order. Its reader opens only `projects/<repo directory name>/`, and a blocks chat's log (the logs total about 2 GB) only when the run state names no model.
+
+## An error prints exactly what its raise site writes (2026.11.04-b)
+
+The printers in sourcery.py's and adopt.py's `run` print a UserError's message as raised and add nothing, not even an `Error:` line: every character the human sees is written where the error is raised (rule 9). Every UserError message still in Latin therefore opens with `f"{LATIN_PREFIX}\n"` written there, under the TODO that marks it untranslated, so the human sees it is to be pasted to Claude. A human translating one deletes the TODO and the prefix together; `test_every_untranslated_error_and_no_other_opens_with_the_paste_line` refuses either without the other. New Latin errors get both.

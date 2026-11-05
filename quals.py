@@ -6170,6 +6170,72 @@ class CliQuals(Fixture):
         self.assertEqual(code, 0)
         self.assertIn("REPODIR", out)
 
+    def test_version_is_its_deploy_date_and_letter(self):
+        # Replicata: sourcery --version. Expectata: the date of the deploy
+        # that ships it, as YYYY.MM.DD, then a letter counting that day's
+        # deploys: -a for the first, -b for the second (dreeves,
+        # 2026-11-04). Resultata (v6.4.1): "6.4.1".
+        version = self.run_cli(["--version"])[1].removesuffix("\n")
+        match = re.fullmatch(r"(\d{4})\.(\d{2})\.(\d{2})-[a-z]", version)
+        self.assertIsNotNone(match, version)
+        dt.date(*map(int, match.groups()))  # a date no calendar has raises
+
+    # The line an error in Latin opens with, dreeves's words verbatim
+    # (2026-11-04): whoever runs sourcery need not read the Latin.
+    PASTE_LINE = "Error! Don't worry your pretty head about what the error is, just paste this to Claude:"
+
+    def test_latin_errors_open_with_the_paste_to_claude_line(self):
+        # Replicata: sourcery given --open twice, and adopt.py given no
+        # arguments, so each refuses in Latin. Expectata: stderr is the
+        # message exactly as raised, nothing added: dreeves's line, then the
+        # Latin. Resultata (2026.11.04-a's first try): the line printed above
+        # "Error:", added by UserError to every message; (2026.11.04-b)
+        # "Error:" printed above the line, added by the printer to every
+        # message, as it had been since sourcery's first commit.
+        self.assertEqual(self.run_cli(["--open", "--open"]), (2, "", f"{self.PASTE_LINE}\nArgumentum --open iteratum est.\n"))
+        self.assertEqual(self.adopt_cli([]), (2, "", f"{self.PASTE_LINE}\n{adopt.USAGE}\n"))
+
+    def test_translated_errors_have_no_paste_to_claude_line(self):
+        # Replicata: the errors dreeves has translated into English: sourcery
+        # given no arguments, and --open when the browser refuses to open the
+        # written page. Expectata: stderr is the English message exactly as
+        # raised, nothing added: no line telling the human to paste it to
+        # Claude, and no "Error:" above it. Resultata (2026.11.04-a's first
+        # try): the line printed above the usage text, UserError adding it to
+        # every message but the one raised with preface=(); (2026.11.04-b)
+        # "Error:" printed above each, added by the printer.
+        self.assertEqual(self.run_cli([]), (2, "", f"{ace.help_text()}\n"))
+        self.populate()
+        out_path = self.tmp / "out.html"
+        original = ace.webbrowser.open
+        ace.webbrowser.open = lambda uri: False
+        try:
+            code, _, err = self.run_cli([str(self.repo), str(out_path), "--open"])
+        finally:
+            ace.webbrowser.open = original
+        self.assertEqual((code, err), (2, f"Browser failed to open: {out_path.resolve()}\n"))
+
+    def test_every_untranslated_error_and_no_other_opens_with_the_paste_line(self):
+        # Replicata: every UserError sourcery.py and adopt.py construct.
+        # Expectata: one whose message is still Latin, as the TODO comment
+        # right above it marks (AGENTS.md rule 7), opens with LATIN_PREFIX,
+        # written out at that very spot, and one a human has translated, its
+        # TODO gone, does not; so translating one means removing its TODO
+        # and its LATIN_PREFIX together. Resultata (2026.11.04-a's first
+        # try): no message wrote it; UserError added it to all but the one
+        # raised with preface=().
+        for script in (Path(ace.__file__), Path(adopt.__file__)):
+            source = script.read_text(encoding="utf-8")
+            lines = source.splitlines()
+            for node in ast.walk(ast.parse(source)):
+                if not (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "UserError"):
+                    continue
+                above = itertools.takewhile(lambda line: line.lstrip().startswith("#"), reversed(lines[: node.lineno - 1]))
+                untranslated = any("TODO" in line for line in above)
+                opens = ast.get_source_segment(source, node.args[0]).startswith('f"{LATIN_PREFIX}\\n')
+                with self.subTest(f"{script.name}:{node.lineno}"):
+                    self.assertEqual(opens, untranslated)
+
     def test_minimum_python_version_enforced_at_parse_time(self):
         # The interpreter's parser is the version check: on Python < 3.10 the
         # script's match statements are a SyntaxError before anything runs, so

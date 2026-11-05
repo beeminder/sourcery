@@ -77,8 +77,19 @@ from compression import zstd
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
-VERSION = "6.4.1"
+# The date of the deploy that ships this code, YYYY.MM.DD, then a letter
+# counting that day's deploys: -a for the first, -b for the second. An
+# agent changing sourcery sets today's date with the letter after HEAD's
+# when HEAD's version is today's, else with -a, and leaves a version the
+# working tree already moved to today alone.
+VERSION = "2026.11.04-b"
 UTC = dt.timezone.utc
+
+# The line every error message still in Latin opens with, written out in
+# each such message, under the TODO that marks it untranslated (AGENTS.md
+# rule 7): dreeves's words, verbatim. Translating a message means removing
+# its TODO and its LATIN_PREFIX together.
+LATIN_PREFIX = "Error! But don't worry your pretty head about what the error is, just paste the following to Claude:"
 
 
 class UserError(RuntimeError):
@@ -217,17 +228,15 @@ def parse_args(argv: Sequence[str]) -> Options:
             case "--open":
                 if token in flags:
                     # TODO: Says the --open flag was given more than once.
-                    raise UserError("Argumentum --open iteratum est.")
+                    raise UserError(f"{LATIN_PREFIX}\n" "Argumentum --open iteratum est.")
                 flags.add(token)
             case _ if token.startswith("-"):
                 # TODO: Says this option is not recognized.
-                raise UserError(f"Argumentum ignotum: {token}\n\n{help_text()}")
+                raise UserError(f"{LATIN_PREFIX}\n" f"Argumentum ignotum: {token}\n\n{help_text()}")
             case _:
                 positionals.append(token)
     if len(positionals) != 2:
-        # TODO: Says exactly two arguments are required, the project
-        # directory and the output file.
-        raise UserError(f"Duo argumenta necessaria sunt: REPODIR et OUTPUT.html.\n\n{help_text()}")
+        raise UserError(f"{help_text()}")
     repo, output = positionals
     return Options(
         repo=Path(repo).expanduser(),
@@ -242,8 +251,7 @@ def canonical_repo(path: Path) -> Path:
         # TODO: Says the project directory wasn't found and to give a path
         # to an existing project directory.
         raise UserError(
-            f"Directorium incepti non inventum: {candidate}\n"
-            "Da viam exsistentem ad directorium incepti."
+            f"Error: No such directory: {candidate}"
         )
     return candidate
 
@@ -302,6 +310,7 @@ def repo_remote(repo: Path) -> str:
         # (It says nothing about whether an origin exists: one may, pointing
         # somewhere that has no web page of its own.)
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Nullum remotum nomine 'origin' sedem publicam monstrat: {repo}\n"
             f"Sedem publicam habent: {homes}\n"
             "Fac ut 'origin' eandem sedem monstret (aut nomen illius remoti muta, "
@@ -329,6 +338,7 @@ def project_name(repo: Path, remote: str) -> str:
         # checkout, and to set origin's URL to the repository's home, then
         # rerun.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Sedes publica ex remoto 'origin' lecta nullum repositorium nominat: {remote!r} ({repo})\n"
             "URL ipsius 'origin' ad sedem repositorii constitue, deinde iterum curre."
         )
@@ -343,7 +353,7 @@ def env_paths(env: Mapping[str, str], key: str, defaults: Iterable[Path]) -> tup
     if not paths:
         # TODO: Says this environment variable is set but empty, and to
         # either unset it or put at least one path in it.
-        raise UserError(f"Variabilis {key} vacua est. Aufer eam vel saltem unam viam da.")
+        raise UserError(f"{LATIN_PREFIX}\n" f"Variabilis {key} vacua est. Aufer eam vel saltem unam viam da.")
     return paths
 
 
@@ -386,7 +396,7 @@ def parse_time(value: Any) -> dt.datetime:
     match value:
         case bool():
             # TODO: Says a timestamp is in an unrecognized form.
-            raise UserError(f"Forma temporis ignota: {value!r}")
+            raise UserError(f"{LATIN_PREFIX}\n" f"Forma temporis ignota: {value!r}")
         case int() | float():
             seconds = float(value)
             # Epoch milliseconds and epoch seconds are both in the wild;
@@ -396,7 +406,7 @@ def parse_time(value: Any) -> dt.datetime:
                 return dt.datetime.fromtimestamp(seconds, tz=UTC)
             except (OverflowError, OSError, ValueError) as exc:
                 # TODO: Says a numeric timestamp is invalid.
-                raise UserError(f"Tempus numericum invalidum: {value!r}") from exc
+                raise UserError(f"{LATIN_PREFIX}\n" f"Tempus numericum invalidum: {value!r}") from exc
         case str():
             raw = value.strip()
             normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
@@ -404,12 +414,12 @@ def parse_time(value: Any) -> dt.datetime:
                 parsed = dt.datetime.fromisoformat(normalized)
             except ValueError as exc:
                 # TODO: Says a timestamp is not valid ISO-8601.
-                raise UserError(f"Tempus ISO-8601 invalidum: {value!r}") from exc
+                raise UserError(f"{LATIN_PREFIX}\n" f"Tempus ISO-8601 invalidum: {value!r}") from exc
             parsed = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
             return parsed.astimezone(UTC)
         case _:
             # TODO: Says a timestamp is in an unrecognized form.
-            raise UserError(f"Forma temporis ignota: {type(value).__name__}")
+            raise UserError(f"{LATIN_PREFIX}\n" f"Forma temporis ignota: {type(value).__name__}")
 
 
 def read_json(path: Path) -> Any:
@@ -419,12 +429,13 @@ def read_json(path: Path) -> Any:
         # TODO: Says read permission is missing for this file and to grant
         # the terminal read access, then rerun.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Licentia legendi deest: {path}\n"
             "Da terminali licentiam legendi hunc fasciculum et iterum curre."
         ) from exc
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         # TODO: Says this file contains invalid JSON.
-        raise UserError(f"JSON invalidum in {path}: {exc}") from exc
+        raise UserError(f"{LATIN_PREFIX}\n" f"JSON invalidum in {path}: {exc}") from exc
 
 
 def unpacked_lines(fh: Iterable[str], path: Path) -> Iterator[str]:
@@ -435,7 +446,7 @@ def unpacked_lines(fh: Iterable[str], path: Path) -> Iterator[str]:
     except (zstd.ZstdError, EOFError) as exc:
         # TODO: Says this compressed transcript cannot be decompressed, with
         # the reason.
-        raise UserError(f"Transcriptum compressum resolvi non potest: {path}\n{exc}") from exc
+        raise UserError(f"{LATIN_PREFIX}\n" f"Transcriptum compressum resolvi non potest: {path}\n{exc}") from exc
 
 
 def read_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
@@ -446,12 +457,13 @@ def read_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
         # TODO: Says read permission is missing for this file and to grant
         # the terminal read access, then rerun.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Licentia legendi deest: {path}\n"
             "Da terminali licentiam legendi hunc fasciculum et iterum curre."
         ) from exc
     except OSError as exc:
         # TODO: Says this file cannot be opened.
-        raise UserError(f"Fasciculus aperiri non potest: {path}\n{exc}") from exc
+        raise UserError(f"{LATIN_PREFIX}\n" f"Fasciculus aperiri non potest: {path}\n{exc}") from exc
     with fh:
         for line_number, line in enumerate(unpacked_lines(fh, path), start=1):
             if line == "\n":
@@ -469,12 +481,13 @@ def read_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
                 # TODO: Says this file has invalid JSONL at this line, and to
                 # close Claude, Codex, and VS Code, then rerun.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"JSONL invalidum: {path}:{line_number}\n{exc}\n"
                     "Claude, Codex, et VS Code claude; deinde iterum curre."
                 ) from exc
             if not isinstance(record, dict):
                 # TODO: Says this JSONL line is not a JSON object.
-                raise UserError(f"Recordum JSONL obiectum non est: {path}:{line_number}")
+                raise UserError(f"{LATIN_PREFIX}\n" f"Recordum JSONL obiectum non est: {path}:{line_number}")
             yield line_number, record
 
 
@@ -507,6 +520,7 @@ def under_dir(value: Any, root: Path, source: Path) -> bool:
         # names; its directories must first be rewritten to this machine's
         # checkout of the project, then rerun.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Transcriptum ex alia machina venit (exempli gratia ex spatio operis Claude in nube): {source}\n"
             f"Via {value} sub /home iacet. Directoria transcripti prius ad exemplar incepti in hac machina "
             "rescribe, deinde iterum curre."
@@ -681,6 +695,7 @@ def claude_origin_is_machine(record: Mapping[str, Any], path: Path, line_number:
     # CLAUDE_HUMAN_TURNS, or CLAUDE_MACHINE_TURNS, and a disagreement means
     # claude_origin_is_machine needs updating.
     raise UserError(
+        f"{LATIN_PREFIX}\n"
         f"Origines recordi ignotae aut inter se repugnantes: origin {kind!r}, turnOrigin {turn!r} "
         f"in {path}:{line_number}\n"
         "Adde novas origines consulto in CLAUDE_HUMAN_ORIGINS, CLAUDE_MACHINE_ORIGINS, CLAUDE_HUMAN_TURNS "
@@ -726,6 +741,7 @@ def claude_denial_text(result: str, path: Path, line_number: int) -> str:
     # TODO: Says a tool denial is in an unrecognized form and to add it
     # deliberately to CLAUDE_TYPED_MARKERS or CLAUDE_UNTYPED_TAILS.
     raise UserError(
+        f"{LATIN_PREFIX}\n"
         f"Recusatio in forma ignota: {path}:{line_number}\n"
         "Adde hanc formam consulto in CLAUDE_TYPED_MARKERS vel CLAUDE_UNTYPED_TAILS."
     )
@@ -754,6 +770,7 @@ def claude_ballots(
                 # structure seems to have changed and claude_ballots needs
                 # updating.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"Interrogatio in forma ignota: {path}:{line_number}\n"
                     "Structura answers mutata videtur; claude_ballots renovandum est."
                 )
@@ -788,6 +805,7 @@ def claude_recovered(record: Mapping[str, Any], path: Path, line_number: int) ->
             # answers structure seems to have changed and claude_recovered
             # needs updating.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"Responsa interrogationum in forma ignota: {path}:{line_number}\n"
                 "Structura answers mutata videtur; claude_recovered renovandum est."
             )
@@ -834,6 +852,7 @@ def claude_late_answer(
             # so what the human did is unknown: the format seems to have
             # changed, so claude_late_answer needs updating.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"Rogatio ab extensione VS Code missa responsum serum ad ultimam interrogationem non est: "
                 f"{path}:{line_number}\n"
                 "Forma mutata videtur; claude_late_answer renovandum est."
@@ -856,6 +875,7 @@ def claude_result_text(record: Mapping[str, Any], path: Path, line_number: int) 
             # form (not one tool result holding text) — the format seems to
             # have changed and claude_recovered needs updating.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"Fructus instrumenti recusati in forma ignota: {path}:{line_number}\n"
                 "Forma mutata videtur; claude_recovered renovandum est."
             )
@@ -931,6 +951,7 @@ def claude_delivery_key(attachment: Mapping[str, Any] | None, path: Path, line_n
             # form (not text, or empty) — the format seems to have changed
             # and claude_delivery_key needs updating.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"source_uuid in forma ignota: {path}:{line_number}\n"
                 "Forma mutata videtur; claude_delivery_key renovandum est."
             )
@@ -945,6 +966,7 @@ def claude_prompt(content: Any, path: Path, line_number: int) -> str:
     # tool-result pieces), and may hold the human's words: the format seems
     # to have changed, so claude_prompt needs updating.
     unseen = UserError(
+        f"{LATIN_PREFIX}\n"
         f"Contentum rogationis in forma ignota, fortasse verba hominis tenens: {path}:{line_number}\n"
         "Forma mutata videtur; claude_prompt renovandum est."
     )
@@ -959,6 +981,7 @@ def claude_prompt(content: Any, path: Path, line_number: int) -> str:
                 # TODO: Says a slash-command wrapper is malformed and the
                 # Claude transcript format should be inspected.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"Involucrum imperii obliqui malformatum: {path}:{line_number}\n"
                     "Forma transcripti Claude inspicienda est."
                 )
@@ -992,6 +1015,7 @@ def claude_reply_blocks(content: Any, path: Path, line_number: int) -> list[str]
         # form (not a list of blocks) — the format seems to have changed and
         # claude_reply_blocks needs updating.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Contentum responsi in forma ignota: {path}:{line_number}\n"
             "Forma mutata videtur; claude_reply_blocks renovandum est."
         )
@@ -1005,6 +1029,7 @@ def claude_reply_blocks(content: Any, path: Path, line_number: int) -> list[str]
                 # text is missing or not a string) — the format seems to have
                 # changed and claude_reply_blocks needs updating.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"Membrum text in forma ignota: {path}:{line_number}\n"
                     "Forma mutata videtur; claude_reply_blocks renovandum est."
                 )
@@ -1021,6 +1046,7 @@ def claude_reply_blocks(content: Any, path: Path, line_number: int) -> list[str]
                 # text) — the format seems to have changed and
                 # claude_reply_blocks needs updating.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"Vocatio {name} in forma ignota: {path}:{line_number}\n"
                     "Forma mutata videtur; claude_reply_blocks renovandum est."
                 )
@@ -1031,6 +1057,7 @@ def claude_reply_blocks(content: Any, path: Path, line_number: int) -> list[str]
                 # shown, and may hold words for the human: the format seems
                 # to have changed, so claude_reply_blocks needs updating.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"Membrum responsi generis ignoti: {path}:{line_number}\n"
                     "Forma mutata videtur; claude_reply_blocks renovandum est."
                 )
@@ -1049,7 +1076,7 @@ def claude_images(content: Any, path: Path, line_number: int) -> tuple[str, ...]
             data = source.get("data")
             if source.get("type") != "base64" or not isinstance(media, str) or not isinstance(data, str):
                 # TODO: Says a pasted image is stored in an unrecognized form.
-                raise UserError(f"Imago in forma ignota: {path}:{line_number}")
+                raise UserError(f"{LATIN_PREFIX}\n" f"Imago in forma ignota: {path}:{line_number}")
             uris.append(f"data:{media};base64,{data}")
     return tuple(uris)
 
@@ -1073,6 +1100,7 @@ def claude_tally(record: Mapping[str, Any], repo: Path, path: Path, line_number:
             # TODO: Says a file-creation result has no content text — the
             # format seems to have changed and claude_tally needs updating.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"Fructus creationis sine textu: {path}:{line_number}\n"
                 "Forma mutata videtur; claude_tally renovandum est."
             )
@@ -1223,6 +1251,7 @@ def claude_exchanges(
                 # words or clicks the human gave, so where it belongs is
                 # undecided: claude_exchanges needs updating.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"Recordum ut machinae signatum verba vel originem hominis fert: {path}:{line_number}\n"
                     "Ubi ponendum sit incertum est; claude_exchanges renovandum est."
                 )
@@ -1235,6 +1264,7 @@ def claude_exchanges(
                 # TODO: Says a queued command has an unrecognized mode and to
                 # add it deliberately in claude_exchanges.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"Modus queued_command ignotus: {mode!r} in {path}:{line_number}\n"
                     "Adde hunc modum consulto in claude_exchanges."
                 )
@@ -1242,7 +1272,7 @@ def claude_exchanges(
         message = record.get("message")
         if attachment is None and not isinstance(message, dict):
             # TODO: Says this record has no message object.
-            raise UserError(f"Recordum message obiectum non habet: {path}:{line_number}")
+            raise UserError(f"{LATIN_PREFIX}\n" f"Recordum message obiectum non habet: {path}:{line_number}")
         session = str(record.get("sessionId") or path.stem)
         # Every record read into a session registers its session's file,
         # whatever its cwd: everything below keeps a session's state within
@@ -1267,6 +1297,7 @@ def claude_exchanges(
             # it cannot be attributed: the format seems to have changed, so
             # claude_exchanges needs updating.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"Recordum sine cwd, cuius pagina incerta est: {path}:{line_number}\n"
                 "Forma transcripti Claude mutata videtur; claude_exchanges renovandum est."
             )
@@ -1285,6 +1316,7 @@ def claude_exchanges(
             # which page should show the record is undecided and
             # claude_exchanges needs updating.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 "Recordum primum extra inceptum, deinde intra traditum est, quacumque origine, quidquid fert:\n"
                 f"  {path}:{first_line}\n  {path}:{line_number}\n"
                 "Ad quam paginam recordum pertineat nondum decretum est; claude_exchanges renovandum est."
@@ -1298,6 +1330,7 @@ def claude_exchanges(
             # sourcery does not decide which origin to believe, so the case
             # is to be examined and claude_exchanges updated.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"Recordum iterum traditum aliam originem fert quam primum: {first_kind!r}, deinde {kind!r}:\n"
                 f"  {path}:{first_line}\n  {path}:{line_number}\n"
                 "Utri originae credendum sit sourcery non decernit: casus inspiciendus, "
@@ -1305,7 +1338,7 @@ def claude_exchanges(
             )
         if "timestamp" not in record:
             # TODO: Says this record has no timestamp.
-            raise UserError(f"Tempus deest in recordo: {path}:{line_number}")
+            raise UserError(f"{LATIN_PREFIX}\n" f"Tempus deest in recordo: {path}:{line_number}")
         timestamp = parse_time(record["timestamp"])
         prior = previous.get(session, timestamp)
         gap = (timestamp - prior).total_seconds()
@@ -1333,6 +1366,7 @@ def claude_exchanges(
                     # TODO: Says a local-command-stdout wrapper is malformed
                     # and the Claude transcript format should be inspected.
                     raise UserError(
+                        f"{LATIN_PREFIX}\n"
                         f"Involucrum local-command-stdout malformatum: {path}:{line_number}\n"
                         "Forma transcripti Claude inspicienda est."
                     )
@@ -1343,6 +1377,7 @@ def claude_exchanges(
                     # the slash command it answers and the Claude transcript
                     # format should be inspected.
                     raise UserError(
+                        f"{LATIN_PREFIX}\n"
                         f"Effluxus imperii localis sine imperio compari: {path}:{line_number}\n"
                         "Forma transcripti Claude inspicienda est."
                     )
@@ -1380,6 +1415,7 @@ def claude_exchanges(
                 # tool might ask the human for words: claude_exchanges needs
                 # updating.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"Fructus instrumenti ignoti, fortasse verba hominis tenens: {path}:{line_number}\n"
                     "Instrumentum novum aut vocatio absens; claude_exchanges renovandum est."
                 )
@@ -1401,6 +1437,7 @@ def claude_exchanges(
                 # source_uuid — the format seems to have changed and
                 # claude_exchanges needs updating.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"Rogatio iterum tradita aliud fert quam prima: {path}:{line_number}\n"
                     "Forma mutata videtur; claude_exchanges renovandum est."
                 )
@@ -1447,6 +1484,7 @@ def claude_exchanges(
         # the human's words: the format seems to have changed, so
         # claude_exchanges needs updating.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Recordum Claude generis ignoti, fortasse verba hominis tenens: {path}:{unseen[0]}\n"
             "Forma transcripti Claude mutata videtur; claude_exchanges renovandum est."
         )
@@ -1460,6 +1498,7 @@ def claude_exchanges(
         # there: the human typed words sourcery does not read, so the format
         # seems to have changed and claude_exchanges needs updating.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Imago rogationis nullam rogationem lectam reddit: {path}:{unechoed[0]}\n"
             "Homo verba scripsit quae sourcery non legit; forma transcripti Claude mutata videtur, "
             "claude_exchanges renovandum est."
@@ -1542,6 +1581,7 @@ def codex_quiz(arguments: Any, path: Path, line_number: int) -> Quiz:
                 # TODO: Says a question Codex asked the human is in an
                 # unrecognized form and to update codex_quiz.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"Interrogatio Codex in forma ignota: {path}:{line_number}\n"
                     "Forma mutata videtur; codex_quiz renovandum est."
                 )
@@ -1558,6 +1598,7 @@ def codex_answers(
     # answers a question this transcript never asked, and to update
     # codex_answers.
     malformed = UserError(
+        f"{LATIN_PREFIX}\n"
         f"Responsum interrogationis Codex in forma ignota: {path}:{line_number}\n"
         "Forma mutata videtur; codex_answers renovandum est."
     )
@@ -1603,6 +1644,7 @@ def codex_prompt(
         # heading — the Codex transcript format seems to have changed, so
         # inspect the file.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Involucrum IDE sine rogatione inventum est: {path}\n"
             "Forma transcripti Codex mutata videtur; fasciculum inspice."
         )
@@ -1623,6 +1665,7 @@ def codex_include_session(payload: Mapping[str, Any], path: Path) -> bool:
             # TODO: Says this Codex session has an unrecognized source marker
             # and to add it deliberately in codex_include_session.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"Fons sessionis Codex ignotus: {source!r} in {path}\n"
                 "Adde hunc fontem consulto in codex_include_session."
             )
@@ -1634,7 +1677,7 @@ def codex_images(payload: Mapping[str, Any], path: Path, line_number: int) -> tu
     for image in images:
         if not (isinstance(image, str) and image.startswith("data:")):
             # TODO: Says a pasted image is stored in an unrecognized form.
-            raise UserError(f"Imago in forma ignota: {path}:{line_number}")
+            raise UserError(f"{LATIN_PREFIX}\n" f"Imago in forma ignota: {path}:{line_number}")
     return tuple(images)
 
 
@@ -1659,6 +1702,7 @@ def codex_tally(change: Any, path: Path, line_number: int) -> tuple[int, int]:
             # TODO: Says a patch change is in an unrecognized form and to add
             # it deliberately in codex_tally.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"Mutatio fasciculi in forma ignota: {path}:{line_number}\n"
                 "Adde hanc formam consulto in codex_tally."
             )
@@ -1834,6 +1878,7 @@ def codex_exchanges(
             # human's words: the transcript format seems to have changed, so
             # codex_exchanges needs updating.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"Recordum Codex generis vel formae ignotae, fortasse verba hominis tenens: {path}:{line_number}\n"
                 "Forma transcripti Codex mutata videtur; codex_exchanges renovandum est."
             )
@@ -1848,6 +1893,7 @@ def codex_exchanges(
                     # the format seems to have changed, so codex_exchanges
                     # needs updating.
                     raise UserError(
+                        f"{LATIN_PREFIX}\n"
                         f"Sessio Codex sine cwd, cuius pagina incerta est: {path}:{line_number}\n"
                         "Forma transcripti Codex mutata videtur; codex_exchanges renovandum est."
                     )
@@ -1884,10 +1930,10 @@ def codex_exchanges(
                 text = payload.get("message")
                 if not isinstance(text, str):
                     # TODO: Says this message record has no text.
-                    raise UserError(f"Nuntius sine textu: {path}:{line_number}")
+                    raise UserError(f"{LATIN_PREFIX}\n" f"Nuntius sine textu: {path}:{line_number}")
                 if "timestamp" not in record:
                     # TODO: Says this record has no timestamp.
-                    raise UserError(f"Tempus deest in recordo: {path}:{line_number}")
+                    raise UserError(f"{LATIN_PREFIX}\n" f"Tempus deest in recordo: {path}:{line_number}")
                 timestamp = parse_time(record["timestamp"])
                 if kind == "user_message":
                     holdings.add(("Codex", timestamp))
@@ -1919,6 +1965,7 @@ def codex_exchanges(
             # words in a form sourcery does not read: codex_exchanges needs
             # updating.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"Nuntius quem exemplar ut ab homine accepit nullam rogationem in sessione habet: {path}:{unheard[0]}\n"
                 "Fortasse verba hominis in forma quam sourcery non legit; codex_exchanges renovandum est."
             )
@@ -1963,7 +2010,7 @@ def copilot_image_uri(variable: Mapping[str, Any], path: Path) -> str:
     mime = variable.get("mimeType")
     if not (isinstance(value, dict) and isinstance(mime, str)):
         # TODO: Says a pasted image is stored in an unrecognized form.
-        raise UserError(f"Imago in forma ignota: {path}")
+        raise UserError(f"{LATIN_PREFIX}\n" f"Imago in forma ignota: {path}")
     try:
         match value:
             case {"$base64": encoded}:
@@ -1972,7 +2019,7 @@ def copilot_image_uri(variable: Mapping[str, Any], path: Path) -> str:
                 data = bytes(value[str(i)] for i in range(len(value)))
     except (KeyError, TypeError, ValueError) as exc:
         # TODO: Says a pasted image is stored in an unrecognized form.
-        raise UserError(f"Imago in forma ignota: {path}\n{exc}") from exc
+        raise UserError(f"{LATIN_PREFIX}\n" f"Imago in forma ignota: {path}\n{exc}") from exc
     return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
 
@@ -2009,19 +2056,20 @@ def vscode_reply(response: Any, path: Path) -> tuple[str, str]:
         # TODO: Says a request's response is not a list of items — the
         # storage format seems to have changed and the script needs updating.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Responsum VS Code index membrorum non est: {path}\n"
             "Forma repositi mutata videtur; scriptum renovandum est."
         )
     for item in response:
         if not isinstance(item, dict):
             # TODO: Says a response item is not a JSON object.
-            raise UserError(f"Membrum responsi obiectum non est: {path}")
+            raise UserError(f"{LATIN_PREFIX}\n" f"Membrum responsi obiectum non est: {path}")
         kind = item.get("kind")
         if kind is None:
             value = item.get("value")
             if not isinstance(value, str):
                 # TODO: Says a response item has no text.
-                raise UserError(f"Membrum responsi sine textu: {path}")
+                raise UserError(f"{LATIN_PREFIX}\n" f"Membrum responsi sine textu: {path}")
             parts.append(value)
         elif kind == "inlineReference":
             parts.append(vscode_reference_name(item))
@@ -2032,6 +2080,7 @@ def vscode_reply(response: Any, path: Path) -> tuple[str, str]:
             # TODO: Says a response item has an unrecognized kind and to add
             # it deliberately in VSCODE_MUTE_KINDS or vscode_reply.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"Genus membri responsi ignotum: {kind!r} in {path}\n"
                 "Adde hoc genus consulto in VSCODE_MUTE_KINDS vel vscode_reply."
             )
@@ -2042,7 +2091,7 @@ def vscode_reply(response: Any, path: Path) -> tuple[str, str]:
             pass
         case _:
             # TODO: Says auto-mode model resolution is malformed.
-            raise UserError(f"Resolutio exemplaris auto-mode malformata: {path}")
+            raise UserError(f"{LATIN_PREFIX}\n" f"Resolutio exemplaris auto-mode malformata: {path}")
     return "".join(parts), resolved_model
 
 
@@ -2058,7 +2107,7 @@ def replay_mutations(path: Path) -> Any:
         keys = entry.get("k")
         if state is None or not isinstance(keys, list) or keys == []:
             # TODO: Says a VS Code session mutation is malformed.
-            raise UserError(f"Mutatio VS Code malformata: {path}:{line_number}")
+            raise UserError(f"{LATIN_PREFIX}\n" f"Mutatio VS Code malformata: {path}:{line_number}")
         try:
             target = state
             for key in keys[:-1]:
@@ -2080,10 +2129,13 @@ def replay_mutations(path: Path) -> Any:
                     del target[last]
                 case _:
                     # TODO: Says a mutation has an unrecognized kind.
-                    raise UserError(f"Genus mutationis ignotum: {kind!r} in {path}:{line_number}")
+                    raise UserError(f"{LATIN_PREFIX}\n" f"Genus mutationis ignotum: {kind!r} in {path}:{line_number}")
         except (KeyError, IndexError, TypeError) as exc:
             # TODO: Says a VS Code session mutation cannot be applied.
-            raise UserError(f"Mutatio VS Code non applicari potest: {path}:{line_number}\n{exc}") from exc
+            raise UserError(
+                f"{LATIN_PREFIX}\n"
+                f"Mutatio VS Code non applicari potest: {path}:{line_number}\n{exc}"
+            ) from exc
     return state
 
 
@@ -2091,7 +2143,7 @@ def vscode_state(path: Path) -> dict[str, Any]:
     state = read_json(path) if path.suffix == ".json" else replay_mutations(path)
     if not isinstance(state, dict):
         # TODO: Says this session doesn't reconstruct to a final object.
-        raise UserError(f"Sessio VS Code obiectum finale non habet: {path}")
+        raise UserError(f"{LATIN_PREFIX}\n" f"Sessio VS Code obiectum finale non habet: {path}")
     return state
 
 
@@ -2106,6 +2158,7 @@ def vscode_exchanges(
         # and to open the project as a plain folder or export this dialog
         # by hand.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Workspace multiplex intra et extra inceptum est: {path}\n"
             "Aperi inceptum ut folder simplex, vel exporta hunc dialogum manu."
         )
@@ -2114,26 +2167,27 @@ def vscode_exchanges(
         # TODO: Says this session has an unrecognized schema version — the
         # storage format seems to have changed and the script needs updating.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Versio sessionis VS Code ignota: {state.get('version')!r} in {path}\n"
             "Forma repositi mutata videtur; scriptum renovandum est."
         )
     requests = state.get("requests")
     if not isinstance(requests, list):
         # TODO: Says this session has no requests list.
-        raise UserError(f"Sessio VS Code indicem requests non habet: {path}")
+        raise UserError(f"{LATIN_PREFIX}\n" f"Sessio VS Code indicem requests non habet: {path}")
     session = str(state.get("sessionId") or path.stem)
     exchanges: list[Exchange] = []
     holdings: set[Holding] = set()
     for request in requests:
         if not isinstance(request, dict):
             # TODO: Says a requests entry is not a JSON object.
-            raise UserError(f"Elementum requests obiectum non est: {path}")
+            raise UserError(f"{LATIN_PREFIX}\n" f"Elementum requests obiectum non est: {path}")
         message = request.get("message")
         prompt = message.get("text") if isinstance(message, dict) else None
         # No store shows a request without words; one would mean they moved.
         if not isinstance(prompt, str) or prompt == "":
             # TODO: Says a request has no text in message.text.
-            raise UserError(f"Rogatio VS Code textum in message.text non habet: {path}")
+            raise UserError(f"{LATIN_PREFIX}\n" f"Rogatio VS Code textum in message.text non habet: {path}")
         parts = message.get("parts")
         if not (isinstance(parts, list) and all(copilot_part_held(part, prompt) for part in parts)):
             # TODO: Says a request's message parts are missing, malformed, of
@@ -2141,6 +2195,7 @@ def vscode_exchanges(
             # so the prompt may have moved out of message.text: the storage
             # format seems to have changed and the script needs updating.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"Partes rogationis VS Code textum habent quem message.text non habet: {path}\n"
                 "Forma repositi mutata videtur; scriptum renovandum est."
             )
@@ -2152,12 +2207,13 @@ def vscode_exchanges(
                 # marked so with an unrecognized value; what such a request
                 # shows the human is unknown, so the script needs updating.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"Signum hiddenFromTranscript ignotum: {marker!r} in {path}\n"
                     "Forma repositi mutata videtur; scriptum renovandum est."
                 )
         if "timestamp" not in request:
             # TODO: Says a request has no timestamp.
-            raise UserError(f"Tempus deest in rogatione: {path}")
+            raise UserError(f"{LATIN_PREFIX}\n" f"Tempus deest in rogatione: {path}")
         timestamp = parse_time(request["timestamp"])
         holdings.add(("Copilot Chat", timestamp))
         # VS Code starts a request by itself when a terminal command the
@@ -2176,6 +2232,7 @@ def vscode_exchanges(
                 # an unrecognized value — the storage format seems to have
                 # changed and the script needs updating.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"Signum isSystemInitiated ignotum: {marker!r} in {path}\n"
                     "Forma repositi mutata videtur; scriptum renovandum est."
                 )
@@ -2205,6 +2262,7 @@ def vscode_exchanges(
                 # pasted: the storage format seems to have changed and the
                 # script needs updating.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"Variabiles rogationis VS Code in forma ignota: {path}\n"
                     "Forma repositi mutata videtur; scriptum renovandum est."
                 )
@@ -2314,20 +2372,20 @@ def read_workspace_file(path: Path) -> tuple[Path, ...]:
         raw = path.read_text(encoding="utf-8")
     except OSError as exc:
         # TODO: Says this .code-workspace file cannot be read.
-        raise UserError(f"Fasciculus workspace legi non potest: {path}\n{exc}") from exc
+        raise UserError(f"{LATIN_PREFIX}\n" f"Fasciculus workspace legi non potest: {path}\n{exc}") from exc
     try:
         data = json.loads(strip_jsonc(raw))
     except json.JSONDecodeError as exc:
         # TODO: Says this .code-workspace file is invalid.
-        raise UserError(f"Fasciculus workspace invalidus est: {path}\n{exc}") from exc
+        raise UserError(f"{LATIN_PREFIX}\n" f"Fasciculus workspace invalidus est: {path}\n{exc}") from exc
     if not isinstance(data, dict) or not isinstance(data.get("folders"), list):
         # TODO: Says this .code-workspace file has no folders list.
-        raise UserError(f"Fasciculus workspace indicem folders non habet: {path}")
+        raise UserError(f"{LATIN_PREFIX}\n" f"Fasciculus workspace indicem folders non habet: {path}")
     roots: list[Path] = []
     for entry in data["folders"]:
         if not isinstance(entry, dict):
             # TODO: Says a folders entry is not a JSON object.
-            raise UserError(f"Elementum folders obiectum non est: {path}")
+            raise UserError(f"{LATIN_PREFIX}\n" f"Elementum folders obiectum non est: {path}")
         raw_path = entry.get("path")
         if not isinstance(raw_path, str):
             uri = entry.get("uri")
@@ -2346,7 +2404,7 @@ def workspace_roots(storage: Path) -> tuple[Path, ...]:
     data = read_json(metadata)
     if not isinstance(data, dict):
         # TODO: Says workspace.json is not a JSON object.
-        raise UserError(f"workspace.json obiectum non est: {metadata}")
+        raise UserError(f"{LATIN_PREFIX}\n" f"workspace.json obiectum non est: {metadata}")
     folder = data.get("folder")
     if isinstance(folder, str):
         decoded = decode_file_uri(folder)
@@ -2356,7 +2414,7 @@ def workspace_roots(storage: Path) -> tuple[Path, ...]:
         decoded = decode_file_uri(pointer)
         return read_workspace_file(Path(decoded).expanduser().resolve()) if decoded is not None else ()
     # TODO: Says workspace.json has neither a folder nor a workspace entry.
-    raise UserError(f"workspace.json nec folder nec workspace habet: {metadata}")
+    raise UserError(f"{LATIN_PREFIX}\n" f"workspace.json nec folder nec workspace habet: {metadata}")
 
 
 # ------------------------------------------------------- pairing and weaving
@@ -2562,6 +2620,7 @@ def antigravity_key() -> bytes:
     # the key this tool recognizes), naming where it looked; nothing is
     # exported until they can be read.
     raise UserError(
+        f"{LATIN_PREFIX}\n"
         f"Transcripta Antigravity adsunt, sed applicatio quae ea aperit hic non invenitur "
         f"(aut clavem notam non iam fert): {ANTIGRAVITY_BIN}\nNihil exportatur dum legi possint."
     )
@@ -2577,6 +2636,7 @@ def antigravity_open(path: Path, key: bytes) -> bytes:
         # the system cipher (CommonCrypto, macOS) that opens it, naming the
         # file; nothing is exported until it can be read.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Transcriptum Antigravity adest, sed huic systemati cifra deest "
             f"(CommonCrypto in macOS): {path}\nNihil exportatur dum legi possit."
         ) from exc
@@ -2594,6 +2654,7 @@ def antigravity_open(path: Path, key: bytes) -> bytes:
         # cipher's status code): the file is damaged or sealed with another
         # key, and nothing is exported until every transcript can be read.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Transcriptum Antigravity aperiri non potuit (status {status}): {path}\n"
             "Fasciculus corruptus est aut alia clave signatus; nihil exportatur "
             "dum omnia transcripta legi possint."
@@ -2620,6 +2681,7 @@ def antigravity_exchanges(path: Path, repo: Path, key: bytes) -> tuple[list[Exch
         # understand (what and where) — the store format seems to have
         # changed — and that nothing is exported until it can be read.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Forma transcripti Antigravity ignota ({exc}): {path}\n"
             "Forma repositi mutata videtur; nihil exportatur dum legi possit."
         ) from exc
@@ -3239,6 +3301,7 @@ def codebuff_exchanges(
         # seems to have changed — and that nothing is exported until it can
         # be read.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Forma colloquii Codebuff ignota ({exc}): {chat}\n"
             "Forma repositi mutata videtur; nihil exportatur dum legi possit."
         ) from exc
@@ -3269,7 +3332,7 @@ def require_dir(root: Path) -> bool:
     if not root.is_dir():
         # TODO: Says a configured transcript root exists but is not a
         # directory.
-        raise UserError(f"Radix transcriptuum directorium non est: {root}")
+        raise UserError(f"{LATIN_PREFIX}\n" f"Radix transcriptuum directorium non est: {root}")
     return True
 
 
@@ -3308,6 +3371,7 @@ def unread_file(path: Path, agent: str, forms: str) -> UserError:
     # if not, move it out of the transcript store; then rerun. Nothing
     # written.
     return UserError(
+        f"{LATIN_PREFIX}\n"
         f"Fasciculus in reposito transcriptorum {agent} formam habet quam sourcery non legit "
         f"(legit tantum {forms}):\n{path}\n"
         "Si transcriptum tenet, sourcery renovandum est; sin minus, eum e reposito "
@@ -3355,6 +3419,7 @@ def collect(
             # of the other, to delete the copy instead of merging; then to
             # rerun.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"Sessio {session} in duobus fasciculis est:\n"
                 f"  {first_path}:{first_line} ({first_timestamp})\n  {path}:{line_number} ({timestamp})\n"
                 "Coniunge eos in unum fasciculum, prius eum in quo sessio incipit; "
@@ -3439,6 +3504,7 @@ def login_error(found: str) -> UserError:
     # be read, naming the command asked and what came back instead, and to
     # run "gh auth login", then rerun.
     return UserError(
+        f"{LATIN_PREFIX}\n"
         f"Nomen GitHub a gh servatum legi non potest: {' '.join(GH_USER)}\n{found}\n"
         "Curre 'gh auth login', deinde iterum curre."
     )
@@ -4606,7 +4672,7 @@ def read_ledger(path: Path, repo: Path, remote: str) -> dict[Exchange, str]:
     except (OSError, UnicodeDecodeError) as exc:
         # TODO: Says this ledger could not be read as a UTF-8 file, gives
         # the reason, and that nothing was written.
-        raise UserError(f"Tabula legi non potest: {path}\n{exc}\nNihil scriptum est.") from exc
+        raise UserError(f"{LATIN_PREFIX}\n" f"Tabula legi non potest: {path}\n{exc}\nNihil scriptum est.") from exc
     # Lines end at "\n" alone: JSON escapes it inside strings, but leaves
     # other characters str.splitlines would break at (U+2028, say) as typed.
     header, *rows = text.removesuffix("\n").split("\n")
@@ -4638,6 +4704,7 @@ def read_ledger(path: Path, repo: Path, remote: str) -> dict[Exchange, str]:
         # the first line the one naming this project (named), delete the
         # other, then rerun. Nothing was written.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Tabula legi non potest: {path}:{number}\n{exc}\n"
             "Tabula est linea capitis, deinde una rogatio per lineam. "
             f"Si linea capitis formam tabulae aliam quam {' aut '.join(map(str, ROW_SHAPES))} nominat, "
@@ -4668,6 +4735,7 @@ def read_ledger(path: Path, repo: Path, remote: str) -> dict[Exchange, str]:
         # project (named). If the ledger is in fact another project's,
         # choose another output path. Then rerun.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Tabula ad aliud inceptum pertinet: {head['repo']!r}, non {project!r} ({repo}): {path}\n"
             f"Sedes publica huius directorii (ex remoto 'origin'): {remote!r}\n"
             "Inceptum nominatur ultima parte viae URL sedis suae publicae (remoti 'origin'), "
@@ -4708,6 +4776,7 @@ def read_ledgers(
             # being a GitHub login; rename the file so, or move it away, then
             # rerun. Nothing was written.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"Fasciculus nomen tabulae imitatur, sed tabula non est: {path}\n"
                 "Nomen tabulae est sourcery.LOGIN.jsonl, totum minusculis litteris, LOGIN nomen GitHub. "
                 "Fasciculum renomina vel remove, deinde iterum curre.\nNihil scriptum est."
@@ -4749,6 +4818,7 @@ def page_credits(output: Path) -> set[tuple[str, Holding]]:
         # (it may be a directory, unreadable, or not text), gives the reason,
         # and that nothing was written.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Pagina exsistens legi non potest: {output}\n{exc}\nNihil scriptum est."
         ) from exc
     credits = CREDIT.findall(page)
@@ -4761,6 +4831,7 @@ def page_credits(output: Path) -> set[tuple[str, Holding]]:
         # perhaps not the human running sourcery now; for any other file,
         # choose another output path. Nothing was written.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Pagina exsistens a sourcery 6 scripta non est: {output}\n"
             "Si pagina sourcery 5 est (memoriam snapshot fert), curre prius:\n"
             f"  python3 adopt.py REPODIR {output} {output} LOGIN\n"
@@ -4808,6 +4879,7 @@ def check_ledgers(
         # page holds, every human's, so first make sure every other ledger
         # is whole. Nothing was written.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Pagina exsistens {len(lacking)} rogationes ostendit quas tabulae quibus tribuuntur non tenent:"
             f"{listed(output, lacking)}\n"
             "Fortasse tabula non commissa, deleta, vel renominata est: restitue eam, deinde iterum curre. "
@@ -4827,6 +4899,7 @@ def check_ledgers(
                 # remove it from the ledger it does not belong to, then
                 # rerun. Nothing was written.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"Rogatio {h[0]} {h[1].isoformat()} in duabus tabulis est:\n"
                     f"  {ledger_path(output, first)}\n  {ledger_path(output, other)}\n"
                     "Rogatio unius hominis est: remove eam ex tabula ad quam non pertinet, "
@@ -4846,6 +4919,7 @@ def check_ledgers(
         # ledger by hand, and delete the page. Then rerun. Nothing was
         # written.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Reposita huius machinae {len(claimed)} rogationes tenent quas tabulae aliorum iam tenent:"
             f"{listed(output, claimed)}\n"
             f"Rogatio unius hominis est, nec tibi ({login}) quoque tribuitur. Fortasse gh alium hominem nominat. "
@@ -4891,6 +4965,7 @@ def check_sessions(
         # are to be deleted from the ledger instead; then rerun. Nothing
         # written.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Sessio {first.provider} {first.session} in reposito transcriptorum adhuc est ({path}), "
             f"sed nullam iam rogationem reddit, quamquam tabula {ledger} {count} rogationes ex ea lectas "
             f"tenet, primam {first.timestamp.isoformat()}.\n"
@@ -4925,6 +5000,7 @@ def check_readings(
                 # sourcery 5 wrote, by that file; then the caller's advice
                 # (see each call). Nothing was written.
                 raise UserError(
+                    f"{LATIN_PREFIX}\n"
                     f"Rogationis {row.provider} {row.timestamp.isoformat()} (sessio {row.session}) "
                     f"duae lectiones sunt:\n  {citations[seen]}\n  {citations[row]}\n"
                     f"{advice}\nNihil scriptum est."
@@ -4946,6 +5022,7 @@ def write_output(path: Path, page: str) -> None:
         # TODO: Says the output directory doesn't exist and to deliberately
         # create it, then rerun.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Directorium output non exsistit: {target.parent}\n"
             "Crea directorium consulto, deinde iterum curre."
         )
@@ -4969,6 +5046,7 @@ def no_exchanges_error(repo: Path, roots: Roots) -> UserError:
     # variables for nonstandard locations, and notes that VS Code chats
     # attribute correctly only when the project is opened as a plain folder.
     return UserError(
+        f"{LATIN_PREFIX}\n"
         f"No prompts found: {repo}\n\n"
         f"Radices inspectae:\n{sought}\n\n"
         "Si transcripta alibi sunt, variabiles AI_CHAT_CLAUDE_ROOTS, "
@@ -5082,7 +5160,7 @@ def run(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None)
         print(exc)
         return 0
     except UserError as exc:
-        print(f"Error:\n{exc}", file=sys.stderr)
+        print(exc, file=sys.stderr)
         return 2
 
 

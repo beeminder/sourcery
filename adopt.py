@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Sequence
 
 import sourcery
-from sourcery import Exchange, UserError, holding
+from sourcery import LATIN_PREFIX, Exchange, UserError, holding
 
 # A page sourcery 5 wrote ends with its snapshot: this script element
 # holding {"sourcery": version, "repo": name, "exchanges": [...]}, every
@@ -74,7 +74,7 @@ def adopted_login(text: str) -> str:
         # TODO: Says the login given is no GitHub login (letters, digits,
         # and single hyphens, 1 to 39 characters, no hyphen at either end),
         # quoting it, then the usage text.
-        raise UserError(f"Nomen GitHub invalidum: {text!r}\n\n{USAGE}")
+        raise UserError(f"{LATIN_PREFIX}\n" f"Nomen GitHub invalidum: {text!r}\n\n{USAGE}")
     return text.lower()
 
 
@@ -89,7 +89,7 @@ def snapshot(page: Path, repo: Path) -> list[Exchange]:
         # TODO: Says the page to adopt could not be read as a UTF-8 file (it
         # may be missing, a directory, unreadable, or not text), gives the
         # reason, and that nothing was written.
-        raise UserError(f"Pagina legi non potest: {page}\n{exc}\nNihil scriptum est.") from exc
+        raise UserError(f"{LATIN_PREFIX}\n" f"Pagina legi non potest: {page}\n{exc}\nNihil scriptum est.") from exc
     found = SNAPSHOT.findall(text)
     if len(found) != 1:
         # TODO: Says the page carries not one snapshot but this many, so it
@@ -97,6 +97,7 @@ def snapshot(page: Path, repo: Path) -> list[Exchange]:
         # sourcery 6 wrote needs no adopting (run sourcery.py on it), and
         # any other file is no sourcery page. Nothing was written.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Pagina non unam memoriam (snapshot) fert, sed {len(found)}: {page}\n"
             "Pagina a sourcery 6 scripta adoptione non eget: curre sourcery.py. "
             "Alius fasciculus pagina sourcery non est.\nNihil scriptum est."
@@ -112,7 +113,10 @@ def snapshot(page: Path, repo: Path) -> list[Exchange]:
     except (ValueError, TypeError, UserError) as exc:
         # TODO: Says the page's snapshot is malformed, gives the reason, and
         # that nothing was written.
-        raise UserError(f"Memoria paginae corrupta est: {page}\n{exc}\nNihil scriptum est.") from exc
+        raise UserError(
+            f"{LATIN_PREFIX}\n"
+            f"Memoria paginae corrupta est: {page}\n{exc}\nNihil scriptum est."
+        ) from exc
     if data["repo"] != repo.name:
         # TODO: Says the page's snapshot belongs to another project, naming
         # both, and nothing was written. A snapshot names its project by the
@@ -120,6 +124,7 @@ def snapshot(page: Path, repo: Path) -> list[Exchange]:
         # directory (named) is that same project after all, rename the
         # directory to the snapshot's project name, then rerun.
         raise UserError(
+            f"{LATIN_PREFIX}\n"
             f"Memoria paginae ad aliud inceptum pertinet: {data['repo']!r}, non {repo.name!r}: {page}\n"
             f"Memoria inceptum suum nomine directorii nominat. Si {repo} idem inceptum est, "
             f"directorium renomina {data['repo']!r}, deinde iterum curre.\n"
@@ -132,7 +137,9 @@ def run(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     try:
         if len(args) != 4:
-            raise UserError(USAGE)
+            # TODO: The usage text (see USAGE), shown when adopt.py is not
+            # given exactly four arguments.
+            raise UserError(f"{LATIN_PREFIX}\n{USAGE}")
         repo = sourcery.canonical_repo(Path(args[0]).expanduser())
         remote = sourcery.repo_remote(repo)
         project = sourcery.project_name(repo, remote)
@@ -157,6 +164,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             # page is that other human's, or the login given is wrong.
             # Nothing was written.
             raise UserError(
+                f"{LATIN_PREFIX}\n"
                 f"Pagina rogationem {provider} {when.isoformat()} tenet, quam tabula {owner} iam tenet: "
                 f"{sourcery.ledger_path(output, owner)}\n"
                 f"Rogatio unius hominis est: pagina ut {login} adoptari non potest. "
@@ -202,7 +210,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     except UserError as exc:
-        print(f"Error:\n{exc}", file=sys.stderr)
+        print(exc, file=sys.stderr)
         return 2
 
 
