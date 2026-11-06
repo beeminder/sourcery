@@ -5041,14 +5041,14 @@ def write_output(path: Path, page: str) -> None:
 
 def no_exchanges_error(repo: Path, roots: Roots) -> UserError:
     sought = "\n".join(f"  {path}" for path in roots.all())
-    # TODO: Says no prompts were attributed to this project, lists the
+    # Says no prompts were attributed to this project, lists the
     # transcript roots that were searched, explains the environment
     # variables for nonstandard locations, and notes that VS Code chats
     # attribute correctly only when the project is opened as a plain folder.
     return UserError(
-        f"{LATIN_PREFIX}\n"
         f"No prompts found: {repo}\n\n"
-        f"Radices inspectae:\n{sought}\n\n"
+        f"Checked all of these places:\n{sought}\n\n"
+        "If this seems wrong, here's some stuff to paste to Claude to debug:\n"
         "Si transcripta alibi sunt, variabiles AI_CHAT_CLAUDE_ROOTS, "
         "AI_CHAT_CODEX_ROOTS, AI_CHAT_VSCODE_USER_ROOTS, AI_CHAT_ANTIGRAVITY_ROOTS, "
         "vel AI_CHAT_CODEBUFF_ROOTS constitue.\n"
