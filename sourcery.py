@@ -82,7 +82,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 # agent changing sourcery sets today's date with the letter after HEAD's
 # when HEAD's version is today's, else with -a, and leaves a version the
 # working tree already moved to today alone.
-VERSION = "2026.11.04-b"
+VERSION = "2026.11.10-a"
 UTC = dt.timezone.utc
 
 # The line every error message still in Latin opens with, written out in
@@ -1774,6 +1774,19 @@ CODEX_INJECTIONS = (
     "<environment_context>", "# AGENTS.md instructions", "<recommended_plugins>",
     "<external_codex_apps_open_page>", "<turn_aborted>",
 )
+# The note Codex injects in the user role each time it continues a thread
+# goal on its own (from Codex 0.164, 2026-11-10): the goal's objective,
+# which it calls user-provided, amid standing instructions. In the stores
+# the model set every such goal itself, by a create_goal call in a script
+# for its exec tool, the objective a string literal in the script, so the
+# note is accounted for only when a script of the session's that calls
+# create_goal holds its objective so written (see codex_heard). A goal set
+# any other way may be the human's words.
+CODEX_GOAL_NOTE = re.compile(
+    r'<codex_internal_context source="goal">\n.*?\n<objective>\n(.*?)\n</objective>\n.*</codex_internal_context>',
+    re.DOTALL,
+)
+CODEX_GOAL_CALL = "tools.create_goal("
 
 
 def codex_known(record_type: Any, payload: Mapping[str, Any]) -> bool:
@@ -1794,12 +1807,17 @@ def codex_known(record_type: Any, payload: Mapping[str, Any]) -> bool:
             return record_type in CODEX_RECORDS
 
 
-def codex_heard(said: str, prompted: Sequence[str]) -> bool:
+def codex_heard(said: str, prompted: Sequence[str], goal_scripts: Sequence[str]) -> bool:
     """Whether a user-role message the model received is accounted for: a
-    note Codex injects, or the model's copy of a prompt the session records
-    (the same words, the one holding the other)."""
+    note Codex injects, the model's copy of a prompt the session records
+    (the same words, the one holding the other), or a goal note whose
+    objective one of goal_scripts, the session's scripts calling
+    create_goal, holds as a string literal (see CODEX_GOAL_NOTE)."""
+    goal = CODEX_GOAL_NOTE.fullmatch(said)
     return said.startswith(CODEX_INJECTIONS) or (
         said != "" and any(said == prompt or prompt in said or said in prompt for prompt in prompted if prompt != "")
+    ) or (
+        goal is not None and any(json.dumps(goal[1], ensure_ascii=False) in script for script in goal_scripts)
     )
 
 
@@ -1856,9 +1874,12 @@ def codex_exchanges(
     quizzes: dict[str, Quiz] = {}  # call_id -> questions asked of the human
     # The words of every prompt event, and of every user-role message the
     # model received, by line: each of the latter must be accounted for by
-    # the former, or be a note Codex injects (see codex_heard).
+    # the former, or be a note Codex injects, a goal note's objective one
+    # that a script of the model's calling create_goal holds (see
+    # codex_heard).
     prompted: list[str] = []
     heard: list[tuple[int, str]] = []
+    goal_scripts: list[str] = []
     for line_number, record in read_jsonl(path):
         payload = codex_payload(record)
         record_type = record.get("type")
@@ -1907,6 +1928,12 @@ def codex_exchanges(
                 effort = payload.get("effort") if isinstance(payload.get("effort"), str) else effort
             case "response_item" if payload.get("type") == "function_call" and payload.get("name") == CODEX_ASK_TOOL:
                 quizzes[payload.get("call_id")] = codex_quiz(payload.get("arguments"), path, line_number)
+            case "response_item" if (
+                payload.get("type") == "custom_tool_call"
+                and isinstance(payload.get("input"), str)
+                and CODEX_GOAL_CALL in payload["input"]
+            ):
+                goal_scripts.append(payload["input"])
             case "response_item" if payload.get("type") == "message" and payload.get("role") == "user":
                 heard.append((line_number, "".join(
                     piece.get("text", "") for piece in payload.get("content") or []
@@ -1956,7 +1983,7 @@ def codex_exchanges(
             case _:
                 continue
     if attributed:
-        unheard = [line for line, said in heard if not codex_heard(said, prompted)]
+        unheard = [line for line, said in heard if not codex_heard(said, prompted, goal_scripts)]
         if unheard:
             # TODO: Says the model in this Codex session, read for the
             # project, received a user-role message (at the file and line
