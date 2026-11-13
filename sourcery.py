@@ -82,7 +82,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 # agent changing sourcery sets today's date with the letter after HEAD's
 # when HEAD's version is today's, else with -a, and leaves a version the
 # working tree already moved to today alone.
-VERSION = "2026.11.10-a"
+VERSION = "2026.11.13-a"
 UTC = dt.timezone.utc
 
 # The line every error message still in Latin opens with, written out in
@@ -248,8 +248,6 @@ def parse_args(argv: Sequence[str]) -> Options:
 def canonical_repo(path: Path) -> Path:
     candidate = path.resolve()
     if not candidate.is_dir():
-        # TODO: Says the project directory wasn't found and to give a path
-        # to an existing project directory.
         raise UserError(
             f"Error: No such directory: {candidate}"
         )
@@ -995,10 +993,45 @@ def claude_prompt(content: Any, path: Path, line_number: int) -> str:
                         raise unseen
             if any(item["type"] == "tool_result" for item in content):
                 return ""
-            texts = [item["text"] for item in content if item["type"] == "text"]
-            return "".join(t for t in texts if not CLAUDE_WRAPPER.fullmatch(t))
+            return "".join(claude_typed(content))
         case _:
             raise unseen
+
+
+def claude_typed(content: list[Mapping[str, Any]]) -> list[str]:
+    """The text pieces of a user record's content list, in the forms
+    claude_prompt accepts, that the human typed: all but the harness's
+    wrappers."""
+    return [item["text"] for item in content if item["type"] == "text" and not CLAUDE_WRAPPER.fullmatch(item["text"])]
+
+
+def claude_sends(record: Mapping[str, Any], content: Any, text: str, path: Path, line_number: int) -> list[str]:
+    """The sends a user record's prompt `text` holds, a "send" being one
+    message the human sent (Claude Code's word): the one, unless Claude Code
+    merged into the record sends queued while the agent was mid-turn (seen
+    from 2.1.322 on, in the VS Code extension), listing in mergedSendUuids
+    the ids of the sends beyond the record's own. Each send is then a typed
+    text piece of its own, in order, the pieces joining into `text`. A
+    last-prompt echo can be of any one send (see claude_echo_read)."""
+    match record.get("mergedSendUuids"), content:
+        case None, _:
+            return [text]
+        case [str(), *_] as merged, list() if (
+            all(isinstance(u, str) for u in merged)
+            and len(sends := claude_typed(content)) == 1 + len(merged)
+            and "".join(sends) == text
+        ):
+            return sends
+    # TODO: Says a user record lists the ids of sends merged into it
+    # (mergedSendUuids) in a shape no store had shown: the ids not a nonempty
+    # list of strings, or the record's typed text pieces not one per send,
+    # joining into its prompt. Which words are which send is then unknown,
+    # so claude_sends needs updating.
+    raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Missiones coniunctae in forma ignota: {path}:{line_number}\n"
+        "Quae verba cuius missionis sint ignotum est; claude_sends renovandum est."
+    )
 
 
 def claude_reply_blocks(content: Any, path: Path, line_number: int) -> list[str]:
@@ -1162,8 +1195,8 @@ def claude_exchanges(
     # tool result is known by its tool (see CLAUDE_TOOLS); each session's
     # latest AskUserQuestion call, which a late answer answers (see
     # claude_late_answer); the file's last-prompt echoes, by line; and the
-    # prompts read, as claude_squash gives them, which every echo must be of
-    # (see claude_echo_read).
+    # prompts read, each send of them (see claude_sends) as claude_squash
+    # gives it, which every echo must be of (see claude_echo_read).
     tools: dict[Any, Any] = {}
     asked: dict[str, Mapping[str, Any]] = {}
     echoes: list[tuple[int, Any]] = []
@@ -1419,7 +1452,7 @@ def claude_exchanges(
                     f"Fructus instrumenti ignoti, fortasse verba hominis tenens: {path}:{line_number}\n"
                     "Instrumentum novum aut vocatio absens; claude_exchanges renovandum est."
                 )
-            read.add(claude_squash(text))
+            read.update(claude_squash(send) for send in claude_sends(record, content, text, path, line_number))
             # A late answer's words are the harness's (its last-prompt echo
             # echoes them, so they count as read); the human's act is the
             # answer they carry.

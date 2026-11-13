@@ -2618,6 +2618,50 @@ class ClaudeQuals(Fixture):
         self.assertEqual(len(ace.claude_exchanges(self.path(fine), self.repo)[0]), 2)
         self.refused_at([cu("go", cwd=cwd), echo("a prompt nobody read")], 2, "echo")
 
+    def test_merged_sends_the_stores_show_pass(self):
+        # Replicata: two messages the human sent while the agent was
+        # mid-turn, delivered together in one user record (Claude Code
+        # 2.1.322, the VS Code extension): the record lists the send ids it
+        # merged in beyond its own (mergedSendUuids), and its content holds
+        # an IDE wrapper, then each send as a text piece of its own, in
+        # order, all but the last ending in a newline. Its last-prompt echo
+        # is of the first send alone. Expectata: one prompt, the sends'
+        # words character-exact as the record joins them, and an echo of
+        # either send passes, each being a prompt read. Resultata
+        # (2026.11.10-a): the echo was refused as of no prompt read, since
+        # the only text compared with it was the two sends joined.
+        cwd = str(self.repo)
+        echo = lambda text: {"type": "last-prompt", "lastPrompt": text, "leafUuid": "u1", "sessionId": "cs1"}
+        merged = cu([{"type": "text", "text": "<ide_opened_file>The user opened /x.</ide_opened_file>"},
+                     {"type": "text", "text": "first send\n"},
+                     {"type": "text", "text": "second  send"}], cwd=cwd, mergedSendUuids=["s2"])
+        for name, said in {"first": "first send", "second": "second  send"}.items():
+            with self.subTest(name):
+                got = ace.claude_exchanges(self.path([merged, echo(said)]), self.repo)[0]
+                self.assertEqual([e.prompt for e in got], ["first send\nsecond  send"])
+
+    def test_merged_sends_in_shapes_no_store_shows_refused(self):
+        # Replicata: a user record read for the repo lists merged send ids
+        # (mergedSendUuids) in a shape no store shows: not a nonempty list
+        # of strings, content that is not a list of pieces, or a count of
+        # typed text pieces other than one per send (its own and each id
+        # listed). Expectata: refused, citing the file and line, since which
+        # words are which send, each of which a last-prompt echo can be of,
+        # is unknown. Resultata (2026.11.10-a): read as one prompt, the sends
+        # never told apart.
+        cwd = str(self.repo)
+        pieces = lambda *texts: [{"type": "text", "text": text} for text in texts]
+        for name, (ids, content) in {
+            "fewer pieces than sends": (["s2"], pieces("<ide_opened_file>x</ide_opened_file>", "only one")),
+            "more pieces than sends": (["s2"], pieces("a\n", "b\n", "c")),
+            "no ids": ([], pieces("a")),
+            "ids not a list": ("s2", pieces("a\n", "b")),
+            "id not a string": ([7], pieces("a\n", "b")),
+            "content a string": (["s2"], "a\nb"),
+        }.items():
+            with self.subTest(name):
+                self.refused_at([cu(content, cwd=cwd, mergedSendUuids=ids)], 1, name)
+
     def test_records_without_a_cwd_refused(self):
         # Replicata: a user, assistant, or queued-prompt record with no cwd,
         # which sourcery attributes every record by. Expectata: refused,
@@ -6272,10 +6316,6 @@ class CliQuals(Fixture):
         self.assertIsNotNone(match, version)
         dt.date(*map(int, match.groups()))  # a date no calendar has raises
 
-    # The line an error in Latin opens with, dreeves's words verbatim
-    # (2026-11-04): whoever runs sourcery need not read the Latin.
-    PASTE_LINE = "Error! Don't worry your pretty head about what the error is, just paste this to Claude:"
-
     def test_latin_errors_open_with_the_paste_to_claude_line(self):
         # Replicata: sourcery given --open twice, and adopt.py given no
         # arguments, so each refuses in Latin. Expectata: stderr is the
@@ -6284,8 +6324,11 @@ class CliQuals(Fixture):
         # "Error:", added by UserError to every message; (2026.11.04-b)
         # "Error:" printed above the line, added by the printer to every
         # message, as it had been since sourcery's first commit.
-        self.assertEqual(self.run_cli(["--open", "--open"]), (2, "", f"{self.PASTE_LINE}\nArgumentum --open iteratum est.\n"))
-        self.assertEqual(self.adopt_cli([]), (2, "", f"{self.PASTE_LINE}\n{adopt.USAGE}\n"))
+        # The line's wording is dreeves's to edit (2026-11-13: "this doesn't
+        # sound like the kind of thing there should be a qual for"), so it is
+        # read from LATIN_PREFIX, not pinned here.
+        self.assertEqual(self.run_cli(["--open", "--open"]), (2, "", f"{ace.LATIN_PREFIX}\nArgumentum --open iteratum est.\n"))
+        self.assertEqual(self.adopt_cli([]), (2, "", f"{ace.LATIN_PREFIX}\n{adopt.USAGE}\n"))
 
     def test_translated_errors_have_no_paste_to_claude_line(self):
         # Replicata: the errors dreeves has translated into English: sourcery
