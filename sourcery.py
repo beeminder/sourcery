@@ -82,7 +82,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 # agent changing sourcery sets today's date with the letter after HEAD's
 # when HEAD's version is today's, else with -a, and leaves a version the
 # working tree already moved to today alone.
-VERSION = "2026.11.13-a"
+VERSION = "2026.11.13-b"
 UTC = dt.timezone.utc
 
 # The line every error message still in Latin opens with, written out in
@@ -93,50 +93,50 @@ LATIN_PREFIX = "Error! But don't worry your pretty head about what the error is,
 
 
 class UserError(RuntimeError):
-    """An actionable failure caused by input, local data, or configuration."""
+  """An actionable failure caused by input, local data, or configuration."""
 
 
 class ExitMessage(RuntimeError):
-    """A successful informational exit such as --help or --version."""
+  """A successful informational exit such as --help or --version."""
 
 
 @dataclasses.dataclass(frozen=True)
 class Ballot:
-    """One answered multiple-choice question: the agent's question and
-    option labels (machine prose) and which label(s) the human picked —
-    empty when the human typed their own answer instead."""
+  """One answered multiple-choice question: the agent's question and
+  option labels (machine prose) and which label(s) the human picked —
+  empty when the human typed their own answer instead."""
 
-    question: str
-    options: tuple[str, ...]
-    picked: tuple[str, ...]
+  question: str
+  options: tuple[str, ...]
+  picked: tuple[str, ...]
 
 
 @dataclasses.dataclass(frozen=True)
 class Exchange:
-    timestamp: dt.datetime
-    provider: str
-    model: str
-    session: str
-    prompt: str
-    reply: str
-    source: Path
-    effort: str = ""
-    images: tuple[str, ...] = ()  # data: URIs of images pasted with the prompt
-    elapsed: float = 0.0  # seconds the agent worked on the reply; 0 = unknown
-    # Wall-clock seconds from the prompt to the last reply record; 0 = unknown.
-    # Exceeds elapsed by whatever the working-time accounting cannot see: tool
-    # runtime the store never recorded, and waits on the human mid-turn.
-    wall: float = 0.0
-    ballots: tuple[Ballot, ...] = ()  # multiple-choice questions the human answered
-    # The prompt's diffstat: repo lines the agent added and deleted before the
-    # next prompt, as recorded by the store (edits made through a shell tool
-    # leave no record, so these are floors; Copilot records none at all).
-    added: int = 0
-    deleted: int = 0
-    # The session's title, the last one its store records ("" when none):
-    # Claude Code's custom-title, given by /rename or the desktop app. Not
-    # always typed: /rename given no name makes one up.
-    title: str = ""
+  timestamp: dt.datetime
+  provider: str
+  model: str
+  session: str
+  prompt: str
+  reply: str
+  source: Path
+  effort: str = ""
+  images: tuple[str, ...] = ()  # data: URIs of images pasted with the prompt
+  elapsed: float = 0.0  # seconds the agent worked on the reply; 0 = unknown
+  # Wall-clock seconds from the prompt to the last reply record; 0 = unknown.
+  # Exceeds elapsed by whatever the working-time accounting cannot see: tool
+  # runtime the store never recorded, and waits on the human mid-turn.
+  wall: float = 0.0
+  ballots: tuple[Ballot, ...] = ()  # multiple-choice questions the human answered
+  # The prompt's diffstat: repo lines the agent added and deleted before the
+  # next prompt, as recorded by the store (edits made through a shell tool
+  # leave no record, so these are floors; Copilot records none at all).
+  added: int = 0
+  deleted: int = 0
+  # The session's title, the last one its store records ("" when none):
+  # Claude Code's custom-title, given by /rename or the desktop app. Not
+  # always typed: /rename given no name makes one up.
+  title: str = ""
 
 
 # A "holding" names a prompt record the store still holds: its provider and
@@ -151,52 +151,52 @@ Holding = tuple[str, dt.datetime]
 
 
 def holding(exchange: Exchange) -> Holding:
-    return (exchange.provider, exchange.timestamp)
+  return (exchange.provider, exchange.timestamp)
 
 
 @dataclasses.dataclass(frozen=True)
 class Message:
-    """One utterance inside a session, before pairing into exchanges."""
+  """One utterance inside a session, before pairing into exchanges."""
 
-    role: str
-    timestamp: dt.datetime
-    text: str
-    model: str = ""
-    effort: str = ""
-    images: tuple[str, ...] = ()
-    active: float = 0.0  # seconds the agent worked to produce this message
-    ballots: tuple[Ballot, ...] = ()
-    # Repo lines changed by tool calls: on a reply, the lines behind it; on a
-    # prompt, lines orphaned mid-turn by its arrival, which belong to the
-    # exchange this prompt closes.
-    added: int = 0
-    deleted: int = 0
+  role: str
+  timestamp: dt.datetime
+  text: str
+  model: str = ""
+  effort: str = ""
+  images: tuple[str, ...] = ()
+  active: float = 0.0  # seconds the agent worked to produce this message
+  ballots: tuple[Ballot, ...] = ()
+  # Repo lines changed by tool calls: on a reply, the lines behind it; on a
+  # prompt, lines orphaned mid-turn by its arrival, which belong to the
+  # exchange this prompt closes.
+  added: int = 0
+  deleted: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
 class Roots:
-    claude: tuple[Path, ...]
-    codex: tuple[Path, ...]
-    vscode: tuple[Path, ...]
-    antigravity: tuple[Path, ...]
-    codebuff: tuple[Path, ...]
+  claude: tuple[Path, ...]
+  codex: tuple[Path, ...]
+  vscode: tuple[Path, ...]
+  antigravity: tuple[Path, ...]
+  codebuff: tuple[Path, ...]
 
-    def all(self) -> tuple[Path, ...]:
-        return self.claude + self.codex + self.vscode + self.antigravity + self.codebuff
+  def all(self) -> tuple[Path, ...]:
+    return self.claude + self.codex + self.vscode + self.antigravity + self.codebuff
 
 
 @dataclasses.dataclass(frozen=True)
 class Options:
-    repo: Path
-    output: Path
-    open_after: bool
+  repo: Path
+  output: Path
+  open_after: bool
 
 
 # ------------------------------------------------------------------- plumbing
 
 
 def help_text() -> str:
-    return f"""Usage:
+  return f"""Usage:
   python3 sourcery.py REPODIR OUTPUT.html [--open]
 
 Arguments:
@@ -217,329 +217,329 @@ Environment variables (separated by {os.pathsep!r}) for nonstandard transcript l
 
 
 def parse_args(argv: Sequence[str]) -> Options:
-    positionals: list[str] = []
-    flags: set[str] = set()
-    for token in argv:
-        match token:
-            case "-h" | "--help":
-                raise ExitMessage(help_text())
-            case "--version":
-                raise ExitMessage(VERSION)
-            case "--open":
-                if token in flags:
-                    # TODO: Says the --open flag was given more than once.
-                    raise UserError(f"{LATIN_PREFIX}\n" "Argumentum --open iteratum est.")
-                flags.add(token)
-            case _ if token.startswith("-"):
-                # TODO: Says this option is not recognized.
-                raise UserError(f"{LATIN_PREFIX}\n" f"Argumentum ignotum: {token}\n\n{help_text()}")
-            case _:
-                positionals.append(token)
-    if len(positionals) != 2:
-        raise UserError(f"{help_text()}")
-    repo, output = positionals
-    return Options(
-        repo=Path(repo).expanduser(),
-        output=Path(output).expanduser(),
-        open_after="--open" in flags,
-    )
+  positionals: list[str] = []
+  flags: set[str] = set()
+  for token in argv:
+    match token:
+      case "-h" | "--help":
+        raise ExitMessage(help_text())
+      case "--version":
+        raise ExitMessage(VERSION)
+      case "--open":
+        if token in flags:
+          # TODO: Says the --open flag was given more than once.
+          raise UserError(f"{LATIN_PREFIX}\n" "Argumentum --open iteratum est.")
+        flags.add(token)
+      case _ if token.startswith("-"):
+        # TODO: Says this option is not recognized.
+        raise UserError(f"{LATIN_PREFIX}\n" f"Argumentum ignotum: {token}\n\n{help_text()}")
+      case _:
+        positionals.append(token)
+  if len(positionals) != 2:
+    raise UserError(f"{help_text()}")
+  repo, output = positionals
+  return Options(
+    repo=Path(repo).expanduser(),
+    output=Path(output).expanduser(),
+    open_after="--open" in flags,
+  )
 
 
 def canonical_repo(path: Path) -> Path:
-    candidate = path.resolve()
-    if not candidate.is_dir():
-        raise UserError(
-            f"Error: No such directory: {candidate}"
-        )
-    return candidate
+  candidate = path.resolve()
+  if not candidate.is_dir():
+    raise UserError(
+      f"Error: No such directory: {candidate}"
+    )
+  return candidate
 
 
 def https_remote(url: str) -> str:
-    """Normalize a git remote URL (https, ssh, or scp-style) to https, or "".
+  """Normalize a git remote URL (https, ssh, or scp-style) to https, or "".
 
-    The home is host plus path. Whatever precedes the host — a username, or
-    a hosting service's token — is how this machine authenticates, not where
-    the project lives, and must never reach a published page.
-    """
-    web = re.fullmatch(r"https?://(?:[^/@]*@)?(.+?)(?:\.git)?/?", url)
-    if web:
-        return f"https://{web.group(1)}"
-    scp = re.fullmatch(r"(?:ssh://)?git@([^:/]+)[:/](.+?)(?:\.git)?/?", url)
-    return f"https://{scp.group(1)}/{scp.group(2)}" if scp else ""
+  The home is host plus path. Whatever precedes the host — a username, or
+  a hosting service's token — is how this machine authenticates, not where
+  the project lives, and must never reach a published page.
+  """
+  web = re.fullmatch(r"https?://(?:[^/@]*@)?(.+?)(?:\.git)?/?", url)
+  if web:
+    return f"https://{web.group(1)}"
+  scp = re.fullmatch(r"(?:ssh://)?git@([^:/]+)[:/](.+?)(?:\.git)?/?", url)
+  return f"https://{scp.group(1)}/{scp.group(2)}" if scp else ""
 
 
 REMOTE_SECTION = re.compile(r'\[remote "(.+)"\]')
 
 
 def repo_remote(repo: Path) -> str:
-    """Return the repo's origin remote as an https URL, or "" when absent.
+  """Return the repo's origin remote as an https URL, or "" when absent.
 
-    A project with no remote lives only here, and so does one whose remote
-    names no browsable page (a git:// mirror, an ssh host serving no web
-    page); for both, "" is the honest answer and the page falls back to the
-    local directory. A project whose public home sits under some other
-    remote name is the one case that must not pass quietly: the home is
-    plainly there, and only the name hides it.
-    """
-    config = repo / ".git" / "config"
-    if not config.is_file():
-        return ""
-    remotes: dict[str, str] = {}
-    name = ""
-    for line in config.read_text(encoding="utf-8", errors="replace").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("["):
-            found = REMOTE_SECTION.fullmatch(stripped)
-            name = found.group(1) if found else ""
-        elif name:
-            key, _, value = stripped.partition("=")
-            if key.strip() == "url":
-                # The first URL wins, as it does for the version-control tool
-                # itself when a remote carries several.
-                remotes.setdefault(name, value.strip())
-    home = https_remote(remotes.pop("origin", ""))
-    hidden = {other: link for other, url in remotes.items() if (link := https_remote(url))}
-    if not home and hidden:
-        homes = ", ".join(f"{other} ({link})" for other, link in sorted(hidden.items()))
-        # TODO: Says that no remote named origin points at a public home,
-        # lists the remotes that do, and asks the user to make origin point
-        # at the same home — by renaming that remote, or by setting origin's
-        # own URL — then rerun. Sourcery will not guess which home to show.
-        # (It says nothing about whether an origin exists: one may, pointing
-        # somewhere that has no web page of its own.)
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Nullum remotum nomine 'origin' sedem publicam monstrat: {repo}\n"
-            f"Sedem publicam habent: {homes}\n"
-            "Fac ut 'origin' eandem sedem monstret (aut nomen illius remoti muta, "
-            "aut URL ipsius 'origin' constitue), deinde iterum curre."
-        )
-    return home
+  A project with no remote lives only here, and so does one whose remote
+  names no browsable page (a git:// mirror, an ssh host serving no web
+  page); for both, "" is the honest answer and the page falls back to the
+  local directory. A project whose public home sits under some other
+  remote name is the one case that must not pass quietly: the home is
+  plainly there, and only the name hides it.
+  """
+  config = repo / ".git" / "config"
+  if not config.is_file():
+    return ""
+  remotes: dict[str, str] = {}
+  name = ""
+  for line in config.read_text(encoding="utf-8", errors="replace").splitlines():
+    stripped = line.strip()
+    if stripped.startswith("["):
+      found = REMOTE_SECTION.fullmatch(stripped)
+      name = found.group(1) if found else ""
+    elif name:
+      key, _, value = stripped.partition("=")
+      if key.strip() == "url":
+        # The first URL wins, as it does for the version-control tool
+        # itself when a remote carries several.
+        remotes.setdefault(name, value.strip())
+  home = https_remote(remotes.pop("origin", ""))
+  hidden = {other: link for other, url in remotes.items() if (link := https_remote(url))}
+  if not home and hidden:
+    homes = ", ".join(f"{other} ({link})" for other, link in sorted(hidden.items()))
+    # TODO: Says that no remote named origin points at a public home,
+    # lists the remotes that do, and asks the user to make origin point
+    # at the same home — by renaming that remote, or by setting origin's
+    # own URL — then rerun. Sourcery will not guess which home to show.
+    # (It says nothing about whether an origin exists: one may, pointing
+    # somewhere that has no web page of its own.)
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Nullum remotum nomine 'origin' sedem publicam monstrat: {repo}\n"
+      f"Sedem publicam habent: {homes}\n"
+      "Fac ut 'origin' eandem sedem monstret (aut nomen illius remoti muta, "
+      "aut URL ipsius 'origin' constitue), deinde iterum curre."
+    )
+  return home
 
 
 def project_name(repo: Path, remote: str) -> str:
-    """The repo's project name: the last segment of the path of its public
-    home (remote, as repo_remote found it), spelled as the URL spells it,
-    or, when it has no public home, its checkout directory's name. A
-    default clone names the directory after the repository, so the two
-    agree until a directory is renamed; then, while there is a public home,
-    the directory's name never matters. A home whose path names no
-    repository (no path at all, or one ending in "/", as an origin URL
-    ending in "//" or "/.git" leaves it) is refused, as configuration
-    faults are."""
-    if remote == "":
-        return repo.name
-    name = urllib.parse.urlsplit(remote).path.rsplit("/", 1)[-1]
-    if name == "":
-        # TODO: Says the public home sourcery read from the origin remote
-        # (named, as sourcery read it) names no repository, naming this
-        # checkout, and to set origin's URL to the repository's home, then
-        # rerun.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Sedes publica ex remoto 'origin' lecta nullum repositorium nominat: {remote!r} ({repo})\n"
-            "URL ipsius 'origin' ad sedem repositorii constitue, deinde iterum curre."
-        )
-    return name
+  """The repo's project name: the last segment of the path of its public
+  home (remote, as repo_remote found it), spelled as the URL spells it,
+  or, when it has no public home, its checkout directory's name. A
+  default clone names the directory after the repository, so the two
+  agree until a directory is renamed; then, while there is a public home,
+  the directory's name never matters. A home whose path names no
+  repository (no path at all, or one ending in "/", as an origin URL
+  ending in "//" or "/.git" leaves it) is refused, as configuration
+  faults are."""
+  if remote == "":
+    return repo.name
+  name = urllib.parse.urlsplit(remote).path.rsplit("/", 1)[-1]
+  if name == "":
+    # TODO: Says the public home sourcery read from the origin remote
+    # (named, as sourcery read it) names no repository, naming this
+    # checkout, and to set origin's URL to the repository's home, then
+    # rerun.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Sedes publica ex remoto 'origin' lecta nullum repositorium nominat: {remote!r} ({repo})\n"
+      "URL ipsius 'origin' ad sedem repositorii constitue, deinde iterum curre."
+    )
+  return name
 
 
 def env_paths(env: Mapping[str, str], key: str, defaults: Iterable[Path]) -> tuple[Path, ...]:
-    raw = env.get(key)
-    if raw is None:
-        return tuple(defaults)
-    paths = tuple(Path(piece).expanduser() for piece in raw.split(os.pathsep) if piece)
-    if not paths:
-        # TODO: Says this environment variable is set but empty, and to
-        # either unset it or put at least one path in it.
-        raise UserError(f"{LATIN_PREFIX}\n" f"Variabilis {key} vacua est. Aufer eam vel saltem unam viam da.")
-    return paths
+  raw = env.get(key)
+  if raw is None:
+    return tuple(defaults)
+  paths = tuple(Path(piece).expanduser() for piece in raw.split(os.pathsep) if piece)
+  if not paths:
+    # TODO: Says this environment variable is set but empty, and to
+    # either unset it or put at least one path in it.
+    raise UserError(f"{LATIN_PREFIX}\n" f"Variabilis {key} vacua est. Aufer eam vel saltem unam viam da.")
+  return paths
 
 
 def default_vscode_roots(home: Path) -> tuple[Path, ...]:
-    match sys.platform:
-        case "darwin":
-            base = home / "Library" / "Application Support"
-        case "win32":
-            base = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
-        case _:
-            base = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
-    local = tuple(base / product / "User" for product in ("Code", "Code - Insiders", "VSCodium"))
-    remote = (
-        home / ".vscode-server" / "data" / "User",
-        home / ".vscode-server-insiders" / "data" / "User",
-    )
-    return local + remote
+  match sys.platform:
+    case "darwin":
+      base = home / "Library" / "Application Support"
+    case "win32":
+      base = Path(os.environ.get("APPDATA", home / "AppData" / "Roaming"))
+    case _:
+      base = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+  local = tuple(base / product / "User" for product in ("Code", "Code - Insiders", "VSCodium"))
+  remote = (
+    home / ".vscode-server" / "data" / "User",
+    home / ".vscode-server-insiders" / "data" / "User",
+  )
+  return local + remote
 
 
 def discover_roots(env: Mapping[str, str]) -> Roots:
-    home = Path.home()
-    claude_default = (
-        Path(env["CLAUDE_CONFIG_DIR"]).expanduser() / "projects"
-        if "CLAUDE_CONFIG_DIR" in env
-        else home / ".claude" / "projects"
-    )
-    codex_default = (
-        Path(env["CODEX_HOME"]).expanduser() if "CODEX_HOME" in env else home / ".codex"
-    )
-    return Roots(
-        claude=env_paths(env, "AI_CHAT_CLAUDE_ROOTS", (claude_default,)),
-        codex=env_paths(env, "AI_CHAT_CODEX_ROOTS", (codex_default,)),
-        vscode=env_paths(env, "AI_CHAT_VSCODE_USER_ROOTS", default_vscode_roots(home)),
-        antigravity=env_paths(env, "AI_CHAT_ANTIGRAVITY_ROOTS", (home / ".gemini" / "antigravity",)),
-        codebuff=env_paths(env, "AI_CHAT_CODEBUFF_ROOTS", (home / ".config" / "manicode",)),
-    )
+  home = Path.home()
+  claude_default = (
+    Path(env["CLAUDE_CONFIG_DIR"]).expanduser() / "projects"
+    if "CLAUDE_CONFIG_DIR" in env
+    else home / ".claude" / "projects"
+  )
+  codex_default = (
+    Path(env["CODEX_HOME"]).expanduser() if "CODEX_HOME" in env else home / ".codex"
+  )
+  return Roots(
+    claude=env_paths(env, "AI_CHAT_CLAUDE_ROOTS", (claude_default,)),
+    codex=env_paths(env, "AI_CHAT_CODEX_ROOTS", (codex_default,)),
+    vscode=env_paths(env, "AI_CHAT_VSCODE_USER_ROOTS", default_vscode_roots(home)),
+    antigravity=env_paths(env, "AI_CHAT_ANTIGRAVITY_ROOTS", (home / ".gemini" / "antigravity",)),
+    codebuff=env_paths(env, "AI_CHAT_CODEBUFF_ROOTS", (home / ".config" / "manicode",)),
+  )
 
 
 def parse_time(value: Any) -> dt.datetime:
-    match value:
-        case bool():
-            # TODO: Says a timestamp is in an unrecognized form.
-            raise UserError(f"{LATIN_PREFIX}\n" f"Forma temporis ignota: {value!r}")
-        case int() | float():
-            seconds = float(value)
-            # Epoch milliseconds and epoch seconds are both in the wild;
-            # 1e10 seconds is beyond year 2200, so larger numbers are ms.
-            seconds = seconds / 1000.0 if abs(seconds) > 10_000_000_000 else seconds
-            try:
-                return dt.datetime.fromtimestamp(seconds, tz=UTC)
-            except (OverflowError, OSError, ValueError) as exc:
-                # TODO: Says a numeric timestamp is invalid.
-                raise UserError(f"{LATIN_PREFIX}\n" f"Tempus numericum invalidum: {value!r}") from exc
-        case str():
-            raw = value.strip()
-            normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
-            try:
-                parsed = dt.datetime.fromisoformat(normalized)
-            except ValueError as exc:
-                # TODO: Says a timestamp is not valid ISO-8601.
-                raise UserError(f"{LATIN_PREFIX}\n" f"Tempus ISO-8601 invalidum: {value!r}") from exc
-            parsed = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
-            return parsed.astimezone(UTC)
-        case _:
-            # TODO: Says a timestamp is in an unrecognized form.
-            raise UserError(f"{LATIN_PREFIX}\n" f"Forma temporis ignota: {type(value).__name__}")
+  match value:
+    case bool():
+      # TODO: Says a timestamp is in an unrecognized form.
+      raise UserError(f"{LATIN_PREFIX}\n" f"Forma temporis ignota: {value!r}")
+    case int() | float():
+      seconds = float(value)
+      # Epoch milliseconds and epoch seconds are both in the wild;
+      # 1e10 seconds is beyond year 2200, so larger numbers are ms.
+      seconds = seconds / 1000.0 if abs(seconds) > 10_000_000_000 else seconds
+      try:
+        return dt.datetime.fromtimestamp(seconds, tz=UTC)
+      except (OverflowError, OSError, ValueError) as exc:
+        # TODO: Says a numeric timestamp is invalid.
+        raise UserError(f"{LATIN_PREFIX}\n" f"Tempus numericum invalidum: {value!r}") from exc
+    case str():
+      raw = value.strip()
+      normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+      try:
+        parsed = dt.datetime.fromisoformat(normalized)
+      except ValueError as exc:
+        # TODO: Says a timestamp is not valid ISO-8601.
+        raise UserError(f"{LATIN_PREFIX}\n" f"Tempus ISO-8601 invalidum: {value!r}") from exc
+      parsed = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+      return parsed.astimezone(UTC)
+    case _:
+      # TODO: Says a timestamp is in an unrecognized form.
+      raise UserError(f"{LATIN_PREFIX}\n" f"Forma temporis ignota: {type(value).__name__}")
 
 
 def read_json(path: Path) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except PermissionError as exc:
-        # TODO: Says read permission is missing for this file and to grant
-        # the terminal read access, then rerun.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Licentia legendi deest: {path}\n"
-            "Da terminali licentiam legendi hunc fasciculum et iterum curre."
-        ) from exc
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        # TODO: Says this file contains invalid JSON.
-        raise UserError(f"{LATIN_PREFIX}\n" f"JSON invalidum in {path}: {exc}") from exc
+  try:
+    return json.loads(path.read_text(encoding="utf-8"))
+  except PermissionError as exc:
+    # TODO: Says read permission is missing for this file and to grant
+    # the terminal read access, then rerun.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Licentia legendi deest: {path}\n"
+      "Da terminali licentiam legendi hunc fasciculum et iterum curre."
+    ) from exc
+  except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    # TODO: Says this file contains invalid JSON.
+    raise UserError(f"{LATIN_PREFIX}\n" f"JSON invalidum in {path}: {exc}") from exc
 
 
 def unpacked_lines(fh: Iterable[str], path: Path) -> Iterator[str]:
-    """fh's lines; a compressed file that is no zstd archive, or one cut
-    short, is refused instead of reading as fewer lines."""
-    try:
-        yield from fh
-    except (zstd.ZstdError, EOFError) as exc:
-        # TODO: Says this compressed transcript cannot be decompressed, with
-        # the reason.
-        raise UserError(f"{LATIN_PREFIX}\n" f"Transcriptum compressum resolvi non potest: {path}\n{exc}") from exc
+  """fh's lines; a compressed file that is no zstd archive, or one cut
+  short, is refused instead of reading as fewer lines."""
+  try:
+    yield from fh
+  except (zstd.ZstdError, EOFError) as exc:
+    # TODO: Says this compressed transcript cannot be decompressed, with
+    # the reason.
+    raise UserError(f"{LATIN_PREFIX}\n" f"Transcriptum compressum resolvi non potest: {path}\n{exc}") from exc
 
 
 def read_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
-    try:
-        # A .jsonl.zst file is a rollout Codex compressed.
-        fh = (zstd.open if path.suffix == ".zst" else open)(path, "rt", encoding="utf-8")
-    except PermissionError as exc:
-        # TODO: Says read permission is missing for this file and to grant
-        # the terminal read access, then rerun.
+  try:
+    # A .jsonl.zst file is a rollout Codex compressed.
+    fh = (zstd.open if path.suffix == ".zst" else open)(path, "rt", encoding="utf-8")
+  except PermissionError as exc:
+    # TODO: Says read permission is missing for this file and to grant
+    # the terminal read access, then rerun.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Licentia legendi deest: {path}\n"
+      "Da terminali licentiam legendi hunc fasciculum et iterum curre."
+    ) from exc
+  except OSError as exc:
+    # TODO: Says this file cannot be opened.
+    raise UserError(f"{LATIN_PREFIX}\n" f"Fasciculus aperiri non potest: {path}\n{exc}") from exc
+  with fh:
+    for line_number, line in enumerate(unpacked_lines(fh, path), start=1):
+      if line == "\n":
+        continue
+      try:
+        record = json.loads(line)
+      except json.JSONDecodeError as exc:
+        # A line with no trailing newline is necessarily the file's
+        # last, and an unparseable one is a photograph of an append
+        # still in progress (live capture), not corruption: the
+        # complete prefix is the transcript. Damage mid-file is real
+        # corruption and stays loud.
+        if not line.endswith("\n"):
+          return
+        # TODO: Says this file has invalid JSONL at this line, and to
+        # close Claude, Codex, and VS Code, then rerun.
         raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Licentia legendi deest: {path}\n"
-            "Da terminali licentiam legendi hunc fasciculum et iterum curre."
+          f"{LATIN_PREFIX}\n"
+          f"JSONL invalidum: {path}:{line_number}\n{exc}\n"
+          "Claude, Codex, et VS Code claude; deinde iterum curre."
         ) from exc
-    except OSError as exc:
-        # TODO: Says this file cannot be opened.
-        raise UserError(f"{LATIN_PREFIX}\n" f"Fasciculus aperiri non potest: {path}\n{exc}") from exc
-    with fh:
-        for line_number, line in enumerate(unpacked_lines(fh, path), start=1):
-            if line == "\n":
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
-                # A line with no trailing newline is necessarily the file's
-                # last, and an unparseable one is a photograph of an append
-                # still in progress (live capture), not corruption: the
-                # complete prefix is the transcript. Damage mid-file is real
-                # corruption and stays loud.
-                if not line.endswith("\n"):
-                    return
-                # TODO: Says this file has invalid JSONL at this line, and to
-                # close Claude, Codex, and VS Code, then rerun.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"JSONL invalidum: {path}:{line_number}\n{exc}\n"
-                    "Claude, Codex, et VS Code claude; deinde iterum curre."
-                ) from exc
-            if not isinstance(record, dict):
-                # TODO: Says this JSONL line is not a JSON object.
-                raise UserError(f"{LATIN_PREFIX}\n" f"Recordum JSONL obiectum non est: {path}:{line_number}")
-            yield line_number, record
+      if not isinstance(record, dict):
+        # TODO: Says this JSONL line is not a JSON object.
+        raise UserError(f"{LATIN_PREFIX}\n" f"Recordum JSONL obiectum non est: {path}:{line_number}")
+      yield line_number, record
 
 
 def decode_file_uri(value: str) -> str | None:
-    """Return the filesystem path of a file:// URI, or None for other schemes."""
-    if not value.startswith("file://"):
-        return None
-    parsed = urllib.parse.urlparse(value)
-    path = urllib.parse.unquote(parsed.path)
-    if os.name == "nt" and len(path) >= 3 and path[0] == "/" and path[2] == ":":
-        return path[1:]
-    return path
+  """Return the filesystem path of a file:// URI, or None for other schemes."""
+  if not value.startswith("file://"):
+    return None
+  parsed = urllib.parse.urlparse(value)
+  path = urllib.parse.unquote(parsed.path)
+  if os.name == "nt" and len(path) >= 3 and path[0] == "/" and path[2] == ":":
+    return path[1:]
+  return path
 
 
 def under_dir(value: Any, root: Path, source: Path) -> bool:
-    """Whether the path a record of the transcript at source names lies
-    under root."""
-    if not isinstance(value, str) or value == "":
-        return False
-    path = Path(value).expanduser()
-    # On macOS, /home is an automount point, not a directory of this
-    # machine's own: resolving a path under it (the resolve() below) asks the
-    # automounter, which can hang for minutes. A path there comes from
-    # another machine's transcript, such as a Claude cloud workspace's, whose
-    # checkouts live under its own /home, so it is refused before anything
-    # resolves it.
-    if sys.platform == "darwin" and path.is_relative_to("/home"):
-        # TODO: Says this transcript came from another machine (for example
-        # a Claude cloud workspace), naming it and the path under /home it
-        # names; its directories must first be rewritten to this machine's
-        # checkout of the project, then rerun.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Transcriptum ex alia machina venit (exempli gratia ex spatio operis Claude in nube): {source}\n"
-            f"Via {value} sub /home iacet. Directoria transcripti prius ad exemplar incepti in hac machina "
-            "rescribe, deinde iterum curre."
-        )
-    return path.resolve().is_relative_to(root)
+  """Whether the path a record of the transcript at source names lies
+  under root."""
+  if not isinstance(value, str) or value == "":
+    return False
+  path = Path(value).expanduser()
+  # On macOS, /home is an automount point, not a directory of this
+  # machine's own: resolving a path under it (the resolve() below) asks the
+  # automounter, which can hang for minutes. A path there comes from
+  # another machine's transcript, such as a Claude cloud workspace's, whose
+  # checkouts live under its own /home, so it is refused before anything
+  # resolves it.
+  if sys.platform == "darwin" and path.is_relative_to("/home"):
+    # TODO: Says this transcript came from another machine (for example
+    # a Claude cloud workspace), naming it and the path under /home it
+    # names; its directories must first be rewritten to this machine's
+    # checkout of the project, then rerun.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Transcriptum ex alia machina venit (exempli gratia ex spatio operis Claude in nube): {source}\n"
+      f"Via {value} sub /home iacet. Directoria transcripti prius ad exemplar incepti in hac machina "
+      "rescribe, deinde iterum curre."
+    )
+  return path.resolve().is_relative_to(root)
 
 
 # Jargon: to "tally" is to count the lines a recorded edit added and deleted;
 # every tally function returns an (added, deleted) pair.
 def diff_tally(lines: Iterable[str]) -> tuple[int, int]:
-    """Tally unified-diff hunk lines: a +/- prefix marks an added/deleted
-    line. Callers pass only hunks — never the +++/--- file headers of a full
-    diff — so a line like "---" is a deletion whose content starts with
-    "--", not a header."""
-    added = deleted = 0
-    for line in lines:
-        if line.startswith("+"):
-            added += 1
-        elif line.startswith("-"):
-            deleted += 1
-    return (added, deleted)
+  """Tally unified-diff hunk lines: a +/- prefix marks an added/deleted
+  line. Callers pass only hunks — never the +++/--- file headers of a full
+  diff — so a line like "---" is a deletion whose content starts with
+  "--", not a header."""
+  added = deleted = 0
+  for line in lines:
+    if line.startswith("+"):
+      added += 1
+    elif line.startswith("-"):
+      deleted += 1
+  return (added, deleted)
 
 
 # --------------------------------------------------------------- Claude Code
@@ -552,7 +552,7 @@ CLAUDE_WRAPPER = re.compile(r"<(ide_[a-z_]+|system-reminder)>.*</\1>\s*", re.DOT
 # A slash command is stored as two redundant XML-like fields. Matching both
 # fields prevents a partial or changed wrapper from becoming apparent typing.
 CLAUDE_COMMAND = re.compile(
-    r"\A<command-message>([^<]+)</command-message>\n<command-name>/\1</command-name>\Z"
+  r"\A<command-message>([^<]+)</command-message>\n<command-name>/\1</command-name>\Z"
 )
 
 # Claude Code ≥2.1.215 puts the name first, indents the wrapper, and stores
@@ -560,9 +560,9 @@ CLAUDE_COMMAND = re.compile(
 # must reappear after the command name; only the inter-tag whitespace, which
 # the harness generates, is matched leniently.
 CLAUDE_COMMAND_ARGS = re.compile(
-    r"\A<command-name>/([^<]+)</command-name>\n\s*"
-    r"<command-message>\1</command-message>\n\s*"
-    r"<command-args>([^<]*)</command-args>\Z"
+  r"\A<command-name>/([^<]+)</command-name>\n\s*"
+  r"<command-message>\1</command-message>\n\s*"
+  r"<command-args>([^<]*)</command-args>\Z"
 )
 
 # A harness-local command (/model, /config, ...) records its captured output
@@ -570,7 +570,7 @@ CLAUDE_COMMAND_ARGS = re.compile(
 # reclassifies the slash-command prompt sharing its promptId: that pair was
 # harness configuration, not dialogue, so both records vanish together.
 CLAUDE_LOCAL_STDOUT = re.compile(
-    r"\A<local-command-stdout>.*</local-command-stdout>\s*\Z", re.DOTALL
+  r"\A<local-command-stdout>.*</local-command-stdout>\s*\Z", re.DOTALL
 )
 
 # Record flags that mark machine-generated pseudo-messages: subagent traffic,
@@ -597,11 +597,11 @@ CLAUDE_CANNED = re.compile(r"\[Request interrupted by user[^\]]*\]")
 # file holding records read for the repo, is refused: it may hold the
 # human's words.
 CLAUDE_RECORDS = frozenset({
-    "user", "assistant", "attachment", "system", "queue-operation", "ai-title", "last-prompt",
-    "api-request", "api-request-blob", "api-request-shape", "atis-latch", "file-history-snapshot",
-    "file-history-delta", "bridge-session", "mode", "frame-link", "artifact-autoreact-ledger",
-    "artifact-comment-monitor", "cost-state", "tools-used", "permission-mode", "agent-name", "pr-link",
-    "session-owner",
+  "user", "assistant", "attachment", "system", "queue-operation", "ai-title", "last-prompt",
+  "api-request", "api-request-blob", "api-request-shape", "atis-latch", "file-history-snapshot",
+  "file-history-delta", "bridge-session", "mode", "frame-link", "artifact-autoreact-ledger",
+  "artifact-comment-monitor", "cost-state", "tools-used", "permission-mode", "agent-name", "pr-link",
+  "session-owner",
 })
 
 # Attachment types the stores show that carry no typing: reminders, tool and
@@ -612,14 +612,14 @@ CLAUDE_RECORDS = frozenset({
 # prompt typed mid-turn, is read; one of any other type is refused like a
 # record of an unseen type.
 CLAUDE_MUTE_ATTACHMENTS = frozenset({
-    "total_tokens_reminder", "deferred_tools_record", "batching_reminder_sent", "deferred_tools_delta",
-    "skill_listing", "prompt_snapshot", "remote_session_change", "auto_mode", "date", "session_context",
-    "environment", "instructions", "structured_output", "model", "edited_text_file", "mcp_instructions_delta",
-    "credential_org", "todo_reminder", "silent_turn_reminder", "ultra_effort_enter", "date_change",
-    "agent_listing_delta", "read_truncation_notice", "hook_additional_context", "file", "command_permissions",
-    "thinking_drop", "compact_file_reference", "invoked_skills", "auto_mode_exit", "ultra_effort_exit",
-    "task_status", "plan_mode", "plan_mode_exit", "hook_non_blocking_error", "plan_mode_reentry",
-    "workflow_keyword_request",
+  "total_tokens_reminder", "deferred_tools_record", "batching_reminder_sent", "deferred_tools_delta",
+  "skill_listing", "prompt_snapshot", "remote_session_change", "auto_mode", "date", "session_context",
+  "environment", "instructions", "structured_output", "model", "edited_text_file", "mcp_instructions_delta",
+  "credential_org", "todo_reminder", "silent_turn_reminder", "ultra_effort_enter", "date_change",
+  "agent_listing_delta", "read_truncation_notice", "hook_additional_context", "file", "command_permissions",
+  "thinking_drop", "compact_file_reference", "invoked_skills", "auto_mode_exit", "ultra_effort_exit",
+  "task_status", "plan_mode", "plan_mode_exit", "hook_non_blocking_error", "plan_mode_reentry",
+  "workflow_keyword_request",
 })
 
 # Assistant block types the stores show that carry no words for the human:
@@ -634,10 +634,10 @@ CLAUDE_MUTE_BLOCKS = frozenset({"thinking", "tool_use", "fallback"})
 # reply is read from, are known by name. A result of any other tool is
 # refused: a new tool might ask the human for words.
 CLAUDE_TOOLS = frozenset({
-    "Bash", "Read", "Edit", "Write", "Workflow", "TodoWrite", "WebFetch", "ToolSearch", "WebSearch",
-    "AskUserQuestion", "TaskOutput", "Artifact", "TaskStop", "Skill", "Agent", "Monitor", "SendUserFile",
-    "SendMessage", "ExitPlanMode", "ScheduleWakeup", "ListAgents", "EnterPlanMode", "PushNotification",
-    "SendUserMessage", "Brief",
+  "Bash", "Read", "Edit", "Write", "Workflow", "TodoWrite", "WebFetch", "ToolSearch", "WebSearch",
+  "AskUserQuestion", "TaskOutput", "Artifact", "TaskStop", "Skill", "Agent", "Monitor", "SendUserFile",
+  "SendMessage", "ExitPlanMode", "ScheduleWakeup", "ListAgents", "EnterPlanMode", "PushNotification",
+  "SendUserMessage", "Brief",
 })
 
 # What Claude Code ≥2.1.285 records as a rejected tool call's toolUseResult;
@@ -672,33 +672,33 @@ CLAUDE_MACHINE_TURNS = frozenset({"task_notification", "peer", "scheduled"})
 
 
 def claude_origin_kind(record: Mapping[str, Any]) -> Any:
-    """The origin kind a record states, as stated; None when it states none."""
-    origin = record.get("origin")
-    return origin.get("kind") if isinstance(origin, dict) else None
+  """The origin kind a record states, as stated; None when it states none."""
+  origin = record.get("origin")
+  return origin.get("kind") if isinstance(origin, dict) else None
 
 
 def claude_origin_is_machine(record: Mapping[str, Any], path: Path, line_number: int) -> bool:
-    """Whether a record's origin kind and turnOrigin, each absent or known,
-    agree that a machine sent it."""
-    kind = claude_origin_kind(record)
-    turn = record.get("turnOrigin")
-    if (kind is None or kind in CLAUDE_HUMAN_ORIGINS) and (turn is None or turn in CLAUDE_HUMAN_TURNS):
-        return False
-    if (kind is None or kind in CLAUDE_MACHINE_ORIGINS) and (turn is None or turn in CLAUDE_MACHINE_TURNS):
-        return True
-    # TODO: Says this record states an unrecognized origin kind or
-    # turnOrigin, or an origin kind and turnOrigin that disagree about whether
-    # a human or a machine sent it, naming both; new kinds are to be added
-    # deliberately to CLAUDE_HUMAN_ORIGINS, CLAUDE_MACHINE_ORIGINS,
-    # CLAUDE_HUMAN_TURNS, or CLAUDE_MACHINE_TURNS, and a disagreement means
-    # claude_origin_is_machine needs updating.
-    raise UserError(
-        f"{LATIN_PREFIX}\n"
-        f"Origines recordi ignotae aut inter se repugnantes: origin {kind!r}, turnOrigin {turn!r} "
-        f"in {path}:{line_number}\n"
-        "Adde novas origines consulto in CLAUDE_HUMAN_ORIGINS, CLAUDE_MACHINE_ORIGINS, CLAUDE_HUMAN_TURNS "
-        "vel CLAUDE_MACHINE_TURNS; si inter se repugnant, claude_origin_is_machine renovandum est."
-    )
+  """Whether a record's origin kind and turnOrigin, each absent or known,
+  agree that a machine sent it."""
+  kind = claude_origin_kind(record)
+  turn = record.get("turnOrigin")
+  if (kind is None or kind in CLAUDE_HUMAN_ORIGINS) and (turn is None or turn in CLAUDE_HUMAN_TURNS):
+    return False
+  if (kind is None or kind in CLAUDE_MACHINE_ORIGINS) and (turn is None or turn in CLAUDE_MACHINE_TURNS):
+    return True
+  # TODO: Says this record states an unrecognized origin kind or
+  # turnOrigin, or an origin kind and turnOrigin that disagree about whether
+  # a human or a machine sent it, naming both; new kinds are to be added
+  # deliberately to CLAUDE_HUMAN_ORIGINS, CLAUDE_MACHINE_ORIGINS,
+  # CLAUDE_HUMAN_TURNS, or CLAUDE_MACHINE_TURNS, and a disagreement means
+  # claude_origin_is_machine needs updating.
+  raise UserError(
+    f"{LATIN_PREFIX}\n"
+    f"Origines recordi ignotae aut inter se repugnantes: origin {kind!r}, turnOrigin {turn!r} "
+    f"in {path}:{line_number}\n"
+    "Adde novas origines consulto in CLAUDE_HUMAN_ORIGINS, CLAUDE_MACHINE_ORIGINS, CLAUDE_HUMAN_TURNS "
+    "vel CLAUDE_MACHINE_TURNS; si inter se repugnant, claude_origin_is_machine renovandum est."
+  )
 
 # Human typing that arrives wrapped in tool plumbing instead of as a chat
 # message: the text typed into a tool/permission/plan denial, and the
@@ -708,107 +708,107 @@ def claude_origin_is_machine(record: Mapping[str, Any], path: Path, line_number:
 # the Claude Code binary; a family member matching none of them means the
 # format grew a new variant that must be classified deliberately.
 CLAUDE_DENIAL_FAMILY = (
-    "The tool use was rejected (eg. if it was a file edit, "
-    "the new_string was NOT written to the file)."
+  "The tool use was rejected (eg. if it was a file edit, "
+  "the new_string was NOT written to the file)."
 )
 # Typed-text markers, most specific first ("The user said:" is a suffix of
 # another marker's neighborhood). Plan rejections ("No, keep planning" with
 # feedback) arrive through these same templates via the ExitPlanMode denial.
 CLAUDE_TYPED_MARKERS = (
-    "The user provided the following reason for the rejection:",
-    "To tell you how to proceed, the user said:",
-    "The user said:",
+  "The user provided the following reason for the rejection:",
+  "To tell you how to proceed, the user said:",
+  "The user said:",
 )
 # Denial tails where nothing was typed.
 CLAUDE_UNTYPED_TAILS = (
-    "STOP what you are doing and wait for the user to tell you how to proceed.",
-    "Try a different approach or report the limitation to complete your task.",
+  "STOP what you are doing and wait for the user to tell you how to proceed.",
+  "Try a different approach or report the limitation to complete your task.",
 )
 
 
 def claude_denial_text(result: str, path: Path, line_number: int) -> str:
-    for marker in CLAUDE_TYPED_MARKERS:
-        _, found, typed = result.partition(marker)
-        if found:
-            typed = typed.strip()
-            # The newer templates wrap the feedback in double quotes.
-            unquoted = typed[1:-1] if len(typed) >= 2 and typed[0] == typed[-1] == '"' else typed
-            return unquoted
-    if any(tail in result for tail in CLAUDE_UNTYPED_TAILS):
-        return ""
-    # TODO: Says a tool denial is in an unrecognized form and to add it
-    # deliberately to CLAUDE_TYPED_MARKERS or CLAUDE_UNTYPED_TAILS.
-    raise UserError(
-        f"{LATIN_PREFIX}\n"
-        f"Recusatio in forma ignota: {path}:{line_number}\n"
-        "Adde hanc formam consulto in CLAUDE_TYPED_MARKERS vel CLAUDE_UNTYPED_TAILS."
-    )
+  for marker in CLAUDE_TYPED_MARKERS:
+    _, found, typed = result.partition(marker)
+    if found:
+      typed = typed.strip()
+      # The newer templates wrap the feedback in double quotes.
+      unquoted = typed[1:-1] if len(typed) >= 2 and typed[0] == typed[-1] == '"' else typed
+      return unquoted
+  if any(tail in result for tail in CLAUDE_UNTYPED_TAILS):
+    return ""
+  # TODO: Says a tool denial is in an unrecognized form and to add it
+  # deliberately to CLAUDE_TYPED_MARKERS or CLAUDE_UNTYPED_TAILS.
+  raise UserError(
+    f"{LATIN_PREFIX}\n"
+    f"Recusatio in forma ignota: {path}:{line_number}\n"
+    "Adde hanc formam consulto in CLAUDE_TYPED_MARKERS vel CLAUDE_UNTYPED_TAILS."
+  )
 
 
 def claude_ballots(
-    questions: Sequence[Any], answers: Mapping[str, Any], path: Path, line_number: int
+  questions: Sequence[Any], answers: Mapping[str, Any], path: Path, line_number: int
 ) -> tuple[str, tuple[Ballot, ...]]:
-    """Return (typed, ballots) for AskUserQuestion's `questions` and the
-    `answers` given them, by question text: the human's typed words plus
-    one Ballot per question answered. An answer matching one option label —
-    or a comma-joined list of them (multi-select) — is a click; anything
-    else is typing and the ballot's picked set stays empty."""
-    ballots: list[Ballot] = []
-    typed: list[str] = []
-    for question in questions:
-        match question:
-            case {"question": str() as prompt_text, "options": list() as options} if isinstance(
-                answers.get(prompt_text), str
-            ) and all(isinstance(option, dict) and isinstance(option.get("label"), str) for option in options):
-                answer = answers[prompt_text]
-            case _:
-                # TODO: Says a question the human answered is in an
-                # unrecognized form (no question text, options missing or
-                # without labels, or no answer recorded) — the answers
-                # structure seems to have changed and claude_ballots needs
-                # updating.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"Interrogatio in forma ignota: {path}:{line_number}\n"
-                    "Structura answers mutata videtur; claude_ballots renovandum est."
-                )
-        if answer == "":
-            continue
-        labels = tuple(option["label"] for option in options)
-        parts = answer.split(", ")
-        if answer in labels:
-            picked: tuple[str, ...] = (answer,)
-        elif len(parts) > 1 and all(part in labels for part in parts):
-            picked = tuple(parts)
-        else:
-            picked = ()
-            typed.append(answer)
-        ballots.append(Ballot(question=prompt_text, options=labels, picked=picked))
-    return "\n\n".join(typed), tuple(ballots)
+  """Return (typed, ballots) for AskUserQuestion's `questions` and the
+  `answers` given them, by question text: the human's typed words plus
+  one Ballot per question answered. An answer matching one option label —
+  or a comma-joined list of them (multi-select) — is a click; anything
+  else is typing and the ballot's picked set stays empty."""
+  ballots: list[Ballot] = []
+  typed: list[str] = []
+  for question in questions:
+    match question:
+      case {"question": str() as prompt_text, "options": list() as options} if isinstance(
+        answers.get(prompt_text), str
+      ) and all(isinstance(option, dict) and isinstance(option.get("label"), str) for option in options):
+        answer = answers[prompt_text]
+      case _:
+        # TODO: Says a question the human answered is in an
+        # unrecognized form (no question text, options missing or
+        # without labels, or no answer recorded) — the answers
+        # structure seems to have changed and claude_ballots needs
+        # updating.
+        raise UserError(
+          f"{LATIN_PREFIX}\n"
+          f"Interrogatio in forma ignota: {path}:{line_number}\n"
+          "Structura answers mutata videtur; claude_ballots renovandum est."
+        )
+    if answer == "":
+      continue
+    labels = tuple(option["label"] for option in options)
+    parts = answer.split(", ")
+    if answer in labels:
+      picked: tuple[str, ...] = (answer,)
+    elif len(parts) > 1 and all(part in labels for part in parts):
+      picked = tuple(parts)
+    else:
+      picked = ()
+      typed.append(answer)
+    ballots.append(Ballot(question=prompt_text, options=labels, picked=picked))
+  return "\n\n".join(typed), tuple(ballots)
 
 
 def claude_recovered(record: Mapping[str, Any], path: Path, line_number: int) -> tuple[str, tuple[Ballot, ...]]:
-    """Return (typed, ballots): the human's typed words plus one Ballot per
-    answered multiple-choice question (see claude_ballots)."""
-    result = record.get("toolUseResult")
-    match result:
-        case str() if CLAUDE_DENIAL_FAMILY in result:
-            return claude_denial_text(result, path, line_number), ()
-        case str() if result == CLAUDE_REJECTED:
-            return claude_denial_text(claude_result_text(record, path, line_number), path, line_number), ()
-        case {"questions": list() as questions, "answers": dict() as answers}:
-            return claude_ballots(questions, answers, path, line_number)
-        case {"questions": _}:
-            # TODO: Says question answers are in an unrecognized form — the
-            # answers structure seems to have changed and claude_recovered
-            # needs updating.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"Responsa interrogationum in forma ignota: {path}:{line_number}\n"
-                "Structura answers mutata videtur; claude_recovered renovandum est."
-            )
-        case _:
-            return "", ()
+  """Return (typed, ballots): the human's typed words plus one Ballot per
+  answered multiple-choice question (see claude_ballots)."""
+  result = record.get("toolUseResult")
+  match result:
+    case str() if CLAUDE_DENIAL_FAMILY in result:
+      return claude_denial_text(result, path, line_number), ()
+    case str() if result == CLAUDE_REJECTED:
+      return claude_denial_text(claude_result_text(record, path, line_number), path, line_number), ()
+    case {"questions": list() as questions, "answers": dict() as answers}:
+      return claude_ballots(questions, answers, path, line_number)
+    case {"questions": _}:
+      # TODO: Says question answers are in an unrecognized form — the
+      # answers structure seems to have changed and claude_recovered
+      # needs updating.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Responsa interrogationum in forma ignota: {path}:{line_number}\n"
+        "Structura answers mutata videtur; claude_recovered renovandum est."
+      )
+    case _:
+      return "", ()
 
 
 # A "late answer" is the human's answer to an AskUserQuestion the agent
@@ -823,732 +823,734 @@ CLAUDE_LATE_ANSWER = 'Answering your earlier question "{question}": {answer}'
 
 
 def claude_late_answer(
-    text: str, call: Mapping[str, Any] | None, path: Path, line_number: int
+  text: str, call: Mapping[str, Any] | None, path: Path, line_number: int
 ) -> tuple[str, tuple[Ballot, ...]]:
-    """Read a prompt the VS Code extension sent for the human as a late
-    answer to one question of `call`, its session's latest AskUserQuestion
-    call: (typed, ballots), as claude_ballots reads an answer given in
-    time. Words that are no late answer, with an answer, to exactly one of
-    that call's questions are refused."""
-    match call:
-        case {"input": {"questions": list() as questions}}:
-            pass
-        case _:
-            questions = []
-    markers = [
-        (question, CLAUDE_LATE_ANSWER.format(question=question.get("question"), answer=""))
-        for question in questions
-        if isinstance(question, dict)
-    ]
-    match [(question, text[len(marker):]) for question, marker in markers if text.startswith(marker)]:
-        case [(question, answer)] if answer != "":
-            return claude_ballots([question], {question.get("question"): answer}, path, line_number)
-        case _:
-            # TODO: Says this prompt, which the VS Code extension sent for
-            # the human (turnOrigin "sdk"), is no late answer, in the one
-            # form the stores show, to its session's latest AskUserQuestion,
-            # so what the human did is unknown: the format seems to have
-            # changed, so claude_late_answer needs updating.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"Rogatio ab extensione VS Code missa responsum serum ad ultimam interrogationem non est: "
-                f"{path}:{line_number}\n"
-                "Forma mutata videtur; claude_late_answer renovandum est."
-            )
+  """Read a prompt the VS Code extension sent for the human as a late
+  answer to one question of `call`, its session's latest AskUserQuestion
+  call: (typed, ballots), as claude_ballots reads an answer given in
+  time. Words that are no late answer, with an answer, to exactly one of
+  that call's questions are refused."""
+  match call:
+    case {"input": {"questions": list() as questions}}:
+      pass
+    case _:
+      questions = []
+  markers = [
+    (question, CLAUDE_LATE_ANSWER.format(question=question.get("question"), answer=""))
+    for question in questions
+    if isinstance(question, dict)
+  ]
+  match [(question, text[len(marker):]) for question, marker in markers if text.startswith(marker)]:
+    case [(question, answer)] if answer != "":
+      return claude_ballots([question], {question.get("question"): answer}, path, line_number)
+    case _:
+      # TODO: Says this prompt, which the VS Code extension sent for
+      # the human (turnOrigin "sdk"), is no late answer, in the one
+      # form the stores show, to its session's latest AskUserQuestion,
+      # so what the human did is unknown: the format seems to have
+      # changed, so claude_late_answer needs updating.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Rogatio ab extensione VS Code missa responsum serum ad ultimam interrogationem non est: "
+        f"{path}:{line_number}\n"
+        "Forma mutata videtur; claude_late_answer renovandum est."
+      )
 
 
 def claude_result_text(record: Mapping[str, Any], path: Path, line_number: int) -> str:
-    """The text of the one tool result a user record carries: text, or a
-    list of text pieces."""
-    match record:
-        case {"message": {"content": [{"type": "tool_result", "content": str() as text}]}}:
-            return text
-        case {"message": {"content": [{"type": "tool_result", "content": list() as pieces}]}} if all(
-            isinstance(piece, dict) and piece.get("type") == "text" and isinstance(piece.get("text"), str)
-            for piece in pieces
-        ):
-            return "".join(piece["text"] for piece in pieces)
-        case _:
-            # TODO: Says a rejected tool call's result is in an unrecognized
-            # form (not one tool result holding text) — the format seems to
-            # have changed and claude_recovered needs updating.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"Fructus instrumenti recusati in forma ignota: {path}:{line_number}\n"
-                "Forma mutata videtur; claude_recovered renovandum est."
-            )
+  """The text of the one tool result a user record carries: text, or a
+  list of text pieces."""
+  match record:
+    case {"message": {"content": [{"type": "tool_result", "content": str() as text}]}}:
+      return text
+    case {"message": {"content": [{"type": "tool_result", "content": list() as pieces}]}} if all(
+      isinstance(piece, dict) and piece.get("type") == "text" and isinstance(piece.get("text"), str)
+      for piece in pieces
+    ):
+      return "".join(piece["text"] for piece in pieces)
+    case _:
+      # TODO: Says a rejected tool call's result is in an unrecognized
+      # form (not one tool result holding text) — the format seems to
+      # have changed and claude_recovered needs updating.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Fructus instrumenti recusati in forma ignota: {path}:{line_number}\n"
+        "Forma mutata videtur; claude_recovered renovandum est."
+      )
 
 
 def claude_denial_key(record: Mapping[str, Any], text: str) -> tuple[Any, str] | None:
-    """Identify adjacent records produced by one denied parallel tool batch."""
-    match record.get("toolUseResult"):
-        case str() as result if CLAUDE_DENIAL_FAMILY in result or result == CLAUDE_REJECTED:
-            return (record.get("promptId"), text)
-        case _:
-            return None
+  """Identify adjacent records produced by one denied parallel tool batch."""
+  match record.get("toolUseResult"):
+    case str() as result if CLAUDE_DENIAL_FAMILY in result or result == CLAUDE_REJECTED:
+      return (record.get("promptId"), text)
+    case _:
+      return None
 
 
 def claude_flagged_human(
-    record: Mapping[str, Any], attachment: Mapping[str, Any] | None, path: Path, line_number: int
+  record: Mapping[str, Any], attachment: Mapping[str, Any] | None, path: Path, line_number: int
 ) -> bool:
-    """Whether a record flagged as machine traffic states a human origin,
-    or, being no queued command, holds words or clicks the human gave."""
-    if attachment is not None:
-        return claude_origin_kind(attachment) in CLAUDE_HUMAN_ORIGINS
-    typed, ballots = claude_recovered(record, path, line_number)
-    return claude_origin_kind(record) in CLAUDE_HUMAN_ORIGINS or typed != "" or any(b.picked for b in ballots)
+  """Whether a record flagged as machine traffic states a human origin,
+  or, being no queued command, holds words or clicks the human gave."""
+  if attachment is not None:
+    return claude_origin_kind(attachment) in CLAUDE_HUMAN_ORIGINS
+  typed, ballots = claude_recovered(record, path, line_number)
+  return claude_origin_kind(record) in CLAUDE_HUMAN_ORIGINS or typed != "" or any(b.picked for b in ballots)
 
 
 def claude_tool_known(name: Any) -> bool:
-    """Whether a tool's results are ones the stores show (see CLAUDE_TOOLS)."""
-    return isinstance(name, str) and (name in CLAUDE_TOOLS or name.startswith("mcp__"))
+  """Whether a tool's results are ones the stores show (see CLAUDE_TOOLS)."""
+  return isinstance(name, str) and (name in CLAUDE_TOOLS or name.startswith("mcp__"))
 
 
 def claude_calls(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """The tool calls a record makes: an assistant record's tool_use blocks,
-    read whatever the record's cwd, so without refusing any shape
-    (claude_reply_blocks checks the blocks of records read for the repo)."""
-    match record:
-        case {"type": "assistant", "message": {"content": list() as blocks}}:
-            return [block for block in blocks if isinstance(block, dict) and block.get("type") == "tool_use"]
-        case _:
-            return []
+  """The tool calls a record makes: an assistant record's tool_use blocks,
+  read whatever the record's cwd, so without refusing any shape
+  (claude_reply_blocks checks the blocks of records read for the repo)."""
+  match record:
+    case {"type": "assistant", "message": {"content": list() as blocks}}:
+      return [block for block in blocks if isinstance(block, dict) and block.get("type") == "tool_use"]
+    case _:
+      return []
 
 
 def claude_squash(text: str) -> str:
-    """text without paste wrappers or whitespace, as a last-prompt echo is
-    compared with it."""
-    return re.sub(r"\s+", "", CLAUDE_PASTE_TAG.sub("", text))
+  """text without paste wrappers or whitespace, as a last-prompt echo is
+  compared with it."""
+  return re.sub(r"\s+", "", CLAUDE_PASTE_TAG.sub("", text))
 
 
 def claude_echo_read(echo: Any, read: set[str]) -> bool:
-    """Whether a last-prompt echo is of a prompt read (each in `read` as
-    claude_squash gives it). The echo is the prompt with its newlines as
-    spaces and any paste unwrapped, cut at 200 characters with an ellipsis,
-    so it is compared without whitespace or paste wrappers, a cut one as the
-    start of a prompt read."""
-    match echo:
-        case str() if echo.endswith("…"):
-            return any(prompt.startswith(claude_squash(echo[:-1])) for prompt in read)
-        case str():
-            return claude_squash(echo) in read
-        case _:
-            return False
+  """Whether a last-prompt echo is of a prompt read (each in `read` as
+  claude_squash gives it). The echo is the prompt with its newlines as
+  spaces and any paste unwrapped, cut at 200 characters with an ellipsis,
+  so it is compared without whitespace or paste wrappers, a cut one as the
+  start of a prompt read."""
+  match echo:
+    case str() if echo.endswith("…"):
+      return any(prompt.startswith(claude_squash(echo[:-1])) for prompt in read)
+    case str():
+      return claude_squash(echo) in read
+    case _:
+      return False
 
 
 def claude_delivery_key(attachment: Mapping[str, Any] | None, path: Path, line_number: int) -> str | int:
-    """A record's "delivery key": a queued prompt's source_uuid,
-    which every delivery of it shares, or else the record's own line number,
-    which no other record shares (a user or assistant record, or a queued
-    prompt that carries no source_uuid)."""
-    match attachment:
-        case {"source_uuid": str() as source_uuid} if source_uuid != "":
-            return source_uuid
-        case {"source_uuid": _}:
-            # TODO: Says a queued prompt's source_uuid is in an unrecognized
-            # form (not text, or empty) — the format seems to have changed
-            # and claude_delivery_key needs updating.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"source_uuid in forma ignota: {path}:{line_number}\n"
-                "Forma mutata videtur; claude_delivery_key renovandum est."
-            )
-        case _:
-            return line_number
+  """A record's "delivery key": a queued prompt's source_uuid,
+  which every delivery of it shares, or else the record's own line number,
+  which no other record shares (a user or assistant record, or a queued
+  prompt that carries no source_uuid)."""
+  match attachment:
+    case {"source_uuid": str() as source_uuid} if source_uuid != "":
+      return source_uuid
+    case {"source_uuid": _}:
+      # TODO: Says a queued prompt's source_uuid is in an unrecognized
+      # form (not text, or empty) — the format seems to have changed
+      # and claude_delivery_key needs updating.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"source_uuid in forma ignota: {path}:{line_number}\n"
+        "Forma mutata videtur; claude_delivery_key renovandum est."
+      )
+    case _:
+      return line_number
 
 
 def claude_prompt(content: Any, path: Path, line_number: int) -> str:
-    """Return the human-typed text of a user record, or "" if none survives."""
-    # TODO: Says a user record's content, or a piece of it, is in a form no
-    # store had shown (neither text nor a list of text, image, and
-    # tool-result pieces), and may hold the human's words: the format seems
-    # to have changed, so claude_prompt needs updating.
-    unseen = UserError(
-        f"{LATIN_PREFIX}\n"
-        f"Contentum rogationis in forma ignota, fortasse verba hominis tenens: {path}:{line_number}\n"
-        "Forma mutata videtur; claude_prompt renovandum est."
-    )
-    match content:
-        case str():
-            if command := CLAUDE_COMMAND.fullmatch(content):
-                return "/" + command.group(1)
-            if command := CLAUDE_COMMAND_ARGS.fullmatch(content):
-                name, args = command.groups()
-                return f"/{name} {args}" if args else f"/{name}"
-            if content.startswith(("<command-message>", "<command-name>")):
-                # TODO: Says a slash-command wrapper is malformed and the
-                # Claude transcript format should be inspected.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"Involucrum imperii obliqui malformatum: {path}:{line_number}\n"
-                    "Forma transcripti Claude inspicienda est."
-                )
-            return content
-        case list():
-            for item in content:
-                match item:
-                    case {"type": "text", "text": str()} | {"type": "image"} | {"type": "tool_result"}:
-                        pass
-                    case _:
-                        raise unseen
-            if any(item["type"] == "tool_result" for item in content):
-                return ""
-            return "".join(claude_typed(content))
-        case _:
+  """Return the human-typed text of a user record, or "" if none survives."""
+  # TODO: Says a user record's content, or a piece of it, is in a form no
+  # store had shown (neither text nor a list of text, image, and
+  # tool-result pieces), and may hold the human's words: the format seems
+  # to have changed, so claude_prompt needs updating.
+  unseen = UserError(
+    f"{LATIN_PREFIX}\n"
+    f"Contentum rogationis in forma ignota, fortasse verba hominis tenens: {path}:{line_number}\n"
+    "Forma mutata videtur; claude_prompt renovandum est."
+  )
+  match content:
+    case str():
+      if command := CLAUDE_COMMAND.fullmatch(content):
+        return "/" + command.group(1)
+      if command := CLAUDE_COMMAND_ARGS.fullmatch(content):
+        name, args = command.groups()
+        return f"/{name} {args}" if args else f"/{name}"
+      if content.startswith(("<command-message>", "<command-name>")):
+        # TODO: Says a slash-command wrapper is malformed and the
+        # Claude transcript format should be inspected.
+        raise UserError(
+          f"{LATIN_PREFIX}\n"
+          f"Involucrum imperii obliqui malformatum: {path}:{line_number}\n"
+          "Forma transcripti Claude inspicienda est."
+        )
+      return content
+    case list():
+      for item in content:
+        match item:
+          case {"type": "text", "text": str()} | {"type": "image"} | {"type": "tool_result"}:
+            pass
+          case _:
             raise unseen
+      if any(item["type"] == "tool_result" for item in content):
+        return ""
+      return "".join(claude_typed(content))
+    case _:
+      raise unseen
 
 
 def claude_typed(content: list[Mapping[str, Any]]) -> list[str]:
-    """The text pieces of a user record's content list, in the forms
-    claude_prompt accepts, that the human typed: all but the harness's
-    wrappers."""
-    return [item["text"] for item in content if item["type"] == "text" and not CLAUDE_WRAPPER.fullmatch(item["text"])]
+  """The text pieces of a user record's content list, in the forms
+  claude_prompt accepts, that the human typed: all but the harness's
+  wrappers."""
+  return [item["text"] for item in content if item["type"] == "text" and not CLAUDE_WRAPPER.fullmatch(item["text"])]
 
 
-def claude_sends(record: Mapping[str, Any], content: Any, text: str, path: Path, line_number: int) -> list[str]:
-    """The sends a user record's prompt `text` holds, a "send" being one
-    message the human sent (Claude Code's word): the one, unless Claude Code
-    merged into the record sends queued while the agent was mid-turn (seen
-    from 2.1.322 on, in the VS Code extension), listing in mergedSendUuids
-    the ids of the sends beyond the record's own. Each send is then a typed
-    text piece of its own, in order, the pieces joining into `text`. A
-    last-prompt echo can be of any one send (see claude_echo_read)."""
-    match record.get("mergedSendUuids"), content:
-        case None, _:
-            return [text]
-        case [str(), *_] as merged, list() if (
-            all(isinstance(u, str) for u in merged)
-            and len(sends := claude_typed(content)) == 1 + len(merged)
-            and "".join(sends) == text
-        ):
-            return sends
-    # TODO: Says a user record lists the ids of sends merged into it
-    # (mergedSendUuids) in a shape no store had shown: the ids not a nonempty
-    # list of strings, or the record's typed text pieces not one per send,
-    # joining into its prompt. Which words are which send is then unknown,
-    # so claude_sends needs updating.
-    raise UserError(
-        f"{LATIN_PREFIX}\n"
-        f"Missiones coniunctae in forma ignota: {path}:{line_number}\n"
-        "Quae verba cuius missionis sint ignotum est; claude_sends renovandum est."
-    )
+def claude_echoables(record: Mapping[str, Any], content: Any, text: str, path: Path, line_number: int) -> list[str]:
+  """A user record's "echoables": the texts a last-prompt echo of the
+  record can repeat (see claude_echo_read). The one echoable is the
+  record's prompt `text`, whole, unless Claude Code (seen from 2.1.322 on,
+  in the VS Code extension) merged into the record messages the human sent
+  while the agent was mid-turn, "sends" in Claude Code's word, listing in
+  mergedSendUuids the ids of the sends beyond the record's own. Each send
+  is then a typed text piece of its own, in order, the pieces joining into
+  `text`, and the one echo the stores show repeats the first send alone,
+  so each send is an echoable."""
+  match record.get("mergedSendUuids"), content:
+    case None, _:
+      return [text]
+    case [str(), *_] as merged, list() if (
+      all(isinstance(u, str) for u in merged)
+      and len(sends := claude_typed(content)) == 1 + len(merged)
+      and "".join(sends) == text
+    ):
+      return sends
+  # TODO: Says a user record lists the ids of sends merged into it
+  # (mergedSendUuids) in a shape no store had shown: the ids not a nonempty
+  # list of strings, or the record's typed text pieces not one per send,
+  # joining into its prompt. Which words are which send is then unknown,
+  # so claude_echoables needs updating.
+  raise UserError(
+    f"{LATIN_PREFIX}\n"
+    f"Missiones coniunctae in forma ignota: {path}:{line_number}\n"
+    "Quae verba cuius missionis sint ignotum est; claude_echoables renovandum est."
+  )
 
 
 def claude_reply_blocks(content: Any, path: Path, line_number: int) -> list[str]:
-    """The words of an assistant record that make up its reply, in content
-    order: its text blocks, and the message of each SendUserMessage tool
-    call, Brief being that tool's legacy name (an agent in a Claude-desktop
-    cloud workspace can speak to the human through that tool alone, writing
-    no text block). Every other block stays out of the reply, even one the
-    harness also shows the human, such as ExitPlanMode's plan or
-    AskUserQuestion's questions; a block of a type no store has shown is
-    refused. Empty strings are dropped."""
-    if not isinstance(content, list):
-        # TODO: Says an assistant record's content is in an unrecognized
-        # form (not a list of blocks) — the format seems to have changed and
+  """The words of an assistant record that make up its reply, in content
+  order: its text blocks, and the message of each SendUserMessage tool
+  call, Brief being that tool's legacy name (an agent in a Claude-desktop
+  cloud workspace can speak to the human through that tool alone, writing
+  no text block). Every other block stays out of the reply, even one the
+  harness also shows the human, such as ExitPlanMode's plan or
+  AskUserQuestion's questions; a block of a type no store has shown is
+  refused. Empty strings are dropped."""
+  if not isinstance(content, list):
+    # TODO: Says an assistant record's content is in an unrecognized
+    # form (not a list of blocks) — the format seems to have changed and
+    # claude_reply_blocks needs updating.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Contentum responsi in forma ignota: {path}:{line_number}\n"
+      "Forma mutata videtur; claude_reply_blocks renovandum est."
+    )
+  words: list[str] = []
+  for item in content:
+    match item:
+      case {"type": "text", "text": str() as text}:
+        words.append(text)
+      case {"type": "text"}:
+        # TODO: Says a text block is in an unrecognized form (its
+        # text is missing or not a string) — the format seems to have
+        # changed and claude_reply_blocks needs updating.
+        raise UserError(
+          f"{LATIN_PREFIX}\n"
+          f"Membrum text in forma ignota: {path}:{line_number}\n"
+          "Forma mutata videtur; claude_reply_blocks renovandum est."
+        )
+      case {
+        "type": "tool_use",
+        "name": "SendUserMessage" | "Brief",
+        "input": {"message": str() as text, **rest},
+      } if rest == {}:
+        words.append(text)
+      case {"type": "tool_use", "name": "SendUserMessage" | "Brief" as name}:
+        # TODO: Says a SendUserMessage tool call (named as the record
+        # names it: SendUserMessage, or its legacy name Brief) is in
+        # an unrecognized form (its input is not exactly one message
+        # text) — the format seems to have changed and
         # claude_reply_blocks needs updating.
         raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Contentum responsi in forma ignota: {path}:{line_number}\n"
-            "Forma mutata videtur; claude_reply_blocks renovandum est."
+          f"{LATIN_PREFIX}\n"
+          f"Vocatio {name} in forma ignota: {path}:{line_number}\n"
+          "Forma mutata videtur; claude_reply_blocks renovandum est."
         )
-    words: list[str] = []
-    for item in content:
-        match item:
-            case {"type": "text", "text": str() as text}:
-                words.append(text)
-            case {"type": "text"}:
-                # TODO: Says a text block is in an unrecognized form (its
-                # text is missing or not a string) — the format seems to have
-                # changed and claude_reply_blocks needs updating.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"Membrum text in forma ignota: {path}:{line_number}\n"
-                    "Forma mutata videtur; claude_reply_blocks renovandum est."
-                )
-            case {
-                "type": "tool_use",
-                "name": "SendUserMessage" | "Brief",
-                "input": {"message": str() as text, **rest},
-            } if rest == {}:
-                words.append(text)
-            case {"type": "tool_use", "name": "SendUserMessage" | "Brief" as name}:
-                # TODO: Says a SendUserMessage tool call (named as the record
-                # names it: SendUserMessage, or its legacy name Brief) is in
-                # an unrecognized form (its input is not exactly one message
-                # text) — the format seems to have changed and
-                # claude_reply_blocks needs updating.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"Vocatio {name} in forma ignota: {path}:{line_number}\n"
-                    "Forma mutata videtur; claude_reply_blocks renovandum est."
-                )
-            case {"type": str() as kind} if kind in CLAUDE_MUTE_BLOCKS:
-                pass  # no words for the human
-            case _:
-                # TODO: Says an assistant block is of a type no store had
-                # shown, and may hold words for the human: the format seems
-                # to have changed, so claude_reply_blocks needs updating.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"Membrum responsi generis ignoti: {path}:{line_number}\n"
-                    "Forma mutata videtur; claude_reply_blocks renovandum est."
-                )
-    return [text for text in words if text != ""]
+      case {"type": str() as kind} if kind in CLAUDE_MUTE_BLOCKS:
+        pass  # no words for the human
+      case _:
+        # TODO: Says an assistant block is of a type no store had
+        # shown, and may hold words for the human: the format seems
+        # to have changed, so claude_reply_blocks needs updating.
+        raise UserError(
+          f"{LATIN_PREFIX}\n"
+          f"Membrum responsi generis ignoti: {path}:{line_number}\n"
+          "Forma mutata videtur; claude_reply_blocks renovandum est."
+        )
+  return [text for text in words if text != ""]
 
 
 def claude_images(content: Any, path: Path, line_number: int) -> tuple[str, ...]:
-    if not isinstance(content, list):
-        return ()
-    uris: list[str] = []
-    for item in content:
-        if isinstance(item, dict) and item.get("type") == "image":
-            source = item.get("source")
-            source = source if isinstance(source, dict) else {}
-            media = source.get("media_type")
-            data = source.get("data")
-            if source.get("type") != "base64" or not isinstance(media, str) or not isinstance(data, str):
-                # TODO: Says a pasted image is stored in an unrecognized form.
-                raise UserError(f"{LATIN_PREFIX}\n" f"Imago in forma ignota: {path}:{line_number}")
-            uris.append(f"data:{media};base64,{data}")
-    return tuple(uris)
+  if not isinstance(content, list):
+    return ()
+  uris: list[str] = []
+  for item in content:
+    if isinstance(item, dict) and item.get("type") == "image":
+      source = item.get("source")
+      source = source if isinstance(source, dict) else {}
+      media = source.get("media_type")
+      data = source.get("data")
+      if source.get("type") != "base64" or not isinstance(media, str) or not isinstance(data, str):
+        # TODO: Says a pasted image is stored in an unrecognized form.
+        raise UserError(f"{LATIN_PREFIX}\n" f"Imago in forma ignota: {path}:{line_number}")
+      uris.append(f"data:{media};base64,{data}")
+  return tuple(uris)
 
 
 def claude_tally(record: Mapping[str, Any], repo: Path, path: Path, line_number: int) -> tuple[int, int]:
-    """Tally the repo lines this record's tool result changed: edits and
-    overwrites carry structuredPatch hunks, file creations carry the whole
-    new content. Files outside the repo don't count, and neither do denied
-    edits (their toolUseResult is the denial string, and nothing was
-    written)."""
-    result = record.get("toolUseResult")
-    if not isinstance(result, dict) or not under_dir(result.get("filePath"), repo, path):
-        return (0, 0)
-    hunks = result.get("structuredPatch") or []
-    lines = [line for hunk in hunks for line in hunk.get("lines") or []]
-    if lines:
-        return diff_tally(lines)
-    if result.get("type") == "create":
-        content = result.get("content")
-        if not isinstance(content, str):
-            # TODO: Says a file-creation result has no content text — the
-            # format seems to have changed and claude_tally needs updating.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"Fructus creationis sine textu: {path}:{line_number}\n"
-                "Forma mutata videtur; claude_tally renovandum est."
-            )
-        return (len(content.splitlines()), 0)
+  """Tally the repo lines this record's tool result changed: edits and
+  overwrites carry structuredPatch hunks, file creations carry the whole
+  new content. Files outside the repo don't count, and neither do denied
+  edits (their toolUseResult is the denial string, and nothing was
+  written)."""
+  result = record.get("toolUseResult")
+  if not isinstance(result, dict) or not under_dir(result.get("filePath"), repo, path):
     return (0, 0)
+  hunks = result.get("structuredPatch") or []
+  lines = [line for hunk in hunks for line in hunk.get("lines") or []]
+  if lines:
+    return diff_tally(lines)
+  if result.get("type") == "create":
+    content = result.get("content")
+    if not isinstance(content, str):
+      # TODO: Says a file-creation result has no content text — the
+      # format seems to have changed and claude_tally needs updating.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Fructus creationis sine textu: {path}:{line_number}\n"
+        "Forma mutata videtur; claude_tally renovandum est."
+      )
+    return (len(content.splitlines()), 0)
+  return (0, 0)
 
 
 def claude_tool_seconds(record: Mapping[str, Any]) -> float:
-    result = record.get("toolUseResult")
-    result = result if isinstance(result, dict) else {}
-    # WebFetch records durationMs, WebSearch durationSeconds, Agent (subagent
-    # runs) totalDurationMs; no other tool records any duration at all.
-    for key, scale in (("durationMs", 1000.0), ("durationSeconds", 1.0), ("totalDurationMs", 1000.0)):
-        value = result.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return value / scale
-    return 0.0
+  result = record.get("toolUseResult")
+  result = result if isinstance(result, dict) else {}
+  # WebFetch records durationMs, WebSearch durationSeconds, Agent (subagent
+  # runs) totalDurationMs; no other tool records any duration at all.
+  for key, scale in (("durationMs", 1000.0), ("durationSeconds", 1.0), ("totalDurationMs", 1000.0)):
+    value = result.get(key)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+      return value / scale
+  return 0.0
 
 
 def claude_record_known(record: Mapping[str, Any]) -> bool:
-    """Whether a record is of a type the stores show: an attachment of a
-    type they show, a custom-title in the shape they show, or another
-    record of a type in CLAUDE_RECORDS."""
-    match record:
-        case {"type": "attachment", "attachment": {"type": str() as kind}}:
-            return kind == "queued_command" or kind in CLAUDE_MUTE_ATTACHMENTS
-        case {"type": "attachment"}:
-            return False
-        case {"type": "custom-title", "customTitle": str(), "sessionId": str()}:
-            return True
-        case {"type": str() as kind}:
-            return kind in CLAUDE_RECORDS
-        case _:
-            return False
+  """Whether a record is of a type the stores show: an attachment of a
+  type they show, a custom-title in the shape they show, or another
+  record of a type in CLAUDE_RECORDS."""
+  match record:
+    case {"type": "attachment", "attachment": {"type": str() as kind}}:
+      return kind == "queued_command" or kind in CLAUDE_MUTE_ATTACHMENTS
+    case {"type": "attachment"}:
+      return False
+    case {"type": "custom-title", "customTitle": str(), "sessionId": str()}:
+      return True
+    case {"type": str() as kind}:
+      return kind in CLAUDE_RECORDS
+    case _:
+      return False
 
 
 def claude_exchanges(
-    path: Path,
-    repo: Path,
-    session_file: Callable[[str, Path, int, Any], None] = lambda session, path, line_number, timestamp: None,
-    session_seen: Callable[[str, bool], None] = lambda session, held: None,
+  path: Path,
+  repo: Path,
+  session_file: Callable[[str, Path, int, Any], None] = lambda session, path, line_number, timestamp: None,
+  session_seen: Callable[[str, bool], None] = lambda session, held: None,
 ) -> tuple[list[Exchange], set[Holding]]:
-    threads: dict[str, list[Message]] = {}
-    holdings: set[Holding] = set()
-    # Sessions holding a record read for the repo, and those of them holding
-    # a holding: what session_seen hears, once per session, at the end.
-    sessions_read: set[str] = set()
-    sessions_held: set[str] = set()
+  threads: dict[str, list[Message]] = {}
+  holdings: set[Holding] = set()
+  # Sessions holding a record read for the repo, and those of them holding
+  # a holding: what session_seen hears, once per session, at the end.
+  sessions_read: set[str] = set()
+  sessions_held: set[str] = set()
 
-    def hold(session: str, timestamp: dt.datetime) -> None:
-        holdings.add(("Claude Code", timestamp))
-        sessions_held.add(session)
+  def hold(session: str, timestamp: dt.datetime) -> None:
+    holdings.add(("Claude Code", timestamp))
+    sessions_held.add(session)
 
-    # The lines of records of types no store has shown (see CLAUDE_RECORDS),
-    # and whether one of them names the repo as its own cwd.
-    unseen: list[int] = []
-    unseen_inside = False
-    # Every tool call's tool, by call id, whatever the call's cwd, so each
-    # tool result is known by its tool (see CLAUDE_TOOLS); each session's
-    # latest AskUserQuestion call, which a late answer answers (see
-    # claude_late_answer); the file's last-prompt echoes, by line; and the
-    # prompts read, each send of them (see claude_sends) as claude_squash
-    # gives it, which every echo must be of (see claude_echo_read).
-    tools: dict[Any, Any] = {}
-    asked: dict[str, Mapping[str, Any]] = {}
-    echoes: list[tuple[int, Any]] = []
-    read: set[str] = set()
-    # Each session's last custom-title (see Exchange.title). Claude Code
-    # stamps the title anew through the session, with no time or cwd, so
-    # the last in the file is the session's own.
-    titles: dict[str, Any] = {}
-    # Agent working time, distinguished from waiting-for-human time by where
-    # a timestamp gap ends: a gap ending at an assistant record is generation;
-    # a gap ending at a tool_result hides both tool runtime and permission
-    # waits, so only a duration the store itself recorded is credited there,
-    # capped by the gap: a recorded run can overlap work the timeline already
-    # counted (parallel tool calls, background subagents collected late).
-    # `pending` accrues per session until the next emitted message.
-    previous: dict[str, dt.datetime] = {}
-    pending: dict[str, float] = {}
-    # Repo lines added and deleted since the last emitted message, credited
-    # to the next reply — or, when a new prompt arrives first, carried on
-    # that prompt and credited to the exchange it closes.
-    tallies: dict[str, tuple[int, int]] = {}
-    last_denial: dict[str, tuple[Any, str] | None] = {}
-    # A "redelivery" is a record that reaches the cwd check carrying a
-    # session and delivery key (see claude_delivery_key) that an earlier
-    # such record carried. Only a queued prompt's delivery key can repeat: a
-    # Claude-desktop cloud workspace that restarted delivered its
-    # already-delivered queued prompts again under the same source_uuids.
-    # Every record that reaches the cwd check enters `first_delivery`, which
-    # maps each (session, delivery key) to the line number of the first such
-    # record to carry it, whether that record is attributed to this repo
-    # (by cwd), and the origin kind it states (see claude_origin_kind). A
-    # redelivery attributed to this repo is refused right after that check,
-    # whatever its content, when its first delivery is not attributed to
-    # this repo, whatever either one's origin, since which page it belongs
-    # on is undecided; or when it states another origin kind than its first
-    # delivery, since which origin to believe is undecided. `delivered` maps
-    # each (session, delivery key) to the text and images of its first
-    # delivery among the user-role records attributed to this repo that are
-    # neither of machine origin nor local-command output, and only among
-    # those records is a redelivery recognized: the human typed each prompt
-    # once, so such a redelivery is no new prompt, and one carrying other
-    # text or images than the first is refused. A redelivery that is not
-    # refused states its first delivery's origin kind, so it is of machine
-    # origin exactly when its first delivery is: held as machine text like
-    # its first, or else judged against its first.
-    delivered: dict[tuple[str, str | int], tuple[str, tuple[str, ...]]] = {}
-    first_delivery: dict[tuple[str, str | int], tuple[int, bool, Any]] = {}
-    # Sessions whose most recently emitted message is a recovered slash
-    # command, mapped to that record's promptId, so a local-command-stdout
-    # record can find and unsend its paired command.
-    command_prompt: dict[str, Any] = {}
-    for line_number, record in read_jsonl(path):
-        role = record.get("type")
-        if not claude_record_known(record):
-            unseen.append(line_number)
-            unseen_inside = unseen_inside or under_dir(record.get("cwd"), repo, path)
-        # A message typed while the agent was mid-turn is recorded not as a
-        # user record but as a queued_command attachment; other attachment
-        # kinds (todo reminders, file-edit notices, ...) are machine chatter.
-        attachment = record.get("attachment") if role == "attachment" else None
-        if attachment is not None:
-            attachment = attachment if isinstance(attachment, dict) else {}
-            if attachment.get("type") != "queued_command":
-                continue
-        elif role == "last-prompt":
-            echoes.append((line_number, record.get("lastPrompt")))
-            continue
-        elif role == "custom-title":
-            titles[str(record.get("sessionId") or path.stem)] = record.get("customTitle")
-            continue
-        elif role not in {"user", "assistant"}:
-            continue
-        # Subagent traffic, meta records, compaction summaries, and
-        # transcript-only notes are never the human's words, whatever form
-        # they take (a coordinating agent's message queued to its subagent
-        # states no commandMode); one stating a human origin, or holding
-        # words or clicks the human gave (a reason typed for rejecting a
-        # subagent's tool call, an answer to a subagent's question), is
-        # refused: which page and exchange should show them is undecided.
-        if any(record.get(flag) for flag in CLAUDE_SKIP_FLAGS):
-            if claude_flagged_human(record, attachment, path, line_number):
-                # TODO: Says this record is flagged as machine traffic
-                # (subagent traffic, a meta record, a compaction summary, or a
-                # transcript-only note) yet states a human origin or holds
-                # words or clicks the human gave, so where it belongs is
-                # undecided: claude_exchanges needs updating.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"Recordum ut machinae signatum verba vel originem hominis fert: {path}:{line_number}\n"
-                    "Ubi ponendum sit incertum est; claude_exchanges renovandum est."
-                )
-            continue
-        if attachment is not None:
-            mode = attachment.get("commandMode")
-            if mode == "task-notification":
-                continue  # background-task wakeup queued as a command
-            if mode != "prompt":
-                # TODO: Says a queued command has an unrecognized mode and to
-                # add it deliberately in claude_exchanges.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"Modus queued_command ignotus: {mode!r} in {path}:{line_number}\n"
-                    "Adde hunc modum consulto in claude_exchanges."
-                )
-            role = "user"
-        message = record.get("message")
-        if attachment is None and not isinstance(message, dict):
-            # TODO: Says this record has no message object.
-            raise UserError(f"{LATIN_PREFIX}\n" f"Recordum message obiectum non habet: {path}:{line_number}")
-        session = str(record.get("sessionId") or path.stem)
-        # Every record read into a session registers its session's file,
-        # whatever its cwd: everything below keeps a session's state within
-        # one file, and collect() refuses a session registered from two
-        # files. Read alone, a file's registrations go unheard.
-        session_file(session, path, line_number, record.get("timestamp"))
-        # Every tool call registers, whatever its cwd: a command that cds
-        # into the repo moves the session there, so a call made outside can
-        # have its result, or a late answer to its question, land inside.
-        for call in claude_calls(record):
-            tools[call.get("id")] = call.get("name")
-            if call.get("name") == "AskUserQuestion":
-                asked[session] = call
-        delivery = (session, claude_delivery_key(attachment, path, line_number))
-        # The fields that say who sent the record: a queued prompt's
-        # attachment, or the record itself.
-        typed_source = attachment if attachment is not None else record
-        kind = claude_origin_kind(typed_source)
-        if not isinstance(record.get("cwd"), str):
-            # TODO: Says this record names no working directory, by which
-            # sourcery tells which project's page each record belongs on, so
-            # it cannot be attributed: the format seems to have changed, so
-            # claude_exchanges needs updating.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"Recordum sine cwd, cuius pagina incerta est: {path}:{line_number}\n"
-                "Forma transcripti Claude mutata videtur; claude_exchanges renovandum est."
-            )
-        inside = under_dir(record.get("cwd"), repo, path)
-        first_line, first_inside, first_kind = first_delivery.setdefault(delivery, (line_number, inside, kind))
-        if not inside:
-            continue
-        sessions_read.add(session)
-        if not first_inside:
-            # TODO: Says a record was delivered again with its cwd inside
-            # this project after its first delivery, in the same file and
-            # session, had its cwd outside it, whatever the record's origin
-            # (the human's, another agent's, a background task's, or none
-            # stated) and whatever it carries (words, images, harness text,
-            # or nothing), citing the first delivery and then this one, so
-            # which page should show the record is undecided and
-            # claude_exchanges needs updating.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                "Recordum primum extra inceptum, deinde intra traditum est, quacumque origine, quidquid fert:\n"
-                f"  {path}:{first_line}\n  {path}:{line_number}\n"
-                "Ad quam paginam recordum pertineat nondum decretum est; claude_exchanges renovandum est."
-            )
-        if kind != first_kind:
-            # TODO: Says a record was delivered again inside this project,
-            # in the same file and session as its first delivery, stating
-            # another origin kind than its first delivery did (the human's,
-            # another agent's, a background task's, or none), naming both
-            # kinds and citing the first delivery and then this one;
-            # sourcery does not decide which origin to believe, so the case
-            # is to be examined and claude_exchanges updated.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"Recordum iterum traditum aliam originem fert quam primum: {first_kind!r}, deinde {kind!r}:\n"
-                f"  {path}:{first_line}\n  {path}:{line_number}\n"
-                "Utri originae credendum sit sourcery non decernit: casus inspiciendus, "
-                "claude_exchanges renovandum est."
-            )
-        if "timestamp" not in record:
-            # TODO: Says this record has no timestamp.
-            raise UserError(f"{LATIN_PREFIX}\n" f"Tempus deest in recordo: {path}:{line_number}")
-        timestamp = parse_time(record["timestamp"])
-        prior = previous.get(session, timestamp)
-        gap = (timestamp - prior).total_seconds()
-        previous[session] = max(prior, timestamp)
-        if role == "assistant":
-            model = message.get("model") if isinstance(message.get("model"), str) else ""
-            if model == "<synthetic>":
-                continue  # harness notice (auth/API errors), not model output
-            last_denial.pop(session, None)
-            pending[session] = pending.get(session, 0.0) + max(gap, 0.0)
-        else:
-            pending[session] = pending.get(session, 0.0) + min(
-                max(gap, 0.0), claude_tool_seconds(record)
-            )
-            added, deleted = tallies.get(session, (0, 0))
-            grew = claude_tally(record, repo, path, line_number)
-            tallies[session] = (added + grew[0], deleted + grew[1])
-        is_command = False
-        if role == "user":
-            content = attachment.get("prompt") if attachment is not None else message.get("content")
-            if attachment is None and isinstance(content, str) and content.startswith(
-                "<local-command-stdout>"
-            ):
-                if not CLAUDE_LOCAL_STDOUT.fullmatch(content):
-                    # TODO: Says a local-command-stdout wrapper is malformed
-                    # and the Claude transcript format should be inspected.
-                    raise UserError(
-                        f"{LATIN_PREFIX}\n"
-                        f"Involucrum local-command-stdout malformatum: {path}:{line_number}\n"
-                        "Forma transcripti Claude inspicienda est."
-                    )
-                if session not in command_prompt or command_prompt[session] != record.get(
-                    "promptId"
-                ):
-                    # TODO: Says captured local-command output appeared without
-                    # the slash command it answers and the Claude transcript
-                    # format should be inspected.
-                    raise UserError(
-                        f"{LATIN_PREFIX}\n"
-                        f"Effluxus imperii localis sine imperio compari: {path}:{line_number}\n"
-                        "Forma transcripti Claude inspicienda est."
-                    )
-                # Unsend the command: give back the work time and edits it
-                # absorbed so they ride the next real prompt instead.
-                unsent = threads[session].pop()
-                pending[session] = pending.get(session, 0.0) + unsent.active
-                added, deleted = tallies.get(session, (0, 0))
-                tallies[session] = (added + unsent.added, deleted + unsent.deleted)
-                command_prompt.pop(session, None)
-                hold(session, timestamp)
-                continue
-            if claude_origin_is_machine(typed_source, path, line_number):
-                hold(session, timestamp)
-                continue
-            text = claude_prompt(content, path, line_number)
-            # These two prefixes are harness-serialized or claude_prompt has
-            # already crashed, so typed text can never be marked unsendable.
-            is_command = isinstance(content, str) and content.startswith(
-                ("<command-message>", "<command-name>")
-            )
-            ballots: tuple[Ballot, ...] = ()
-            denial_key = None
-            if text == "" and attachment is None:
-                text, ballots = claude_recovered(record, path, line_number)
-                denial_key = claude_denial_key(record, text)
-            if not all(
-                claude_tool_known(tools.get(item["tool_use_id"]))
-                for item in (content if attachment is None and isinstance(content, list) else [])
-                if item["type"] == "tool_result"
-            ):
-                # TODO: Says a tool result read for the project is of a tool
-                # no store had shown, or answers a call the file does not
-                # hold (no store shows one), so its tool is unknown, and a new
-                # tool might ask the human for words: claude_exchanges needs
-                # updating.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"Fructus instrumenti ignoti, fortasse verba hominis tenens: {path}:{line_number}\n"
-                    "Instrumentum novum aut vocatio absens; claude_exchanges renovandum est."
-                )
-            read.update(claude_squash(send) for send in claude_sends(record, content, text, path, line_number))
-            # A late answer's words are the harness's (its last-prompt echo
-            # echoes them, so they count as read); the human's act is the
-            # answer they carry.
-            if typed_source.get("turnOrigin") == CLAUDE_SDK_TURN:
-                text, ballots = claude_late_answer(text, asked.get(session), path, line_number)
-            images = claude_images(content, path, line_number)
-            # Compare and record every delivery before the checks below
-            # decide whether it is a prompt, so a redelivery is refused or
-            # recognized whatever either delivery carries. The get() yields
-            # the text and images `delivered` holds for this key, or this
-            # one's own if it holds none.
-            if delivered.get(delivery, (text, images)) != (text, images):
-                # TODO: Says a queued prompt delivered again carries other
-                # words or images than its first delivery under the same
-                # source_uuid — the format seems to have changed and
-                # claude_exchanges needs updating.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"Rogatio iterum tradita aliud fert quam prima: {path}:{line_number}\n"
-                    "Forma mutata videtur; claude_exchanges renovandum est."
-                )
-            redelivery = delivery in delivered
-            delivered[delivery] = (text, images)
-            if CLAUDE_CANNED.fullmatch(text):
-                hold(session, timestamp)
-                continue
-            if text == "" and images == () and not any(b.picked for b in ballots):
-                continue  # tool plumbing with no typing: never rendered, so no holding
-            hold(session, timestamp)
-            # A redelivery stays held, so a ledger's stale copy of it gets
-            # purged, but is no new prompt: the work pending around it rides
-            # the exchange in flight.
-            if redelivery:
-                continue
-            # One typed act can fan out across several records (a denial
-            # reason stamped onto each rejected parallel tool call), so a
-            # repeat of the pending unanswered prompt is not a new prompt.
-            if denial_key is not None and denial_key == last_denial.get(session):
-                continue
-            last_denial[session] = denial_key
-            added, deleted = tallies.pop(session, (0, 0))
-            item = Message(role, timestamp, text, images=images, ballots=ballots,
-                           active=pending.pop(session, 0.0), added=added, deleted=deleted)
-        else:
-            text = "\n\n".join(claude_reply_blocks(message.get("content"), path, line_number))
-            if text == "":
-                continue
-            effort = record.get("effort") if isinstance(record.get("effort"), str) else ""
-            added, deleted = tallies.pop(session, (0, 0))
-            item = Message(
-                role, timestamp, text, model, effort,
-                active=pending.pop(session, 0.0), added=added, deleted=deleted,
-            )
-        threads.setdefault(session, []).append(item)
-        if is_command:
-            command_prompt[session] = record.get("promptId")
-        else:
-            command_prompt.pop(session, None)
-    if unseen and (sessions_read or unseen_inside):
-        # TODO: Says this record, in a Claude transcript holding records
-        # read for the project, is of a type no store had shown, and may hold
-        # the human's words: the format seems to have changed, so
+  # The lines of records of types no store has shown (see CLAUDE_RECORDS),
+  # and whether one of them names the repo as its own cwd.
+  unseen: list[int] = []
+  unseen_inside = False
+  # Every tool call's tool, by call id, whatever the call's cwd, so each
+  # tool result is known by its tool (see CLAUDE_TOOLS); each session's
+  # latest AskUserQuestion call, which a late answer answers (see
+  # claude_late_answer); the file's last-prompt echoes, by line; and the
+  # echoables of the prompts read (see claude_echoables), as claude_squash
+  # gives them, which every echo must be of (see claude_echo_read).
+  tools: dict[Any, Any] = {}
+  asked: dict[str, Mapping[str, Any]] = {}
+  echoes: list[tuple[int, Any]] = []
+  read: set[str] = set()
+  # Each session's last custom-title (see Exchange.title). Claude Code
+  # stamps the title anew through the session, with no time or cwd, so
+  # the last in the file is the session's own.
+  titles: dict[str, Any] = {}
+  # Agent working time, distinguished from waiting-for-human time by where
+  # a timestamp gap ends: a gap ending at an assistant record is generation;
+  # a gap ending at a tool_result hides both tool runtime and permission
+  # waits, so only a duration the store itself recorded is credited there,
+  # capped by the gap: a recorded run can overlap work the timeline already
+  # counted (parallel tool calls, background subagents collected late).
+  # `pending` accrues per session until the next emitted message.
+  previous: dict[str, dt.datetime] = {}
+  pending: dict[str, float] = {}
+  # Repo lines added and deleted since the last emitted message, credited
+  # to the next reply — or, when a new prompt arrives first, carried on
+  # that prompt and credited to the exchange it closes.
+  tallies: dict[str, tuple[int, int]] = {}
+  last_denial: dict[str, tuple[Any, str] | None] = {}
+  # A "redelivery" is a record that reaches the cwd check carrying a
+  # session and delivery key (see claude_delivery_key) that an earlier
+  # such record carried. Only a queued prompt's delivery key can repeat: a
+  # Claude-desktop cloud workspace that restarted delivered its
+  # already-delivered queued prompts again under the same source_uuids.
+  # Every record that reaches the cwd check enters `first_delivery`, which
+  # maps each (session, delivery key) to the line number of the first such
+  # record to carry it, whether that record is attributed to this repo
+  # (by cwd), and the origin kind it states (see claude_origin_kind). A
+  # redelivery attributed to this repo is refused right after that check,
+  # whatever its content, when its first delivery is not attributed to
+  # this repo, whatever either one's origin, since which page it belongs
+  # on is undecided; or when it states another origin kind than its first
+  # delivery, since which origin to believe is undecided. `delivered` maps
+  # each (session, delivery key) to the text and images of its first
+  # delivery among the user-role records attributed to this repo that are
+  # neither of machine origin nor local-command output, and only among
+  # those records is a redelivery recognized: the human typed each prompt
+  # once, so such a redelivery is no new prompt, and one carrying other
+  # text or images than the first is refused. A redelivery that is not
+  # refused states its first delivery's origin kind, so it is of machine
+  # origin exactly when its first delivery is: held as machine text like
+  # its first, or else judged against its first.
+  delivered: dict[tuple[str, str | int], tuple[str, tuple[str, ...]]] = {}
+  first_delivery: dict[tuple[str, str | int], tuple[int, bool, Any]] = {}
+  # Sessions whose most recently emitted message is a recovered slash
+  # command, mapped to that record's promptId, so a local-command-stdout
+  # record can find and unsend its paired command.
+  command_prompt: dict[str, Any] = {}
+  for line_number, record in read_jsonl(path):
+    role = record.get("type")
+    if not claude_record_known(record):
+      unseen.append(line_number)
+      unseen_inside = unseen_inside or under_dir(record.get("cwd"), repo, path)
+    # A message typed while the agent was mid-turn is recorded not as a
+    # user record but as a queued_command attachment; other attachment
+    # kinds (todo reminders, file-edit notices, ...) are machine chatter.
+    attachment = record.get("attachment") if role == "attachment" else None
+    if attachment is not None:
+      attachment = attachment if isinstance(attachment, dict) else {}
+      if attachment.get("type") != "queued_command":
+        continue
+    elif role == "last-prompt":
+      echoes.append((line_number, record.get("lastPrompt")))
+      continue
+    elif role == "custom-title":
+      titles[str(record.get("sessionId") or path.stem)] = record.get("customTitle")
+      continue
+    elif role not in {"user", "assistant"}:
+      continue
+    # Subagent traffic, meta records, compaction summaries, and
+    # transcript-only notes are never the human's words, whatever form
+    # they take (a coordinating agent's message queued to its subagent
+    # states no commandMode); one stating a human origin, or holding
+    # words or clicks the human gave (a reason typed for rejecting a
+    # subagent's tool call, an answer to a subagent's question), is
+    # refused: which page and exchange should show them is undecided.
+    if any(record.get(flag) for flag in CLAUDE_SKIP_FLAGS):
+      if claude_flagged_human(record, attachment, path, line_number):
+        # TODO: Says this record is flagged as machine traffic
+        # (subagent traffic, a meta record, a compaction summary, or a
+        # transcript-only note) yet states a human origin or holds
+        # words or clicks the human gave, so where it belongs is
+        # undecided: claude_exchanges needs updating.
+        raise UserError(
+          f"{LATIN_PREFIX}\n"
+          f"Recordum ut machinae signatum verba vel originem hominis fert: {path}:{line_number}\n"
+          "Ubi ponendum sit incertum est; claude_exchanges renovandum est."
+        )
+      continue
+    if attachment is not None:
+      mode = attachment.get("commandMode")
+      if mode == "task-notification":
+        continue  # background-task wakeup queued as a command
+      if mode != "prompt":
+        # TODO: Says a queued command has an unrecognized mode and to
+        # add it deliberately in claude_exchanges.
+        raise UserError(
+          f"{LATIN_PREFIX}\n"
+          f"Modus queued_command ignotus: {mode!r} in {path}:{line_number}\n"
+          "Adde hunc modum consulto in claude_exchanges."
+        )
+      role = "user"
+    message = record.get("message")
+    if attachment is None and not isinstance(message, dict):
+      # TODO: Says this record has no message object.
+      raise UserError(f"{LATIN_PREFIX}\n" f"Recordum message obiectum non habet: {path}:{line_number}")
+    session = str(record.get("sessionId") or path.stem)
+    # Every record read into a session registers its session's file,
+    # whatever its cwd: everything below keeps a session's state within
+    # one file, and collect() refuses a session registered from two
+    # files. Read alone, a file's registrations go unheard.
+    session_file(session, path, line_number, record.get("timestamp"))
+    # Every tool call registers, whatever its cwd: a command that cds
+    # into the repo moves the session there, so a call made outside can
+    # have its result, or a late answer to its question, land inside.
+    for call in claude_calls(record):
+      tools[call.get("id")] = call.get("name")
+      if call.get("name") == "AskUserQuestion":
+        asked[session] = call
+    delivery = (session, claude_delivery_key(attachment, path, line_number))
+    # The fields that say who sent the record: a queued prompt's
+    # attachment, or the record itself.
+    typed_source = attachment if attachment is not None else record
+    kind = claude_origin_kind(typed_source)
+    if not isinstance(record.get("cwd"), str):
+      # TODO: Says this record names no working directory, by which
+      # sourcery tells which project's page each record belongs on, so
+      # it cannot be attributed: the format seems to have changed, so
+      # claude_exchanges needs updating.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Recordum sine cwd, cuius pagina incerta est: {path}:{line_number}\n"
+        "Forma transcripti Claude mutata videtur; claude_exchanges renovandum est."
+      )
+    inside = under_dir(record.get("cwd"), repo, path)
+    first_line, first_inside, first_kind = first_delivery.setdefault(delivery, (line_number, inside, kind))
+    if not inside:
+      continue
+    sessions_read.add(session)
+    if not first_inside:
+      # TODO: Says a record was delivered again with its cwd inside
+      # this project after its first delivery, in the same file and
+      # session, had its cwd outside it, whatever the record's origin
+      # (the human's, another agent's, a background task's, or none
+      # stated) and whatever it carries (words, images, harness text,
+      # or nothing), citing the first delivery and then this one, so
+      # which page should show the record is undecided and
+      # claude_exchanges needs updating.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        "Recordum primum extra inceptum, deinde intra traditum est, quacumque origine, quidquid fert:\n"
+        f"  {path}:{first_line}\n  {path}:{line_number}\n"
+        "Ad quam paginam recordum pertineat nondum decretum est; claude_exchanges renovandum est."
+      )
+    if kind != first_kind:
+      # TODO: Says a record was delivered again inside this project,
+      # in the same file and session as its first delivery, stating
+      # another origin kind than its first delivery did (the human's,
+      # another agent's, a background task's, or none), naming both
+      # kinds and citing the first delivery and then this one;
+      # sourcery does not decide which origin to believe, so the case
+      # is to be examined and claude_exchanges updated.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Recordum iterum traditum aliam originem fert quam primum: {first_kind!r}, deinde {kind!r}:\n"
+        f"  {path}:{first_line}\n  {path}:{line_number}\n"
+        "Utri originae credendum sit sourcery non decernit: casus inspiciendus, "
+        "claude_exchanges renovandum est."
+      )
+    if "timestamp" not in record:
+      # TODO: Says this record has no timestamp.
+      raise UserError(f"{LATIN_PREFIX}\n" f"Tempus deest in recordo: {path}:{line_number}")
+    timestamp = parse_time(record["timestamp"])
+    prior = previous.get(session, timestamp)
+    gap = (timestamp - prior).total_seconds()
+    previous[session] = max(prior, timestamp)
+    if role == "assistant":
+      model = message.get("model") if isinstance(message.get("model"), str) else ""
+      if model == "<synthetic>":
+        continue  # harness notice (auth/API errors), not model output
+      last_denial.pop(session, None)
+      pending[session] = pending.get(session, 0.0) + max(gap, 0.0)
+    else:
+      pending[session] = pending.get(session, 0.0) + min(
+        max(gap, 0.0), claude_tool_seconds(record)
+      )
+      added, deleted = tallies.get(session, (0, 0))
+      grew = claude_tally(record, repo, path, line_number)
+      tallies[session] = (added + grew[0], deleted + grew[1])
+    is_command = False
+    if role == "user":
+      content = attachment.get("prompt") if attachment is not None else message.get("content")
+      if attachment is None and isinstance(content, str) and content.startswith(
+        "<local-command-stdout>"
+      ):
+        if not CLAUDE_LOCAL_STDOUT.fullmatch(content):
+          # TODO: Says a local-command-stdout wrapper is malformed
+          # and the Claude transcript format should be inspected.
+          raise UserError(
+            f"{LATIN_PREFIX}\n"
+            f"Involucrum local-command-stdout malformatum: {path}:{line_number}\n"
+            "Forma transcripti Claude inspicienda est."
+          )
+        if session not in command_prompt or command_prompt[session] != record.get(
+          "promptId"
+        ):
+          # TODO: Says captured local-command output appeared without
+          # the slash command it answers and the Claude transcript
+          # format should be inspected.
+          raise UserError(
+            f"{LATIN_PREFIX}\n"
+            f"Effluxus imperii localis sine imperio compari: {path}:{line_number}\n"
+            "Forma transcripti Claude inspicienda est."
+          )
+        # Unsend the command: give back the work time and edits it
+        # absorbed so they ride the next real prompt instead.
+        unsent = threads[session].pop()
+        pending[session] = pending.get(session, 0.0) + unsent.active
+        added, deleted = tallies.get(session, (0, 0))
+        tallies[session] = (added + unsent.added, deleted + unsent.deleted)
+        command_prompt.pop(session, None)
+        hold(session, timestamp)
+        continue
+      if claude_origin_is_machine(typed_source, path, line_number):
+        hold(session, timestamp)
+        continue
+      text = claude_prompt(content, path, line_number)
+      # These two prefixes are harness-serialized or claude_prompt has
+      # already crashed, so typed text can never be marked unsendable.
+      is_command = isinstance(content, str) and content.startswith(
+        ("<command-message>", "<command-name>")
+      )
+      ballots: tuple[Ballot, ...] = ()
+      denial_key = None
+      if text == "" and attachment is None:
+        text, ballots = claude_recovered(record, path, line_number)
+        denial_key = claude_denial_key(record, text)
+      if not all(
+        claude_tool_known(tools.get(item["tool_use_id"]))
+        for item in (content if attachment is None and isinstance(content, list) else [])
+        if item["type"] == "tool_result"
+      ):
+        # TODO: Says a tool result read for the project is of a tool
+        # no store had shown, or answers a call the file does not
+        # hold (no store shows one), so its tool is unknown, and a new
+        # tool might ask the human for words: claude_exchanges needs
+        # updating.
+        raise UserError(
+          f"{LATIN_PREFIX}\n"
+          f"Fructus instrumenti ignoti, fortasse verba hominis tenens: {path}:{line_number}\n"
+          "Instrumentum novum aut vocatio absens; claude_exchanges renovandum est."
+        )
+      read.update(map(claude_squash, claude_echoables(record, content, text, path, line_number)))
+      # A late answer's words are the harness's (its last-prompt echo
+      # echoes them, so they count as read); the human's act is the
+      # answer they carry.
+      if typed_source.get("turnOrigin") == CLAUDE_SDK_TURN:
+        text, ballots = claude_late_answer(text, asked.get(session), path, line_number)
+      images = claude_images(content, path, line_number)
+      # Compare and record every delivery before the checks below
+      # decide whether it is a prompt, so a redelivery is refused or
+      # recognized whatever either delivery carries. The get() yields
+      # the text and images `delivered` holds for this key, or this
+      # one's own if it holds none.
+      if delivered.get(delivery, (text, images)) != (text, images):
+        # TODO: Says a queued prompt delivered again carries other
+        # words or images than its first delivery under the same
+        # source_uuid — the format seems to have changed and
         # claude_exchanges needs updating.
         raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Recordum Claude generis ignoti, fortasse verba hominis tenens: {path}:{unseen[0]}\n"
-            "Forma transcripti Claude mutata videtur; claude_exchanges renovandum est."
+          f"{LATIN_PREFIX}\n"
+          f"Rogatio iterum tradita aliud fert quam prima: {path}:{line_number}\n"
+          "Forma mutata videtur; claude_exchanges renovandum est."
         )
-    # Claude Code echoes each typed prompt in a last-prompt record; an echo
-    # of no prompt read means the human typed words sourcery did not read,
-    # even in a session it never read before.
-    unechoed = [line for line, echo in echoes if not claude_echo_read(echo, read)]
-    if unechoed and sessions_read:
-        # TODO: Says this echo of a typed prompt, in a Claude transcript
-        # holding records read for the project, is of no prompt sourcery read
-        # there: the human typed words sourcery does not read, so the format
-        # seems to have changed and claude_exchanges needs updating.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Imago rogationis nullam rogationem lectam reddit: {path}:{unechoed[0]}\n"
-            "Homo verba scripsit quae sourcery non legit; forma transcripti Claude mutata videtur, "
-            "claude_exchanges renovandum est."
-        )
-    for session in sessions_read:
-        session_seen(session, session in sessions_held)
-    return [
-        dataclasses.replace(exchange, title=titles.get(session, ""))
-        for session, messages in threads.items()
-        for exchange in paired(
-            "Claude Code",
-            session,
-            messages,
-            path,
-            (pending.get(session, 0.0), *tallies.get(session, (0, 0))),
-        )
-    ], holdings
+      redelivery = delivery in delivered
+      delivered[delivery] = (text, images)
+      if CLAUDE_CANNED.fullmatch(text):
+        hold(session, timestamp)
+        continue
+      if text == "" and images == () and not any(b.picked for b in ballots):
+        continue  # tool plumbing with no typing: never rendered, so no holding
+      hold(session, timestamp)
+      # A redelivery stays held, so a ledger's stale copy of it gets
+      # purged, but is no new prompt: the work pending around it rides
+      # the exchange in flight.
+      if redelivery:
+        continue
+      # One typed act can fan out across several records (a denial
+      # reason stamped onto each rejected parallel tool call), so a
+      # repeat of the pending unanswered prompt is not a new prompt.
+      if denial_key is not None and denial_key == last_denial.get(session):
+        continue
+      last_denial[session] = denial_key
+      added, deleted = tallies.pop(session, (0, 0))
+      item = Message(role, timestamp, text, images=images, ballots=ballots,
+                     active=pending.pop(session, 0.0), added=added, deleted=deleted)
+    else:
+      text = "\n\n".join(claude_reply_blocks(message.get("content"), path, line_number))
+      if text == "":
+        continue
+      effort = record.get("effort") if isinstance(record.get("effort"), str) else ""
+      added, deleted = tallies.pop(session, (0, 0))
+      item = Message(
+        role, timestamp, text, model, effort,
+        active=pending.pop(session, 0.0), added=added, deleted=deleted,
+      )
+    threads.setdefault(session, []).append(item)
+    if is_command:
+      command_prompt[session] = record.get("promptId")
+    else:
+      command_prompt.pop(session, None)
+  if unseen and (sessions_read or unseen_inside):
+    # TODO: Says this record, in a Claude transcript holding records
+    # read for the project, is of a type no store had shown, and may hold
+    # the human's words: the format seems to have changed, so
+    # claude_exchanges needs updating.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Recordum Claude generis ignoti, fortasse verba hominis tenens: {path}:{unseen[0]}\n"
+      "Forma transcripti Claude mutata videtur; claude_exchanges renovandum est."
+    )
+  # Claude Code echoes each typed prompt in a last-prompt record; an echo
+  # of no prompt read means the human typed words sourcery did not read,
+  # even in a session it never read before.
+  unechoed = [line for line, echo in echoes if not claude_echo_read(echo, read)]
+  if unechoed and sessions_read:
+    # TODO: Says this echo of a typed prompt, in a Claude transcript
+    # holding records read for the project, is of no prompt sourcery read
+    # there: the human typed words sourcery does not read, so the format
+    # seems to have changed and claude_exchanges needs updating.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Imago rogationis nullam rogationem lectam reddit: {path}:{unechoed[0]}\n"
+      "Homo verba scripsit quae sourcery non legit; forma transcripti Claude mutata videtur, "
+      "claude_exchanges renovandum est."
+    )
+  for session in sessions_read:
+    session_seen(session, session in sessions_held)
+  return [
+    dataclasses.replace(exchange, title=titles.get(session, ""))
+    for session, messages in threads.items()
+    for exchange in paired(
+      "Claude Code",
+      session,
+      messages,
+      path,
+      (pending.get(session, 0.0), *tallies.get(session, (0, 0))),
+    )
+  ], holdings
 
 
 # ---------------------------------------------------------------------- Codex
@@ -1568,13 +1570,13 @@ CODEX_CANNED_PREFIX = "The following is the Codex agent history"
 # plus the appended terminal output) is machine text; boundary newlines are
 # scaffold, not typing.
 TERMINAL_FIX_TEMPLATE = re.compile(
-    r"(?:^|\n)(?:Can you fix this error\?\n|I get the following error\. Please fix the error\.)"
+  r"(?:^|\n)(?:Can you fix this error\?\n|I get the following error\. Please fix the error\.)"
 )
 
 
 def cut_canned_tail(prompt: str) -> str:
-    match = TERMINAL_FIX_TEMPLATE.search(prompt)
-    return prompt[: match.start()].rstrip("\n") if match else prompt
+  match = TERMINAL_FIX_TEMPLATE.search(prompt)
+  return prompt[: match.start()].rstrip("\n") if match else prompt
 
 
 # Codex asks the human multiple-choice questions through a
@@ -1592,153 +1594,153 @@ Quiz = tuple[tuple[str, tuple[str, ...]], ...]
 
 
 def codex_quiz(arguments: Any, path: Path, line_number: int) -> Quiz:
-    try:
-        decoded = json.loads(arguments)
-    except (TypeError, json.JSONDecodeError):
-        decoded = None
-    match decoded:
-        case {"questions": list() as questions}:
-            pass
-        case _:
-            questions = [None]
-    quiz = []
-    for question in questions:
-        match question:
-            case {"title": str() as title, "options": list() as options} if all(
-                isinstance(option, str) for option in options
-            ):
-                quiz.append((title, tuple(options)))
-            case {"title": str() as title} if "options" not in question:
-                quiz.append((title, ()))
-            case _:
-                # TODO: Says a question Codex asked the human is in an
-                # unrecognized form and to update codex_quiz.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"Interrogatio Codex in forma ignota: {path}:{line_number}\n"
-                    "Forma mutata videtur; codex_quiz renovandum est."
-                )
-    return tuple(quiz)
+  try:
+    decoded = json.loads(arguments)
+  except (TypeError, json.JSONDecodeError):
+    decoded = None
+  match decoded:
+    case {"questions": list() as questions}:
+      pass
+    case _:
+      questions = [None]
+  quiz = []
+  for question in questions:
+    match question:
+      case {"title": str() as title, "options": list() as options} if all(
+        isinstance(option, str) for option in options
+      ):
+        quiz.append((title, tuple(options)))
+      case {"title": str() as title} if "options" not in question:
+        quiz.append((title, ()))
+      case _:
+        # TODO: Says a question Codex asked the human is in an
+        # unrecognized form and to update codex_quiz.
+        raise UserError(
+          f"{LATIN_PREFIX}\n"
+          f"Interrogatio Codex in forma ignota: {path}:{line_number}\n"
+          "Forma mutata videtur; codex_quiz renovandum est."
+        )
+  return tuple(quiz)
 
 
 def codex_answers(
-    message: str, quizzes: Mapping[str, Quiz], path: Path, line_number: int
+  message: str, quizzes: Mapping[str, Quiz], path: Path, line_number: int
 ) -> tuple[str, tuple[Ballot, ...]]:
-    """Return (typed, ballots) for a question reply, like claude_recovered:
-    an answer equal to one option label is a click; anything else is typing
-    and the ballot's picked set stays empty."""
-    # TODO: Says a reply to Codex's questions is in an unrecognized form or
-    # answers a question this transcript never asked, and to update
-    # codex_answers.
-    malformed = UserError(
-        f"{LATIN_PREFIX}\n"
-        f"Responsum interrogationis Codex in forma ignota: {path}:{line_number}\n"
-        "Forma mutata videtur; codex_answers renovandum est."
-    )
-    if not message.endswith(CODEX_REPLY_CLOSE):
-        raise malformed
-    try:
-        items = json.loads(message.removeprefix(CODEX_REPLY_OPEN).removesuffix(CODEX_REPLY_CLOSE))
-        if not isinstance(items, list):
-            raise malformed
-        typed: list[str] = []
-        ballots: list[Ballot] = []
-        for item in items:
-            match item:
-                case {"questionItemId": str() as item_id, "question": str() as asked, "answer": str() as answer}:
-                    pass
-                case _:
-                    raise malformed
-            match json.loads(item_id):
-                case [str() as tool, str() as call, int() as index] if (
-                    tool == CODEX_ASK_TOOL and 0 <= index < len(quizzes.get(call, ())) and quizzes[call][index][0] == asked
-                ):
-                    labels = quizzes[call][index][1]
-                case _:
-                    raise malformed
-            picked = (answer,) if answer in labels else ()
-            typed.extend(() if picked else (answer,))
-            ballots.append(Ballot(question=asked, options=labels, picked=picked))
-    except json.JSONDecodeError as exc:
-        raise malformed from exc
-    return "\n\n".join(typed), tuple(ballots)
+  """Return (typed, ballots) for a question reply, like claude_recovered:
+  an answer equal to one option label is a click; anything else is typing
+  and the ballot's picked set stays empty."""
+  # TODO: Says a reply to Codex's questions is in an unrecognized form or
+  # answers a question this transcript never asked, and to update
+  # codex_answers.
+  malformed = UserError(
+    f"{LATIN_PREFIX}\n"
+    f"Responsum interrogationis Codex in forma ignota: {path}:{line_number}\n"
+    "Forma mutata videtur; codex_answers renovandum est."
+  )
+  if not message.endswith(CODEX_REPLY_CLOSE):
+    raise malformed
+  try:
+    items = json.loads(message.removeprefix(CODEX_REPLY_OPEN).removesuffix(CODEX_REPLY_CLOSE))
+    if not isinstance(items, list):
+      raise malformed
+    typed: list[str] = []
+    ballots: list[Ballot] = []
+    for item in items:
+      match item:
+        case {"questionItemId": str() as item_id, "question": str() as asked, "answer": str() as answer}:
+          pass
+        case _:
+          raise malformed
+      match json.loads(item_id):
+        case [str() as tool, str() as call, int() as index] if (
+          tool == CODEX_ASK_TOOL and 0 <= index < len(quizzes.get(call, ())) and quizzes[call][index][0] == asked
+        ):
+          labels = quizzes[call][index][1]
+        case _:
+          raise malformed
+      picked = (answer,) if answer in labels else ()
+      typed.extend(() if picked else (answer,))
+      ballots.append(Ballot(question=asked, options=labels, picked=picked))
+  except json.JSONDecodeError as exc:
+    raise malformed from exc
+  return "\n\n".join(typed), tuple(ballots)
 
 
 def codex_prompt(
-    message: str, quizzes: Mapping[str, Quiz], path: Path, line_number: int
+  message: str, quizzes: Mapping[str, Quiz], path: Path, line_number: int
 ) -> tuple[str, tuple[Ballot, ...]]:
-    if message.startswith(CODEX_REPLY_OPEN):
-        return codex_answers(message, quizzes, path, line_number)
-    if not message.startswith(CODEX_WRAP_PREFIX):
-        return message, ()
-    _, found, request = message.partition(CODEX_REQUEST_HEADING)
-    if not found:
-        # TODO: Says an IDE context wrapper was found without its request
-        # heading — the Codex transcript format seems to have changed, so
-        # inspect the file.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Involucrum IDE sine rogatione inventum est: {path}\n"
-            "Forma transcripti Codex mutata videtur; fasciculum inspice."
-        )
-    return request.removesuffix("\n"), ()
+  if message.startswith(CODEX_REPLY_OPEN):
+    return codex_answers(message, quizzes, path, line_number)
+  if not message.startswith(CODEX_WRAP_PREFIX):
+    return message, ()
+  _, found, request = message.partition(CODEX_REQUEST_HEADING)
+  if not found:
+    # TODO: Says an IDE context wrapper was found without its request
+    # heading — the Codex transcript format seems to have changed, so
+    # inspect the file.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Involucrum IDE sine rogatione inventum est: {path}\n"
+      "Forma transcripti Codex mutata videtur; fasciculum inspice."
+    )
+  return request.removesuffix("\n"), ()
 
 
 def codex_include_session(payload: Mapping[str, Any], path: Path) -> bool:
-    source = payload.get("source")
-    originator = payload.get("originator")
-    match source:
-        case dict() if "subagent" in source:
-            return False  # machine-spawned subagent thread
-        case "exec" if originator == "codex_vscode":
-            return False  # machine side thread (UI titling and similar)
-        case "vscode" | "cli" | "exec" | None:
-            return True
-        case _:
-            # TODO: Says this Codex session has an unrecognized source marker
-            # and to add it deliberately in codex_include_session.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"Fons sessionis Codex ignotus: {source!r} in {path}\n"
-                "Adde hunc fontem consulto in codex_include_session."
-            )
+  source = payload.get("source")
+  originator = payload.get("originator")
+  match source:
+    case dict() if "subagent" in source:
+      return False  # machine-spawned subagent thread
+    case "exec" if originator == "codex_vscode":
+      return False  # machine side thread (UI titling and similar)
+    case "vscode" | "cli" | "exec" | None:
+      return True
+    case _:
+      # TODO: Says this Codex session has an unrecognized source marker
+      # and to add it deliberately in codex_include_session.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Fons sessionis Codex ignotus: {source!r} in {path}\n"
+        "Adde hunc fontem consulto in codex_include_session."
+      )
 
 
 # Codex stores pasted images as ready-made data: URIs.
 def codex_images(payload: Mapping[str, Any], path: Path, line_number: int) -> tuple[str, ...]:
-    images = payload.get("images") or []
-    for image in images:
-        if not (isinstance(image, str) and image.startswith("data:")):
-            # TODO: Says a pasted image is stored in an unrecognized form.
-            raise UserError(f"{LATIN_PREFIX}\n" f"Imago in forma ignota: {path}:{line_number}")
-    return tuple(images)
+  images = payload.get("images") or []
+  for image in images:
+    if not (isinstance(image, str) and image.startswith("data:")):
+      # TODO: Says a pasted image is stored in an unrecognized form.
+      raise UserError(f"{LATIN_PREFIX}\n" f"Imago in forma ignota: {path}:{line_number}")
+  return tuple(images)
 
 
 def codex_tally(change: Any, path: Path, line_number: int) -> tuple[int, int]:
-    """Tally one file's change in an applied patch: updates carry a unified
-    diff starting at its first hunk (a diff bearing +++/--- file headers
-    would miscount them as changes, so it falls through and fails loudly)
-    or an empty diff when the patch left the file unchanged, additions and
-    deletions the whole content."""
-    match change:
-        case {"type": "update", "unified_diff": str() as diff} if diff.startswith("@@"):
-            return diff_tally(diff.splitlines())
-        case {"type": "update", "unified_diff": ""}:
-            # A successfully applied patch can leave a file textually
-            # unchanged; nothing to count.
-            return (0, 0)
-        case {"type": "add", "content": str() as content}:
-            return (len(content.splitlines()), 0)
-        case {"type": "delete", "content": str() as content}:
-            return (0, len(content.splitlines()))
-        case _:
-            # TODO: Says a patch change is in an unrecognized form and to add
-            # it deliberately in codex_tally.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"Mutatio fasciculi in forma ignota: {path}:{line_number}\n"
-                "Adde hanc formam consulto in codex_tally."
-            )
+  """Tally one file's change in an applied patch: updates carry a unified
+  diff starting at its first hunk (a diff bearing +++/--- file headers
+  would miscount them as changes, so it falls through and fails loudly)
+  or an empty diff when the patch left the file unchanged, additions and
+  deletions the whole content."""
+  match change:
+    case {"type": "update", "unified_diff": str() as diff} if diff.startswith("@@"):
+      return diff_tally(diff.splitlines())
+    case {"type": "update", "unified_diff": ""}:
+      # A successfully applied patch can leave a file textually
+      # unchanged; nothing to count.
+      return (0, 0)
+    case {"type": "add", "content": str() as content}:
+      return (len(content.splitlines()), 0)
+    case {"type": "delete", "content": str() as content}:
+      return (0, len(content.splitlines()))
+    case _:
+      # TODO: Says a patch change is in an unrecognized form and to add
+      # it deliberately in codex_tally.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Mutatio fasciculi in forma ignota: {path}:{line_number}\n"
+        "Adde hanc formam consulto in codex_tally."
+      )
 
 
 # Payload kinds that mark the model actively producing output. A timestamp
@@ -1746,8 +1748,8 @@ def codex_tally(change: Any, path: Path, line_number: int) -> tuple[int, int]:
 # anywhere else hide tool runtime, system sleep, approval waits, or idle time
 # between turns (tool outputs, task_started, turn boundaries, user messages).
 CODEX_WORKING = frozenset({
-    "message", "reasoning", "function_call", "custom_tool_call", "web_search_call",
-    "agent_message", "agent_reasoning", "token_count", "task_complete",
+  "message", "reasoning", "function_call", "custom_tool_call", "web_search_call",
+  "agent_message", "agent_reasoning", "token_count", "task_complete",
 })
 
 # Codex rewrites each rollout some time after writing it (seen from 2026-09
@@ -1765,8 +1767,8 @@ CODEX_WORKING = frozenset({
 # runs, subagent and collaboration bookkeeping, search, image views, and
 # history compaction.
 CODEX_MUTE_ITEMS = frozenset({
-    "SubAgentActivity", "McpToolCall", "CommandExecution", "Extension", "WebSearch",
-    "ContextCompaction", "ImageView", "CollabAgentToolCall",
+  "SubAgentActivity", "McpToolCall", "CommandExecution", "Extension", "WebSearch",
+  "ContextCompaction", "ImageView", "CollabAgentToolCall",
 })
 
 # The record types, and the first form's event kinds, that the stores show,
@@ -1778,34 +1780,34 @@ CODEX_MUTE_ITEMS = frozenset({
 # hold the human's words. mcp_tool_call_end (from Codex 0.164, 2026-10-27)
 # is an MCP tool call's arguments and result, the first form's McpToolCall.
 CODEX_RECORDS = frozenset({
-    "session_meta", "turn_context", "response_item", "event_msg", "compacted", "world_state",
-    "token_usage_record", "inter_agent_communication_metadata",
+  "session_meta", "turn_context", "response_item", "event_msg", "compacted", "world_state",
+  "token_usage_record", "inter_agent_communication_metadata",
 })
 CODEX_EVENTS = frozenset({
-    "user_message", "agent_message", "agent_reasoning", "patch_apply_end", "item_completed",
-    "token_count", "task_started", "task_complete", "thread_settings_applied", "turn_aborted",
-    "sub_agent_activity", "web_search_end", "context_compacted", "mcp_tool_call_end",
+  "user_message", "agent_message", "agent_reasoning", "patch_apply_end", "item_completed",
+  "token_count", "task_started", "task_complete", "thread_settings_applied", "turn_aborted",
+  "sub_agent_activity", "web_search_end", "context_compacted", "mcp_tool_call_end",
 })
 # The response_item types the stores show (the model's input and output),
 # and the content pieces a message of each role holds. additional_tools
 # (from Codex 0.164, 2026-10-27) is the tool definitions offered to the
 # model, in the developer role.
 CODEX_RESPONSE_ITEMS = frozenset({
-    "message", "reasoning", "function_call", "function_call_output", "custom_tool_call",
-    "custom_tool_call_output", "agent_message", "web_search_call", "compaction", "tool_search_call",
-    "tool_search_output", "additional_tools",
+  "message", "reasoning", "function_call", "function_call_output", "custom_tool_call",
+  "custom_tool_call_output", "agent_message", "web_search_call", "compaction", "tool_search_call",
+  "tool_search_output", "additional_tools",
 })
 CODEX_MESSAGE_PIECES = {
-    "user": frozenset({"input_text", "input_image"}),
-    "developer": frozenset({"input_text"}),
-    "assistant": frozenset({"output_text"}),
+  "user": frozenset({"input_text", "input_image"}),
+  "developer": frozenset({"input_text"}),
+  "assistant": frozenset({"output_text"}),
 }
 # The notes Codex injects in the user role, by how each begins. Every other
 # user-role message the model receives is the model's copy of a prompt the
 # session records (see codex_heard).
 CODEX_INJECTIONS = (
-    "<environment_context>", "# AGENTS.md instructions", "<recommended_plugins>",
-    "<external_codex_apps_open_page>", "<turn_aborted>",
+  "<environment_context>", "# AGENTS.md instructions", "<recommended_plugins>",
+  "<external_codex_apps_open_page>", "<turn_aborted>",
 )
 # The note Codex injects in the user role each time it continues a thread
 # goal on its own (from Codex 0.164, 2026-11-10): the goal's objective,
@@ -1816,221 +1818,221 @@ CODEX_INJECTIONS = (
 # create_goal holds its objective so written (see codex_heard). A goal set
 # any other way may be the human's words.
 CODEX_GOAL_NOTE = re.compile(
-    r'<codex_internal_context source="goal">\n.*?\n<objective>\n(.*?)\n</objective>\n.*</codex_internal_context>',
-    re.DOTALL,
+  r'<codex_internal_context source="goal">\n.*?\n<objective>\n(.*?)\n</objective>\n.*</codex_internal_context>',
+  re.DOTALL,
 )
 CODEX_GOAL_CALL = "tools.create_goal("
 
 
 def codex_known(record_type: Any, payload: Mapping[str, Any]) -> bool:
-    """Whether a record is of a type, kind, and form the stores show (see
-    CODEX_RECORDS, CODEX_EVENTS, CODEX_RESPONSE_ITEMS)."""
-    match record_type, payload:
-        case "event_msg", _:
-            return payload.get("type") in CODEX_EVENTS
-        case "response_item", {"type": "message", "role": str() as role, "content": list() as pieces}:
-            return role in CODEX_MESSAGE_PIECES and all(
-                isinstance(piece, dict) and piece.get("type") in CODEX_MESSAGE_PIECES[role] for piece in pieces
-            )
-        case "response_item", {"type": "message"}:
-            return False
-        case "response_item", _:
-            return payload.get("type") in CODEX_RESPONSE_ITEMS
-        case _:
-            return record_type in CODEX_RECORDS
+  """Whether a record is of a type, kind, and form the stores show (see
+  CODEX_RECORDS, CODEX_EVENTS, CODEX_RESPONSE_ITEMS)."""
+  match record_type, payload:
+    case "event_msg", _:
+      return payload.get("type") in CODEX_EVENTS
+    case "response_item", {"type": "message", "role": str() as role, "content": list() as pieces}:
+      return role in CODEX_MESSAGE_PIECES and all(
+        isinstance(piece, dict) and piece.get("type") in CODEX_MESSAGE_PIECES[role] for piece in pieces
+      )
+    case "response_item", {"type": "message"}:
+      return False
+    case "response_item", _:
+      return payload.get("type") in CODEX_RESPONSE_ITEMS
+    case _:
+      return record_type in CODEX_RECORDS
 
 
 def codex_heard(said: str, prompted: Sequence[str], goal_scripts: Sequence[str]) -> bool:
-    """Whether a user-role message the model received is accounted for: a
-    note Codex injects, the model's copy of a prompt the session records
-    (the same words, the one holding the other), or a goal note whose
-    objective one of goal_scripts, the session's scripts calling
-    create_goal, holds as a string literal (see CODEX_GOAL_NOTE)."""
-    goal = CODEX_GOAL_NOTE.fullmatch(said)
-    return said.startswith(CODEX_INJECTIONS) or (
-        said != "" and any(said == prompt or prompt in said or said in prompt for prompt in prompted if prompt != "")
-    ) or (
-        goal is not None and any(json.dumps(goal[1], ensure_ascii=False) in script for script in goal_scripts)
-    )
+  """Whether a user-role message the model received is accounted for: a
+  note Codex injects, the model's copy of a prompt the session records
+  (the same words, the one holding the other), or a goal note whose
+  objective one of goal_scripts, the session's scripts calling
+  create_goal, holds as a string literal (see CODEX_GOAL_NOTE)."""
+  goal = CODEX_GOAL_NOTE.fullmatch(said)
+  return said.startswith(CODEX_INJECTIONS) or (
+    said != "" and any(said == prompt or prompt in said or said in prompt for prompt in prompted if prompt != "")
+  ) or (
+    goal is not None and any(json.dumps(goal[1], ensure_ascii=False) in script for script in goal_scripts)
+  )
 
 
 def codex_payload(record: Mapping[str, Any]) -> Mapping[str, Any]:
-    """A rollout record's payload in the first form: an item_completed event
-    becomes the event its item replaced, and one carrying a mute item stays
-    as it is. One carrying an item of another type, or an item sourcery
-    reads in a form no store has shown, becomes an event of no kind, which
-    codex_exchanges refuses in a session read for the repo."""
-    match record:
-        case {"type": "event_msg", "payload": {"type": "item_completed", "item": {
-            "type": "UserMessage",
-            "content": [{"type": "text", "text": str() as text, "text_elements": []}, *images],
-        }}} if all(
-            isinstance(image, dict) and image.get("type") == "image" and isinstance(image.get("image_url"), str)
-            for image in images
-        ):
-            return {"type": "user_message", "message": text, "images": [image["image_url"] for image in images]}
-        case {"type": "event_msg", "payload": {"type": "item_completed", "item": {
-            "type": "AgentMessage", "content": [{"type": "Text", "text": str() as text}],
-        }}}:
-            return {"type": "agent_message", "message": text}
-        case {"type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "Reasoning"}}}:
-            return {"type": "agent_reasoning"}
-        case {"type": "event_msg", "payload": {"type": "item_completed", "item": {
-            "type": "FileChange", "status": "completed", "changes": dict() as changes,
-        }}}:
-            return {"type": "patch_apply_end", "success": True, "changes": changes}
-        case {"type": "event_msg", "payload": {
-            "type": "item_completed", "item": {"type": str() as kind},
-        } as payload} if kind in CODEX_MUTE_ITEMS:
-            return payload
-        case {"type": "event_msg", "payload": {"type": "item_completed"}}:
-            return {"type": None}
-        case {"payload": dict() as payload}:
-            return payload
-        case _:
-            return {}
+  """A rollout record's payload in the first form: an item_completed event
+  becomes the event its item replaced, and one carrying a mute item stays
+  as it is. One carrying an item of another type, or an item sourcery
+  reads in a form no store has shown, becomes an event of no kind, which
+  codex_exchanges refuses in a session read for the repo."""
+  match record:
+    case {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+      "type": "UserMessage",
+      "content": [{"type": "text", "text": str() as text, "text_elements": []}, *images],
+    }}} if all(
+      isinstance(image, dict) and image.get("type") == "image" and isinstance(image.get("image_url"), str)
+      for image in images
+    ):
+      return {"type": "user_message", "message": text, "images": [image["image_url"] for image in images]}
+    case {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+      "type": "AgentMessage", "content": [{"type": "Text", "text": str() as text}],
+    }}}:
+      return {"type": "agent_message", "message": text}
+    case {"type": "event_msg", "payload": {"type": "item_completed", "item": {"type": "Reasoning"}}}:
+      return {"type": "agent_reasoning"}
+    case {"type": "event_msg", "payload": {"type": "item_completed", "item": {
+      "type": "FileChange", "status": "completed", "changes": dict() as changes,
+    }}}:
+      return {"type": "patch_apply_end", "success": True, "changes": changes}
+    case {"type": "event_msg", "payload": {
+      "type": "item_completed", "item": {"type": str() as kind},
+    } as payload} if kind in CODEX_MUTE_ITEMS:
+      return payload
+    case {"type": "event_msg", "payload": {"type": "item_completed"}}:
+      return {"type": None}
+    case {"payload": dict() as payload}:
+      return payload
+    case _:
+      return {}
 
 
 def codex_exchanges(
-    path: Path, repo: Path, session_seen: Callable[[str, bool], None] = lambda session, held: None
+  path: Path, repo: Path, session_seen: Callable[[str, bool], None] = lambda session, held: None
 ) -> tuple[list[Exchange], set[Holding]]:
-    session = path.stem
-    holdings: set[Holding] = set()
-    cwd: Any = ""
-    attributed = False  # whether the session's cwd was ever the repo's: session_seen hears of it then
-    model = ""
-    effort = ""
-    messages: list[Message] = []
-    previous: dt.datetime | None = None
-    pending = 0.0
-    tally = (0, 0)  # repo lines (added, deleted) since the last message
-    quizzes: dict[str, Quiz] = {}  # call_id -> questions asked of the human
-    # The words of every prompt event, and of every user-role message the
-    # model received, by line: each of the latter must be accounted for by
-    # the former, or be a note Codex injects, a goal note's objective one
-    # that a script of the model's calling create_goal holds (see
-    # codex_heard).
-    prompted: list[str] = []
-    heard: list[tuple[int, str]] = []
-    goal_scripts: list[str] = []
-    for line_number, record in read_jsonl(path):
-        payload = codex_payload(record)
-        record_type = record.get("type")
-        working = (
-            record_type in {"event_msg", "response_item"}
-            and payload.get("type") in CODEX_WORKING
-            and payload.get("role") in (None, "assistant")
-        )
-        if "timestamp" in record:
-            stamp = parse_time(record["timestamp"])
-            if previous is not None and working:
-                pending += max((stamp - previous).total_seconds(), 0.0)
-            previous = stamp
-        if not codex_known(record_type, payload) and under_dir(cwd, repo, path):
-            # TODO: Says this Codex record, at the file and line named, is of
-            # a type, kind, or form no store had shown, and may hold the
-            # human's words: the transcript format seems to have changed, so
-            # codex_exchanges needs updating.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"Recordum Codex generis vel formae ignotae, fortasse verba hominis tenens: {path}:{line_number}\n"
-                "Forma transcripti Codex mutata videtur; codex_exchanges renovandum est."
-            )
-        match record_type:
-            case "session_meta":
-                if not codex_include_session(payload, path):
-                    return [], set()  # nothing in an excluded thread is held for the repo
-                if not isinstance(payload.get("cwd"), str):
-                    # TODO: Says this Codex session names no working
-                    # directory, by which sourcery tells which project's
-                    # page a session belongs on, so it cannot be attributed:
-                    # the format seems to have changed, so codex_exchanges
-                    # needs updating.
-                    raise UserError(
-                        f"{LATIN_PREFIX}\n"
-                        f"Sessio Codex sine cwd, cuius pagina incerta est: {path}:{line_number}\n"
-                        "Forma transcripti Codex mutata videtur; codex_exchanges renovandum est."
-                    )
-                session = str(payload.get("id") or session)
-                cwd = payload.get("cwd") or cwd
-                attributed = attributed or under_dir(cwd, repo, path)
-            case "turn_context":
-                cwd = payload.get("cwd") or cwd
-                attributed = attributed or under_dir(cwd, repo, path)
-                model = payload.get("model") if isinstance(payload.get("model"), str) else model
-                effort = payload.get("effort") if isinstance(payload.get("effort"), str) else effort
-            case "response_item" if payload.get("type") == "function_call" and payload.get("name") == CODEX_ASK_TOOL:
-                quizzes[payload.get("call_id")] = codex_quiz(payload.get("arguments"), path, line_number)
-            case "response_item" if (
-                payload.get("type") == "custom_tool_call"
-                and isinstance(payload.get("input"), str)
-                and CODEX_GOAL_CALL in payload["input"]
-            ):
-                goal_scripts.append(payload["input"])
-            case "response_item" if payload.get("type") == "message" and payload.get("role") == "user":
-                heard.append((line_number, "".join(
-                    piece.get("text", "") for piece in payload.get("content") or []
-                    if isinstance(piece, dict) and piece.get("type") == "input_text"
-                )))
-            case "event_msg":
-                kind = payload.get("type")
-                # A patch that failed to apply changed nothing, so only a
-                # successful application is tallied.
-                if kind == "patch_apply_end" and payload.get("success"):
-                    for changed, change in (payload.get("changes") or {}).items():
-                        if under_dir(changed, repo, path):
-                            grew = codex_tally(change, path, line_number)
-                            tally = (tally[0] + grew[0], tally[1] + grew[1])
-                if kind not in {"user_message", "agent_message"}:
-                    continue
-                if kind == "user_message" and isinstance(payload.get("message"), str):
-                    prompted.append(payload["message"])
-                if not under_dir(cwd, repo, path):
-                    continue
-                text = payload.get("message")
-                if not isinstance(text, str):
-                    # TODO: Says this message record has no text.
-                    raise UserError(f"{LATIN_PREFIX}\n" f"Nuntius sine textu: {path}:{line_number}")
-                if "timestamp" not in record:
-                    # TODO: Says this record has no timestamp.
-                    raise UserError(f"{LATIN_PREFIX}\n" f"Tempus deest in recordo: {path}:{line_number}")
-                timestamp = parse_time(record["timestamp"])
-                if kind == "user_message":
-                    holdings.add(("Codex", timestamp))
-                    typed, ballots = codex_prompt(text, quizzes, path, line_number)
-                    prompt = cut_canned_tail(typed)
-                    images = codex_images(payload, path, line_number)
-                    if (prompt == "" and images == () and ballots == ()) or prompt.startswith(CODEX_CANNED_PREFIX):
-                        continue  # not an exchange boundary: the tally rides on
-                    messages.append(Message("user", timestamp, prompt, images=images, ballots=ballots,
-                                            active=pending, added=tally[0], deleted=tally[1]))
-                    pending = 0.0
-                    tally = (0, 0)
-                else:
-                    messages.append(
-                        Message("assistant", timestamp, text, model, effort,
-                                active=pending, added=tally[0], deleted=tally[1])
-                    )
-                    pending = 0.0
-                    tally = (0, 0)
-            case _:
-                continue
-    if attributed:
-        unheard = [line for line, said in heard if not codex_heard(said, prompted, goal_scripts)]
-        if unheard:
-            # TODO: Says the model in this Codex session, read for the
-            # project, received a user-role message (at the file and line
-            # named) that no prompt the session records accounts for and that
-            # is none of the notes Codex injects, so it may be the human's
-            # words in a form sourcery does not read: codex_exchanges needs
-            # updating.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"Nuntius quem exemplar ut ab homine accepit nullam rogationem in sessione habet: {path}:{unheard[0]}\n"
-                "Fortasse verba hominis in forma quam sourcery non legit; codex_exchanges renovandum est."
-            )
-        session_seen(session, holdings != set())
-    return paired("Codex", session, messages, path, (pending, *tally)), holdings
+  session = path.stem
+  holdings: set[Holding] = set()
+  cwd: Any = ""
+  attributed = False  # whether the session's cwd was ever the repo's: session_seen hears of it then
+  model = ""
+  effort = ""
+  messages: list[Message] = []
+  previous: dt.datetime | None = None
+  pending = 0.0
+  tally = (0, 0)  # repo lines (added, deleted) since the last message
+  quizzes: dict[str, Quiz] = {}  # call_id -> questions asked of the human
+  # The words of every prompt event, and of every user-role message the
+  # model received, by line: each of the latter must be accounted for by
+  # the former, or be a note Codex injects, a goal note's objective one
+  # that a script of the model's calling create_goal holds (see
+  # codex_heard).
+  prompted: list[str] = []
+  heard: list[tuple[int, str]] = []
+  goal_scripts: list[str] = []
+  for line_number, record in read_jsonl(path):
+    payload = codex_payload(record)
+    record_type = record.get("type")
+    working = (
+      record_type in {"event_msg", "response_item"}
+      and payload.get("type") in CODEX_WORKING
+      and payload.get("role") in (None, "assistant")
+    )
+    if "timestamp" in record:
+      stamp = parse_time(record["timestamp"])
+      if previous is not None and working:
+        pending += max((stamp - previous).total_seconds(), 0.0)
+      previous = stamp
+    if not codex_known(record_type, payload) and under_dir(cwd, repo, path):
+      # TODO: Says this Codex record, at the file and line named, is of
+      # a type, kind, or form no store had shown, and may hold the
+      # human's words: the transcript format seems to have changed, so
+      # codex_exchanges needs updating.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Recordum Codex generis vel formae ignotae, fortasse verba hominis tenens: {path}:{line_number}\n"
+        "Forma transcripti Codex mutata videtur; codex_exchanges renovandum est."
+      )
+    match record_type:
+      case "session_meta":
+        if not codex_include_session(payload, path):
+          return [], set()  # nothing in an excluded thread is held for the repo
+        if not isinstance(payload.get("cwd"), str):
+          # TODO: Says this Codex session names no working
+          # directory, by which sourcery tells which project's
+          # page a session belongs on, so it cannot be attributed:
+          # the format seems to have changed, so codex_exchanges
+          # needs updating.
+          raise UserError(
+            f"{LATIN_PREFIX}\n"
+            f"Sessio Codex sine cwd, cuius pagina incerta est: {path}:{line_number}\n"
+            "Forma transcripti Codex mutata videtur; codex_exchanges renovandum est."
+          )
+        session = str(payload.get("id") or session)
+        cwd = payload.get("cwd") or cwd
+        attributed = attributed or under_dir(cwd, repo, path)
+      case "turn_context":
+        cwd = payload.get("cwd") or cwd
+        attributed = attributed or under_dir(cwd, repo, path)
+        model = payload.get("model") if isinstance(payload.get("model"), str) else model
+        effort = payload.get("effort") if isinstance(payload.get("effort"), str) else effort
+      case "response_item" if payload.get("type") == "function_call" and payload.get("name") == CODEX_ASK_TOOL:
+        quizzes[payload.get("call_id")] = codex_quiz(payload.get("arguments"), path, line_number)
+      case "response_item" if (
+        payload.get("type") == "custom_tool_call"
+        and isinstance(payload.get("input"), str)
+        and CODEX_GOAL_CALL in payload["input"]
+      ):
+        goal_scripts.append(payload["input"])
+      case "response_item" if payload.get("type") == "message" and payload.get("role") == "user":
+        heard.append((line_number, "".join(
+          piece.get("text", "") for piece in payload.get("content") or []
+          if isinstance(piece, dict) and piece.get("type") == "input_text"
+        )))
+      case "event_msg":
+        kind = payload.get("type")
+        # A patch that failed to apply changed nothing, so only a
+        # successful application is tallied.
+        if kind == "patch_apply_end" and payload.get("success"):
+          for changed, change in (payload.get("changes") or {}).items():
+            if under_dir(changed, repo, path):
+              grew = codex_tally(change, path, line_number)
+              tally = (tally[0] + grew[0], tally[1] + grew[1])
+        if kind not in {"user_message", "agent_message"}:
+          continue
+        if kind == "user_message" and isinstance(payload.get("message"), str):
+          prompted.append(payload["message"])
+        if not under_dir(cwd, repo, path):
+          continue
+        text = payload.get("message")
+        if not isinstance(text, str):
+          # TODO: Says this message record has no text.
+          raise UserError(f"{LATIN_PREFIX}\n" f"Nuntius sine textu: {path}:{line_number}")
+        if "timestamp" not in record:
+          # TODO: Says this record has no timestamp.
+          raise UserError(f"{LATIN_PREFIX}\n" f"Tempus deest in recordo: {path}:{line_number}")
+        timestamp = parse_time(record["timestamp"])
+        if kind == "user_message":
+          holdings.add(("Codex", timestamp))
+          typed, ballots = codex_prompt(text, quizzes, path, line_number)
+          prompt = cut_canned_tail(typed)
+          images = codex_images(payload, path, line_number)
+          if (prompt == "" and images == () and ballots == ()) or prompt.startswith(CODEX_CANNED_PREFIX):
+            continue  # not an exchange boundary: the tally rides on
+          messages.append(Message("user", timestamp, prompt, images=images, ballots=ballots,
+                                  active=pending, added=tally[0], deleted=tally[1]))
+          pending = 0.0
+          tally = (0, 0)
+        else:
+          messages.append(
+            Message("assistant", timestamp, text, model, effort,
+                    active=pending, added=tally[0], deleted=tally[1])
+          )
+          pending = 0.0
+          tally = (0, 0)
+      case _:
+        continue
+  if attributed:
+    unheard = [line for line, said in heard if not codex_heard(said, prompted, goal_scripts)]
+    if unheard:
+      # TODO: Says the model in this Codex session, read for the
+      # project, received a user-role message (at the file and line
+      # named) that no prompt the session records accounts for and that
+      # is none of the notes Codex injects, so it may be the human's
+      # words in a form sourcery does not read: codex_exchanges needs
+      # updating.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Nuntius quem exemplar ut ab homine accepit nullam rogationem in sessione habet: {path}:{unheard[0]}\n"
+        "Fortasse verba hominis in forma quam sourcery non legit; codex_exchanges renovandum est."
+      )
+    session_seen(session, holdings != set())
+  return paired("Codex", session, messages, path, (pending, *tally)), holdings
 
 
 # ------------------------------------------------------- VS Code Copilot Chat
@@ -2039,11 +2041,11 @@ def codex_exchanges(
 # bookkeeping, progress chrome, and hidden reasoning. Visible prose arrives
 # as kindless markdown chunks bearing a string "value".
 VSCODE_MUTE_KINDS = frozenset({
-    "thinking", "toolInvocationSerialized", "toolInvocation", "prepareToolInvocation",
-    "undoStop", "textEditGroup", "workspaceEdit", "codeblockUri", "mcpServersStarting",
-    "progressTaskSerialized", "progressTask", "progressMessage", "confirmation",
-    "elicitationSerialized", "elicitation", "warning", "markdownVuln", "command",
-    "treeData", "extensions", "hook", "systemNotification", "questionCarousel",
+  "thinking", "toolInvocationSerialized", "toolInvocation", "prepareToolInvocation",
+  "undoStop", "textEditGroup", "workspaceEdit", "codeblockUri", "mcpServersStarting",
+  "progressTaskSerialized", "progressTask", "progressMessage", "confirmation",
+  "elicitationSerialized", "elicitation", "warning", "markdownVuln", "command",
+  "treeData", "extensions", "hook", "systemNotification", "questionCarousel",
 })
 
 
@@ -2066,500 +2068,500 @@ COPILOT_VARIABLE_KINDS = frozenset({"promptFile", "file", "promptText", "tool", 
 # keys plus a mimeType. Newer sessions instead carry the whole payload
 # already encoded in a "$base64" field.
 def copilot_image_uri(variable: Mapping[str, Any], path: Path) -> str:
-    value = variable.get("value")
-    mime = variable.get("mimeType")
-    if not (isinstance(value, dict) and isinstance(mime, str)):
-        # TODO: Says a pasted image is stored in an unrecognized form.
-        raise UserError(f"{LATIN_PREFIX}\n" f"Imago in forma ignota: {path}")
-    try:
-        match value:
-            case {"$base64": encoded}:
-                data = base64.b64decode(encoded, validate=True)
-            case _:
-                data = bytes(value[str(i)] for i in range(len(value)))
-    except (KeyError, TypeError, ValueError) as exc:
-        # TODO: Says a pasted image is stored in an unrecognized form.
-        raise UserError(f"{LATIN_PREFIX}\n" f"Imago in forma ignota: {path}\n{exc}") from exc
-    return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+  value = variable.get("value")
+  mime = variable.get("mimeType")
+  if not (isinstance(value, dict) and isinstance(mime, str)):
+    # TODO: Says a pasted image is stored in an unrecognized form.
+    raise UserError(f"{LATIN_PREFIX}\n" f"Imago in forma ignota: {path}")
+  try:
+    match value:
+      case {"$base64": encoded}:
+        data = base64.b64decode(encoded, validate=True)
+      case _:
+        data = bytes(value[str(i)] for i in range(len(value)))
+  except (KeyError, TypeError, ValueError) as exc:
+    # TODO: Says a pasted image is stored in an unrecognized form.
+    raise UserError(f"{LATIN_PREFIX}\n" f"Imago in forma ignota: {path}\n{exc}") from exc
+  return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
 
 def copilot_part_held(part: Any, text: str) -> bool:
-    """Whether a part of a request's message is one whose words its
-    message.text holds, as the stores show them: a text part whose text it
-    contains, or a mention of an agent, a slash subcommand, or a prompt
-    file, which carries no text of its own (its words, an @-mention say,
-    are in message.text)."""
-    match part:
-        case {"kind": "text", "text": str() as words}:
-            return words in text
-        case {"kind": "agent" | "subcommand" | "prompt"}:
-            return True
-        case _:
-            return False
+  """Whether a part of a request's message is one whose words its
+  message.text holds, as the stores show them: a text part whose text it
+  contains, or a mention of an agent, a slash subcommand, or a prompt
+  file, which carries no text of its own (its words, an @-mention say,
+  are in message.text)."""
+  match part:
+    case {"kind": "text", "text": str() as words}:
+      return words in text
+    case {"kind": "agent" | "subcommand" | "prompt"}:
+      return True
+    case _:
+      return False
 
 
 def vscode_reference_name(item: Mapping[str, Any]) -> str:
-    reference = item.get("inlineReference")
-    reference = reference if isinstance(reference, dict) else {}
-    name = reference.get("name")
-    if isinstance(name, str):
-        return name
-    uri = reference.get("uri")
-    fs_path = uri.get("fsPath") if isinstance(uri, dict) else None
-    return Path(fs_path).name if isinstance(fs_path, str) else ""
+  reference = item.get("inlineReference")
+  reference = reference if isinstance(reference, dict) else {}
+  name = reference.get("name")
+  if isinstance(name, str):
+    return name
+  uri = reference.get("uri")
+  fs_path = uri.get("fsPath") if isinstance(uri, dict) else None
+  return Path(fs_path).name if isinstance(fs_path, str) else ""
 
 
 def vscode_reply(response: Any, path: Path) -> tuple[str, str]:
-    parts: list[str] = []
-    resolutions: list[Any] = []
-    if not isinstance(response, list):
-        # TODO: Says a request's response is not a list of items — the
-        # storage format seems to have changed and the script needs updating.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Responsum VS Code index membrorum non est: {path}\n"
-            "Forma repositi mutata videtur; scriptum renovandum est."
-        )
-    for item in response:
-        if not isinstance(item, dict):
-            # TODO: Says a response item is not a JSON object.
-            raise UserError(f"{LATIN_PREFIX}\n" f"Membrum responsi obiectum non est: {path}")
-        kind = item.get("kind")
-        if kind is None:
-            value = item.get("value")
-            if not isinstance(value, str):
-                # TODO: Says a response item has no text.
-                raise UserError(f"{LATIN_PREFIX}\n" f"Membrum responsi sine textu: {path}")
-            parts.append(value)
-        elif kind == "inlineReference":
-            parts.append(vscode_reference_name(item))
-        elif kind == "autoModeResolution":
-            resolved = item.get("resolved")
-            resolutions.append(resolved.get("id") if isinstance(resolved, dict) else item.get("resolvedModel"))
-        elif kind not in VSCODE_MUTE_KINDS:
-            # TODO: Says a response item has an unrecognized kind and to add
-            # it deliberately in VSCODE_MUTE_KINDS or vscode_reply.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"Genus membri responsi ignotum: {kind!r} in {path}\n"
-                "Adde hoc genus consulto in VSCODE_MUTE_KINDS vel vscode_reply."
-            )
-    match resolutions:
-        case []:
-            resolved_model = ""
-        case [str() as resolved_model] if resolved_model != "":
-            pass
-        case _:
-            # TODO: Says auto-mode model resolution is malformed.
-            raise UserError(f"{LATIN_PREFIX}\n" f"Resolutio exemplaris auto-mode malformata: {path}")
-    return "".join(parts), resolved_model
+  parts: list[str] = []
+  resolutions: list[Any] = []
+  if not isinstance(response, list):
+    # TODO: Says a request's response is not a list of items — the
+    # storage format seems to have changed and the script needs updating.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Responsum VS Code index membrorum non est: {path}\n"
+      "Forma repositi mutata videtur; scriptum renovandum est."
+    )
+  for item in response:
+    if not isinstance(item, dict):
+      # TODO: Says a response item is not a JSON object.
+      raise UserError(f"{LATIN_PREFIX}\n" f"Membrum responsi obiectum non est: {path}")
+    kind = item.get("kind")
+    if kind is None:
+      value = item.get("value")
+      if not isinstance(value, str):
+        # TODO: Says a response item has no text.
+        raise UserError(f"{LATIN_PREFIX}\n" f"Membrum responsi sine textu: {path}")
+      parts.append(value)
+    elif kind == "inlineReference":
+      parts.append(vscode_reference_name(item))
+    elif kind == "autoModeResolution":
+      resolved = item.get("resolved")
+      resolutions.append(resolved.get("id") if isinstance(resolved, dict) else item.get("resolvedModel"))
+    elif kind not in VSCODE_MUTE_KINDS:
+      # TODO: Says a response item has an unrecognized kind and to add
+      # it deliberately in VSCODE_MUTE_KINDS or vscode_reply.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Genus membri responsi ignotum: {kind!r} in {path}\n"
+        "Adde hoc genus consulto in VSCODE_MUTE_KINDS vel vscode_reply."
+      )
+  match resolutions:
+    case []:
+      resolved_model = ""
+    case [str() as resolved_model] if resolved_model != "":
+      pass
+    case _:
+      # TODO: Says auto-mode model resolution is malformed.
+      raise UserError(f"{LATIN_PREFIX}\n" f"Resolutio exemplaris auto-mode malformata: {path}")
+  return "".join(parts), resolved_model
 
 
 # Sessions are stored as a kind-0 snapshot followed by set (1),
 # list-splice (2), and delete (3) mutations.
 def replay_mutations(path: Path) -> Any:
-    state: Any = None
-    for line_number, entry in read_jsonl(path):
-        kind = entry.get("kind")
-        if kind == 0:
-            state = entry.get("v")
-            continue
-        keys = entry.get("k")
-        if state is None or not isinstance(keys, list) or keys == []:
-            # TODO: Says a VS Code session mutation is malformed.
-            raise UserError(f"{LATIN_PREFIX}\n" f"Mutatio VS Code malformata: {path}:{line_number}")
-        try:
-            target = state
-            for key in keys[:-1]:
-                target = target[key]
-            last = keys[-1]
-            match kind:
-                case 1:
-                    if isinstance(target, list) and last == len(target):
-                        target.append(entry.get("v"))
-                    else:
-                        target[last] = entry.get("v")
-                case 2:
-                    target = target[last]
-                    index = entry.get("i")
-                    if isinstance(index, int):
-                        del target[index:]
-                    target.extend(entry.get("v") or [])
-                case 3:
-                    del target[last]
-                case _:
-                    # TODO: Says a mutation has an unrecognized kind.
-                    raise UserError(f"{LATIN_PREFIX}\n" f"Genus mutationis ignotum: {kind!r} in {path}:{line_number}")
-        except (KeyError, IndexError, TypeError) as exc:
-            # TODO: Says a VS Code session mutation cannot be applied.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"Mutatio VS Code non applicari potest: {path}:{line_number}\n{exc}"
-            ) from exc
-    return state
+  state: Any = None
+  for line_number, entry in read_jsonl(path):
+    kind = entry.get("kind")
+    if kind == 0:
+      state = entry.get("v")
+      continue
+    keys = entry.get("k")
+    if state is None or not isinstance(keys, list) or keys == []:
+      # TODO: Says a VS Code session mutation is malformed.
+      raise UserError(f"{LATIN_PREFIX}\n" f"Mutatio VS Code malformata: {path}:{line_number}")
+    try:
+      target = state
+      for key in keys[:-1]:
+        target = target[key]
+      last = keys[-1]
+      match kind:
+        case 1:
+          if isinstance(target, list) and last == len(target):
+            target.append(entry.get("v"))
+          else:
+            target[last] = entry.get("v")
+        case 2:
+          target = target[last]
+          index = entry.get("i")
+          if isinstance(index, int):
+            del target[index:]
+          target.extend(entry.get("v") or [])
+        case 3:
+          del target[last]
+        case _:
+          # TODO: Says a mutation has an unrecognized kind.
+          raise UserError(f"{LATIN_PREFIX}\n" f"Genus mutationis ignotum: {kind!r} in {path}:{line_number}")
+    except (KeyError, IndexError, TypeError) as exc:
+      # TODO: Says a VS Code session mutation cannot be applied.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Mutatio VS Code non applicari potest: {path}:{line_number}\n{exc}"
+      ) from exc
+  return state
 
 
 def vscode_state(path: Path) -> dict[str, Any]:
-    state = read_json(path) if path.suffix == ".json" else replay_mutations(path)
-    if not isinstance(state, dict):
-        # TODO: Says this session doesn't reconstruct to a final object.
-        raise UserError(f"{LATIN_PREFIX}\n" f"Sessio VS Code obiectum finale non habet: {path}")
-    return state
+  state = read_json(path) if path.suffix == ".json" else replay_mutations(path)
+  if not isinstance(state, dict):
+    # TODO: Says this session doesn't reconstruct to a final object.
+    raise UserError(f"{LATIN_PREFIX}\n" f"Sessio VS Code obiectum finale non habet: {path}")
+  return state
 
 
 def vscode_exchanges(
-    path: Path, workspace: tuple[Path, ...], repo: Path, session_seen: Callable[[str, bool], None] = lambda session, held: None
+  path: Path, workspace: tuple[Path, ...], repo: Path, session_seen: Callable[[str, bool], None] = lambda session, held: None
 ) -> tuple[list[Exchange], set[Holding]]:
-    inside = tuple(root for root in workspace if under_dir(str(root), repo, path))
-    if inside == ():
-        return [], set()
-    if len(inside) != len(workspace):
-        # TODO: Says a multi-root workspace straddles the project boundary,
-        # and to open the project as a plain folder or export this dialog
-        # by hand.
+  inside = tuple(root for root in workspace if under_dir(str(root), repo, path))
+  if inside == ():
+    return [], set()
+  if len(inside) != len(workspace):
+    # TODO: Says a multi-root workspace straddles the project boundary,
+    # and to open the project as a plain folder or export this dialog
+    # by hand.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Workspace multiplex intra et extra inceptum est: {path}\n"
+      "Aperi inceptum ut folder simplex, vel exporta hunc dialogum manu."
+    )
+  state = vscode_state(path)
+  if state.get("version") != 3:
+    # TODO: Says this session has an unrecognized schema version — the
+    # storage format seems to have changed and the script needs updating.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Versio sessionis VS Code ignota: {state.get('version')!r} in {path}\n"
+      "Forma repositi mutata videtur; scriptum renovandum est."
+    )
+  requests = state.get("requests")
+  if not isinstance(requests, list):
+    # TODO: Says this session has no requests list.
+    raise UserError(f"{LATIN_PREFIX}\n" f"Sessio VS Code indicem requests non habet: {path}")
+  session = str(state.get("sessionId") or path.stem)
+  exchanges: list[Exchange] = []
+  holdings: set[Holding] = set()
+  for request in requests:
+    if not isinstance(request, dict):
+      # TODO: Says a requests entry is not a JSON object.
+      raise UserError(f"{LATIN_PREFIX}\n" f"Elementum requests obiectum non est: {path}")
+    message = request.get("message")
+    prompt = message.get("text") if isinstance(message, dict) else None
+    # No store shows a request without words; one would mean they moved.
+    if not isinstance(prompt, str) or prompt == "":
+      # TODO: Says a request has no text in message.text.
+      raise UserError(f"{LATIN_PREFIX}\n" f"Rogatio VS Code textum in message.text non habet: {path}")
+    parts = message.get("parts")
+    if not (isinstance(parts, list) and all(copilot_part_held(part, prompt) for part in parts)):
+      # TODO: Says a request's message parts are missing, malformed, of
+      # a kind no store had shown, or hold text that message.text lacks,
+      # so the prompt may have moved out of message.text: the storage
+      # format seems to have changed and the script needs updating.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Partes rogationis VS Code textum habent quem message.text non habet: {path}\n"
+        "Forma repositi mutata videtur; scriptum renovandum est."
+      )
+    match request.get("hiddenFromTranscript"):
+      case None | False:
+        pass
+      case marker:
+        # TODO: Says a request is marked hidden from the transcript, or
+        # marked so with an unrecognized value; what such a request
+        # shows the human is unknown, so the script needs updating.
         raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Workspace multiplex intra et extra inceptum est: {path}\n"
-            "Aperi inceptum ut folder simplex, vel exporta hunc dialogum manu."
+          f"{LATIN_PREFIX}\n"
+          f"Signum hiddenFromTranscript ignotum: {marker!r} in {path}\n"
+          "Forma repositi mutata videtur; scriptum renovandum est."
         )
-    state = vscode_state(path)
-    if state.get("version") != 3:
-        # TODO: Says this session has an unrecognized schema version — the
-        # storage format seems to have changed and the script needs updating.
+    if "timestamp" not in request:
+      # TODO: Says a request has no timestamp.
+      raise UserError(f"{LATIN_PREFIX}\n" f"Tempus deest in rogatione: {path}")
+    timestamp = parse_time(request["timestamp"])
+    holdings.add(("Copilot Chat", timestamp))
+    # VS Code starts a request by itself when a terminal command the
+    # agent launched exits, handing the model its completion notice plus
+    # the captured output in the user role. Nobody typed it. Such a
+    # request is marked isSystemInitiated (a systemInitiatedLabel and
+    # terminalExecutionId ride alongside), and the whole exchange goes,
+    # like the button clicks marked by "confirmation".
+    match request.get("isSystemInitiated"):
+      case True:
+        continue
+      case None | False:
+        pass
+      case marker:
+        # TODO: Says the system-initiated marker on a request holds
+        # an unrecognized value — the storage format seems to have
+        # changed and the script needs updating.
         raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Versio sessionis VS Code ignota: {state.get('version')!r} in {path}\n"
-            "Forma repositi mutata videtur; scriptum renovandum est."
+          f"{LATIN_PREFIX}\n"
+          f"Signum isSystemInitiated ignotum: {marker!r} in {path}\n"
+          "Forma repositi mutata videtur; scriptum renovandum est."
         )
-    requests = state.get("requests")
-    if not isinstance(requests, list):
-        # TODO: Says this session has no requests list.
-        raise UserError(f"{LATIN_PREFIX}\n" f"Sessio VS Code indicem requests non habet: {path}")
-    session = str(state.get("sessionId") or path.stem)
-    exchanges: list[Exchange] = []
-    holdings: set[Holding] = set()
-    for request in requests:
-        if not isinstance(request, dict):
-            # TODO: Says a requests entry is not a JSON object.
-            raise UserError(f"{LATIN_PREFIX}\n" f"Elementum requests obiectum non est: {path}")
-        message = request.get("message")
-        prompt = message.get("text") if isinstance(message, dict) else None
-        # No store shows a request without words; one would mean they moved.
-        if not isinstance(prompt, str) or prompt == "":
-            # TODO: Says a request has no text in message.text.
-            raise UserError(f"{LATIN_PREFIX}\n" f"Rogatio VS Code textum in message.text non habet: {path}")
-        parts = message.get("parts")
-        if not (isinstance(parts, list) and all(copilot_part_held(part, prompt) for part in parts)):
-            # TODO: Says a request's message parts are missing, malformed, of
-            # a kind no store had shown, or hold text that message.text lacks,
-            # so the prompt may have moved out of message.text: the storage
-            # format seems to have changed and the script needs updating.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"Partes rogationis VS Code textum habent quem message.text non habet: {path}\n"
-                "Forma repositi mutata videtur; scriptum renovandum est."
-            )
-        match request.get("hiddenFromTranscript"):
-            case None | False:
-                pass
-            case marker:
-                # TODO: Says a request is marked hidden from the transcript, or
-                # marked so with an unrecognized value; what such a request
-                # shows the human is unknown, so the script needs updating.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"Signum hiddenFromTranscript ignotum: {marker!r} in {path}\n"
-                    "Forma repositi mutata videtur; scriptum renovandum est."
-                )
-        if "timestamp" not in request:
-            # TODO: Says a request has no timestamp.
-            raise UserError(f"{LATIN_PREFIX}\n" f"Tempus deest in rogatione: {path}")
-        timestamp = parse_time(request["timestamp"])
-        holdings.add(("Copilot Chat", timestamp))
-        # VS Code starts a request by itself when a terminal command the
-        # agent launched exits, handing the model its completion notice plus
-        # the captured output in the user role. Nobody typed it. Such a
-        # request is marked isSystemInitiated (a systemInitiatedLabel and
-        # terminalExecutionId ride alongside), and the whole exchange goes,
-        # like the button clicks marked by "confirmation".
-        match request.get("isSystemInitiated"):
-            case True:
-                continue
-            case None | False:
-                pass
-            case marker:
-                # TODO: Says the system-initiated marker on a request holds
-                # an unrecognized value — the storage format seems to have
-                # changed and the script needs updating.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"Signum isSystemInitiated ignotum: {marker!r} in {path}\n"
-                    "Forma repositi mutata videtur; scriptum renovandum est."
-                )
-        prompt = cut_canned_tail(prompt)
-        if prompt == "" or request.get("confirmation") is not None or COPILOT_CANNED.match(prompt):
-            continue
-        model = request.get("modelId")
-        result = request.get("result")
-        timings = result.get("timings") if isinstance(result, dict) else None
-        total_elapsed = timings.get("totalElapsed") if isinstance(timings, dict) else None
-        # A confirmation or elicitation pauses the turn for human input, so
-        # totalElapsed would include waiting time; show no duration instead
-        # of a wrong one.
-        response = request.get("response")
-        reply, resolved_model = vscode_reply(response, path)
-        paused = any(item.get("kind") in {"confirmation", "elicitation", "elicitationSerialized"} for item in response)
-        match request.get("variableData"):
-            case None:
-                variables = []
-            case {"variables": list() as variables} if all(
-                isinstance(variable, dict) and variable.get("kind") in COPILOT_VARIABLE_KINDS for variable in variables
-            ):
-                pass
-            case _:
-                # TODO: Says a request's variables are malformed or include a
-                # kind no store had shown, which may be something the human
-                # pasted: the storage format seems to have changed and the
-                # script needs updating.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"Variabiles rogationis VS Code in forma ignota: {path}\n"
-                    "Forma repositi mutata videtur; scriptum renovandum est."
-                )
-        exchanges.append(
-            Exchange(
-                timestamp=timestamp,
-                provider="Copilot Chat",
-                model=resolved_model or (model if isinstance(model, str) else ""),
-                session=session,
-                prompt=prompt,
-                reply=reply,
-                source=path,
-                images=tuple(copilot_image_uri(variable, path) for variable in variables if variable.get("kind") == "image"),
-                elapsed=(
-                    total_elapsed / 1000.0
-                    if isinstance(total_elapsed, (int, float)) and not paused
-                    else 0.0
-                ),
-            )
+    prompt = cut_canned_tail(prompt)
+    if prompt == "" or request.get("confirmation") is not None or COPILOT_CANNED.match(prompt):
+      continue
+    model = request.get("modelId")
+    result = request.get("result")
+    timings = result.get("timings") if isinstance(result, dict) else None
+    total_elapsed = timings.get("totalElapsed") if isinstance(timings, dict) else None
+    # A confirmation or elicitation pauses the turn for human input, so
+    # totalElapsed would include waiting time; show no duration instead
+    # of a wrong one.
+    response = request.get("response")
+    reply, resolved_model = vscode_reply(response, path)
+    paused = any(item.get("kind") in {"confirmation", "elicitation", "elicitationSerialized"} for item in response)
+    match request.get("variableData"):
+      case None:
+        variables = []
+      case {"variables": list() as variables} if all(
+        isinstance(variable, dict) and variable.get("kind") in COPILOT_VARIABLE_KINDS for variable in variables
+      ):
+        pass
+      case _:
+        # TODO: Says a request's variables are malformed or include a
+        # kind no store had shown, which may be something the human
+        # pasted: the storage format seems to have changed and the
+        # script needs updating.
+        raise UserError(
+          f"{LATIN_PREFIX}\n"
+          f"Variabiles rogationis VS Code in forma ignota: {path}\n"
+          "Forma repositi mutata videtur; scriptum renovandum est."
         )
-    session_seen(session, holdings != set())
-    return exchanges, holdings
+    exchanges.append(
+      Exchange(
+        timestamp=timestamp,
+        provider="Copilot Chat",
+        model=resolved_model or (model if isinstance(model, str) else ""),
+        session=session,
+        prompt=prompt,
+        reply=reply,
+        source=path,
+        images=tuple(copilot_image_uri(variable, path) for variable in variables if variable.get("kind") == "image"),
+        elapsed=(
+          total_elapsed / 1000.0
+          if isinstance(total_elapsed, (int, float)) and not paused
+          else 0.0
+        ),
+      )
+    )
+  session_seen(session, holdings != set())
+  return exchanges, holdings
 
 
 def strip_jsonc(text: str) -> str:
-    """Blank out // and /* */ comments, then trailing commas, preserving strings."""
-    out: list[str] = []
-    i = 0
-    mode = "plain"
-    while i < len(text):
-        char = text[i]
-        pair = text[i : i + 2]
-        match mode:
-            case "plain" if char == '"':
-                mode = "string"
-                out.append(char)
-                i += 1
-            case "plain" if pair == "//":
-                mode = "line"
-                out.append("  ")
-                i += 2
-            case "plain" if pair == "/*":
-                mode = "block"
-                out.append("  ")
-                i += 2
-            case "string" if char == "\\" and i + 1 < len(text):
-                out.append(text[i : i + 2])
-                i += 2
-            case "string":
-                mode = "plain" if char == '"' else mode
-                out.append(char)
-                i += 1
-            case "line":
-                mode = "plain" if char == "\n" else mode
-                out.append(char if char == "\n" else " ")
-                i += 1
-            case "block" if pair == "*/":
-                mode = "plain"
-                out.append("  ")
-                i += 2
-            case "block":
-                out.append(char if char == "\n" else " ")
-                i += 1
-            case _:
-                out.append(char)
-                i += 1
-    return strip_trailing_commas("".join(out))
+  """Blank out // and /* */ comments, then trailing commas, preserving strings."""
+  out: list[str] = []
+  i = 0
+  mode = "plain"
+  while i < len(text):
+    char = text[i]
+    pair = text[i : i + 2]
+    match mode:
+      case "plain" if char == '"':
+        mode = "string"
+        out.append(char)
+        i += 1
+      case "plain" if pair == "//":
+        mode = "line"
+        out.append("  ")
+        i += 2
+      case "plain" if pair == "/*":
+        mode = "block"
+        out.append("  ")
+        i += 2
+      case "string" if char == "\\" and i + 1 < len(text):
+        out.append(text[i : i + 2])
+        i += 2
+      case "string":
+        mode = "plain" if char == '"' else mode
+        out.append(char)
+        i += 1
+      case "line":
+        mode = "plain" if char == "\n" else mode
+        out.append(char if char == "\n" else " ")
+        i += 1
+      case "block" if pair == "*/":
+        mode = "plain"
+        out.append("  ")
+        i += 2
+      case "block":
+        out.append(char if char == "\n" else " ")
+        i += 1
+      case _:
+        out.append(char)
+        i += 1
+  return strip_trailing_commas("".join(out))
 
 
 def strip_trailing_commas(text: str) -> str:
-    """Drop commas followed only by whitespace and a closing bracket — never
-    touching commas inside string literals."""
-    out: list[str] = []
-    in_string = False
-    i = 0
-    while i < len(text):
-        char = text[i]
-        if in_string:
-            out.append(char)
-            if char == "\\" and i + 1 < len(text):
-                out.append(text[i + 1])
-                i += 2
-                continue
-            in_string = char != '"'
-            i += 1
-        elif char == '"':
-            in_string = True
-            out.append(char)
-            i += 1
-        elif char == ",":
-            j = i + 1
-            while j < len(text) and text[j].isspace():
-                j += 1
-            if j < len(text) and text[j] in "]}":
-                i += 1  # trailing comma: drop it, keep the whitespace
-            else:
-                out.append(char)
-                i += 1
-        else:
-            out.append(char)
-            i += 1
-    return "".join(out)
+  """Drop commas followed only by whitespace and a closing bracket — never
+  touching commas inside string literals."""
+  out: list[str] = []
+  in_string = False
+  i = 0
+  while i < len(text):
+    char = text[i]
+    if in_string:
+      out.append(char)
+      if char == "\\" and i + 1 < len(text):
+        out.append(text[i + 1])
+        i += 2
+        continue
+      in_string = char != '"'
+      i += 1
+    elif char == '"':
+      in_string = True
+      out.append(char)
+      i += 1
+    elif char == ",":
+      j = i + 1
+      while j < len(text) and text[j].isspace():
+        j += 1
+      if j < len(text) and text[j] in "]}":
+        i += 1  # trailing comma: drop it, keep the whitespace
+      else:
+        out.append(char)
+        i += 1
+    else:
+      out.append(char)
+      i += 1
+  return "".join(out)
 
 
 def read_workspace_file(path: Path) -> tuple[Path, ...]:
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        # TODO: Says this .code-workspace file cannot be read.
-        raise UserError(f"{LATIN_PREFIX}\n" f"Fasciculus workspace legi non potest: {path}\n{exc}") from exc
-    try:
-        data = json.loads(strip_jsonc(raw))
-    except json.JSONDecodeError as exc:
-        # TODO: Says this .code-workspace file is invalid.
-        raise UserError(f"{LATIN_PREFIX}\n" f"Fasciculus workspace invalidus est: {path}\n{exc}") from exc
-    if not isinstance(data, dict) or not isinstance(data.get("folders"), list):
-        # TODO: Says this .code-workspace file has no folders list.
-        raise UserError(f"{LATIN_PREFIX}\n" f"Fasciculus workspace indicem folders non habet: {path}")
-    roots: list[Path] = []
-    for entry in data["folders"]:
-        if not isinstance(entry, dict):
-            # TODO: Says a folders entry is not a JSON object.
-            raise UserError(f"{LATIN_PREFIX}\n" f"Elementum folders obiectum non est: {path}")
-        raw_path = entry.get("path")
-        if not isinstance(raw_path, str):
-            uri = entry.get("uri")
-            raw_path = decode_file_uri(uri) if isinstance(uri, str) else None
-        if raw_path is None:
-            continue  # non-file root (remote workspace): not attributable here
-        candidate = Path(raw_path).expanduser()
-        roots.append(candidate.resolve() if candidate.is_absolute() else (path.parent / candidate).resolve())
-    return tuple(roots)
+  try:
+    raw = path.read_text(encoding="utf-8")
+  except OSError as exc:
+    # TODO: Says this .code-workspace file cannot be read.
+    raise UserError(f"{LATIN_PREFIX}\n" f"Fasciculus workspace legi non potest: {path}\n{exc}") from exc
+  try:
+    data = json.loads(strip_jsonc(raw))
+  except json.JSONDecodeError as exc:
+    # TODO: Says this .code-workspace file is invalid.
+    raise UserError(f"{LATIN_PREFIX}\n" f"Fasciculus workspace invalidus est: {path}\n{exc}") from exc
+  if not isinstance(data, dict) or not isinstance(data.get("folders"), list):
+    # TODO: Says this .code-workspace file has no folders list.
+    raise UserError(f"{LATIN_PREFIX}\n" f"Fasciculus workspace indicem folders non habet: {path}")
+  roots: list[Path] = []
+  for entry in data["folders"]:
+    if not isinstance(entry, dict):
+      # TODO: Says a folders entry is not a JSON object.
+      raise UserError(f"{LATIN_PREFIX}\n" f"Elementum folders obiectum non est: {path}")
+    raw_path = entry.get("path")
+    if not isinstance(raw_path, str):
+      uri = entry.get("uri")
+      raw_path = decode_file_uri(uri) if isinstance(uri, str) else None
+    if raw_path is None:
+      continue  # non-file root (remote workspace): not attributable here
+    candidate = Path(raw_path).expanduser()
+    roots.append(candidate.resolve() if candidate.is_absolute() else (path.parent / candidate).resolve())
+  return tuple(roots)
 
 
 def workspace_roots(storage: Path) -> tuple[Path, ...]:
-    metadata = storage / "workspace.json"
-    if not metadata.exists():
-        return ()
-    data = read_json(metadata)
-    if not isinstance(data, dict):
-        # TODO: Says workspace.json is not a JSON object.
-        raise UserError(f"{LATIN_PREFIX}\n" f"workspace.json obiectum non est: {metadata}")
-    folder = data.get("folder")
-    if isinstance(folder, str):
-        decoded = decode_file_uri(folder)
-        return (Path(decoded).expanduser().resolve(),) if decoded is not None else ()
-    pointer = data.get("workspace") or data.get("configuration")
-    if isinstance(pointer, str):
-        decoded = decode_file_uri(pointer)
-        return read_workspace_file(Path(decoded).expanduser().resolve()) if decoded is not None else ()
-    # TODO: Says workspace.json has neither a folder nor a workspace entry.
-    raise UserError(f"{LATIN_PREFIX}\n" f"workspace.json nec folder nec workspace habet: {metadata}")
+  metadata = storage / "workspace.json"
+  if not metadata.exists():
+    return ()
+  data = read_json(metadata)
+  if not isinstance(data, dict):
+    # TODO: Says workspace.json is not a JSON object.
+    raise UserError(f"{LATIN_PREFIX}\n" f"workspace.json obiectum non est: {metadata}")
+  folder = data.get("folder")
+  if isinstance(folder, str):
+    decoded = decode_file_uri(folder)
+    return (Path(decoded).expanduser().resolve(),) if decoded is not None else ()
+  pointer = data.get("workspace") or data.get("configuration")
+  if isinstance(pointer, str):
+    decoded = decode_file_uri(pointer)
+    return read_workspace_file(Path(decoded).expanduser().resolve()) if decoded is not None else ()
+  # TODO: Says workspace.json has neither a folder nor a workspace entry.
+  raise UserError(f"{LATIN_PREFIX}\n" f"workspace.json nec folder nec workspace habet: {metadata}")
 
 
 # ------------------------------------------------------- pairing and weaving
 
 
 def paired(
-    provider: str,
-    session: str,
-    messages: Iterable[Message],
-    source: Path,
-    tail: tuple[float, int, int] = (0.0, 0, 0),
+  provider: str,
+  session: str,
+  messages: Iterable[Message],
+  source: Path,
+  tail: tuple[float, int, int] = (0.0, 0, 0),
 ) -> list[Exchange]:
-    """Fold a role-ordered message stream into prompt-plus-reply exchanges."""
-    exchanges: list[Exchange] = []
-    current: Exchange | None = None
-    reply_parts: list[str] = []
-    model = ""
-    effort = ""
+  """Fold a role-ordered message stream into prompt-plus-reply exchanges."""
+  exchanges: list[Exchange] = []
+  current: Exchange | None = None
+  reply_parts: list[str] = []
+  model = ""
+  effort = ""
 
-    active = 0.0
-    added = 0
-    deleted = 0
-    ended: dt.datetime | None = None  # arrival of the exchange's last reply message
+  active = 0.0
+  added = 0
+  deleted = 0
+  ended: dt.datetime | None = None  # arrival of the exchange's last reply message
 
-    def flush() -> None:
-        if current is not None:
-            exchanges.append(
-                dataclasses.replace(
-                    current,
-                    reply="\n\n".join(reply_parts),
-                    model=model,
-                    effort=effort,
-                    elapsed=active,
-                    # No reply means the wall span is unknown, the same
-                    # 0-sentinel elapsed uses.
-                    wall=(ended - current.timestamp).total_seconds() if ended else 0.0,
-                    added=added,
-                    deleted=deleted,
-                )
-            )
+  def flush() -> None:
+    if current is not None:
+      exchanges.append(
+        dataclasses.replace(
+          current,
+          reply="\n\n".join(reply_parts),
+          model=model,
+          effort=effort,
+          elapsed=active,
+          # No reply means the wall span is unknown, the same
+          # 0-sentinel elapsed uses.
+          wall=(ended - current.timestamp).total_seconds() if ended else 0.0,
+          added=added,
+          deleted=deleted,
+        )
+      )
 
-    for message in messages:
-        match message.role:
-            case "user":
-                # Lines the prompt orphaned mid-turn belong to the exchange
-                # it closes, whose reply never arrived to claim them.
-                active += message.active
-                added += message.added
-                deleted += message.deleted
-                flush()
-                current = Exchange(
-                    timestamp=message.timestamp,
-                    provider=provider,
-                    model="",
-                    session=session,
-                    prompt=message.text,
-                    reply="",
-                    source=source,
-                    images=message.images,
-                    ballots=message.ballots,
-                )
-                reply_parts = []
-                model = ""
-                effort = ""
-                active = 0.0
-                added = 0
-                deleted = 0
-                ended = None
-            case "assistant":
-                if current is None:
-                    continue  # reply to a dropped machine prompt; nothing to attach to
-                reply_parts.append(message.text)
-                model = message.model or model
-                effort = message.effort or effort
-                ended = message.timestamp
-                active += message.active
-                added += message.added
-                deleted += message.deleted
-            case _:
-                raise AssertionError(message.role)
-    active += tail[0]
-    added += tail[1]
-    deleted += tail[2]
-    flush()
-    return exchanges
+  for message in messages:
+    match message.role:
+      case "user":
+        # Lines the prompt orphaned mid-turn belong to the exchange
+        # it closes, whose reply never arrived to claim them.
+        active += message.active
+        added += message.added
+        deleted += message.deleted
+        flush()
+        current = Exchange(
+          timestamp=message.timestamp,
+          provider=provider,
+          model="",
+          session=session,
+          prompt=message.text,
+          reply="",
+          source=source,
+          images=message.images,
+          ballots=message.ballots,
+        )
+        reply_parts = []
+        model = ""
+        effort = ""
+        active = 0.0
+        added = 0
+        deleted = 0
+        ended = None
+      case "assistant":
+        if current is None:
+          continue  # reply to a dropped machine prompt; nothing to attach to
+        reply_parts.append(message.text)
+        model = message.model or model
+        effort = message.effort or effort
+        ended = message.timestamp
+        active += message.active
+        added += message.added
+        deleted += message.deleted
+      case _:
+        raise AssertionError(message.role)
+  active += tail[0]
+  added += tail[1]
+  deleted += tail[2]
+  flush()
+  return exchanges
 
 
 # ---------------------------------------------------------------- Antigravity
@@ -2601,227 +2603,227 @@ ANTIGRAVITY_NOTIFY_FIELDS = frozenset({1, 2, 3, 4, 5, 7, 8})
 
 
 def wire(data: bytes) -> list[tuple[int, int | bytes]]:
-    """Protobuf wire fields as (number, value): varints as ints, everything
-    else as bytes. Malformed encoding fails loudly."""
-    fields: list[tuple[int, int | bytes]] = []
-    at = 0
+  """Protobuf wire fields as (number, value): varints as ints, everything
+  else as bytes. Malformed encoding fails loudly."""
+  fields: list[tuple[int, int | bytes]] = []
+  at = 0
 
-    def varint() -> int:
-        nonlocal at
-        result = shift = 0
-        while True:
-            if at >= len(data):
-                raise ValueError("truncated varint")
-            byte = data[at]
-            at += 1
-            result |= (byte & 0x7F) << shift
-            shift += 7
-            if byte < 0x80:
-                return result
+  def varint() -> int:
+    nonlocal at
+    result = shift = 0
+    while True:
+      if at >= len(data):
+        raise ValueError("truncated varint")
+      byte = data[at]
+      at += 1
+      result |= (byte & 0x7F) << shift
+      shift += 7
+      if byte < 0x80:
+        return result
 
-    while at < len(data):
-        tag = varint()
-        number, kind = tag >> 3, tag & 7
-        if kind == 0:
-            fields.append((number, varint()))
-            continue
-        length = {1: 8, 5: 4}.get(kind)
-        if length is None:
-            if kind != 2:
-                raise ValueError(f"wire type {kind}")
-            length = varint()
-        if at + length > len(data):
-            raise ValueError("truncated field")
-        fields.append((number, data[at:at + length]))
-        at += length
-    return fields
+  while at < len(data):
+    tag = varint()
+    number, kind = tag >> 3, tag & 7
+    if kind == 0:
+      fields.append((number, varint()))
+      continue
+    length = {1: 8, 5: 4}.get(kind)
+    if length is None:
+      if kind != 2:
+        raise ValueError(f"wire type {kind}")
+      length = varint()
+    if at + length > len(data):
+      raise ValueError("truncated field")
+    fields.append((number, data[at:at + length]))
+    at += length
+  return fields
 
 
 def pb_get(fields: list[tuple[int, int | bytes]], number: int) -> int | bytes | None:
-    """The one value of a field, None when absent; a repeated field would be
-    a shape this tool has not seen."""
-    values = [value for n, value in fields if n == number]
-    if len(values) > 1:
-        raise ValueError(f"field {number} repeated")
-    return values[0] if values else None
+  """The one value of a field, None when absent; a repeated field would be
+  a shape this tool has not seen."""
+  values = [value for n, value in fields if n == number]
+  if len(values) > 1:
+    raise ValueError(f"field {number} repeated")
+  return values[0] if values else None
 
 
 def pb_text(fields: list[tuple[int, int | bytes]], number: int) -> str | None:
-    value = pb_get(fields, number)
-    if value is None:
-        return None
-    if not isinstance(value, bytes):
-        raise ValueError(f"field {number} is not text")
-    return value.decode("utf-8")
+  value = pb_get(fields, number)
+  if value is None:
+    return None
+  if not isinstance(value, bytes):
+    raise ValueError(f"field {number} is not text")
+  return value.decode("utf-8")
 
 
 def pb_message(fields: list[tuple[int, int | bytes]], number: int) -> list[tuple[int, int | bytes]]:
-    value = pb_get(fields, number)
-    if value is None:
-        return []
-    if not isinstance(value, bytes):
-        raise ValueError(f"field {number} is not a message")
-    return wire(value)
+  value = pb_get(fields, number)
+  if value is None:
+    return []
+  if not isinstance(value, bytes):
+    raise ValueError(f"field {number} is not a message")
+  return wire(value)
 
 
 @functools.cache
 def antigravity_key() -> bytes:
-    """The application's own store key, read out of its installed binary:
-    the one 32-letter window whose digest matches."""
-    for binary in sorted(ANTIGRAVITY_BIN.glob("language_server_*")):
-        data = binary.read_bytes()
-        for run in re.finditer(rb"[A-Za-z]{32,}", data):
-            letters = run.group()
-            for at in range(len(letters) - 31):
-                if hashlib.sha256(letters[at:at + 32]).hexdigest() == ANTIGRAVITY_KEY_DIGEST:
-                    return letters[at:at + 32]
-    # TODO: Says Antigravity transcripts exist but the application that can
-    # open them is not installed here (or this version of it no longer holds
-    # the key this tool recognizes), naming where it looked; nothing is
-    # exported until they can be read.
-    raise UserError(
-        f"{LATIN_PREFIX}\n"
-        f"Transcripta Antigravity adsunt, sed applicatio quae ea aperit hic non invenitur "
-        f"(aut clavem notam non iam fert): {ANTIGRAVITY_BIN}\nNihil exportatur dum legi possint."
-    )
+  """The application's own store key, read out of its installed binary:
+  the one 32-letter window whose digest matches."""
+  for binary in sorted(ANTIGRAVITY_BIN.glob("language_server_*")):
+    data = binary.read_bytes()
+    for run in re.finditer(rb"[A-Za-z]{32,}", data):
+      letters = run.group()
+      for at in range(len(letters) - 31):
+        if hashlib.sha256(letters[at:at + 32]).hexdigest() == ANTIGRAVITY_KEY_DIGEST:
+          return letters[at:at + 32]
+  # TODO: Says Antigravity transcripts exist but the application that can
+  # open them is not installed here (or this version of it no longer holds
+  # the key this tool recognizes), naming where it looked; nothing is
+  # exported until they can be read.
+  raise UserError(
+    f"{LATIN_PREFIX}\n"
+    f"Transcripta Antigravity adsunt, sed applicatio quae ea aperit hic non invenitur "
+    f"(aut clavem notam non iam fert): {ANTIGRAVITY_BIN}\nNihil exportatur dum legi possint."
+  )
 
 
 def antigravity_open(path: Path, key: bytes) -> bytes:
-    """The conversation's plaintext, through the system cipher."""
-    blob = path.read_bytes()
-    try:
-        cipher = ctypes.CDLL(ctypes.util.find_library("System")).CCCryptorGCMOneshotDecrypt
-    except (OSError, AttributeError, TypeError) as exc:
-        # TODO: Says an Antigravity transcript exists but this platform lacks
-        # the system cipher (CommonCrypto, macOS) that opens it, naming the
-        # file; nothing is exported until it can be read.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Transcriptum Antigravity adest, sed huic systemati cifra deest "
-            f"(CommonCrypto in macOS): {path}\nNihil exportatur dum legi possit."
-        ) from exc
-    cipher.restype = ctypes.c_int32
-    cipher.argtypes = [
-        ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t,
-        ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p,
-        ctypes.c_char_p, ctypes.c_size_t,
-    ]
-    nonce, body, tag = blob[:12], blob[12:-16], blob[-16:]
-    plain = ctypes.create_string_buffer(len(body))
-    status = cipher(0, key, len(key), nonce, len(nonce), None, 0, body, len(body), plain, tag, len(tag))
-    if status != 0:
-        # TODO: Says an Antigravity transcript would not open (with the
-        # cipher's status code): the file is damaged or sealed with another
-        # key, and nothing is exported until every transcript can be read.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Transcriptum Antigravity aperiri non potuit (status {status}): {path}\n"
-            "Fasciculus corruptus est aut alia clave signatus; nihil exportatur "
-            "dum omnia transcripta legi possint."
-        )
-    return plain.raw
+  """The conversation's plaintext, through the system cipher."""
+  blob = path.read_bytes()
+  try:
+    cipher = ctypes.CDLL(ctypes.util.find_library("System")).CCCryptorGCMOneshotDecrypt
+  except (OSError, AttributeError, TypeError) as exc:
+    # TODO: Says an Antigravity transcript exists but this platform lacks
+    # the system cipher (CommonCrypto, macOS) that opens it, naming the
+    # file; nothing is exported until it can be read.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Transcriptum Antigravity adest, sed huic systemati cifra deest "
+      f"(CommonCrypto in macOS): {path}\nNihil exportatur dum legi possit."
+    ) from exc
+  cipher.restype = ctypes.c_int32
+  cipher.argtypes = [
+    ctypes.c_uint32, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t,
+    ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p,
+    ctypes.c_char_p, ctypes.c_size_t,
+  ]
+  nonce, body, tag = blob[:12], blob[12:-16], blob[-16:]
+  plain = ctypes.create_string_buffer(len(body))
+  status = cipher(0, key, len(key), nonce, len(nonce), None, 0, body, len(body), plain, tag, len(tag))
+  if status != 0:
+    # TODO: Says an Antigravity transcript would not open (with the
+    # cipher's status code): the file is damaged or sealed with another
+    # key, and nothing is exported until every transcript can be read.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Transcriptum Antigravity aperiri non potuit (status {status}): {path}\n"
+      "Fasciculus corruptus est aut alia clave signatus; nihil exportatur "
+      "dum omnia transcripta legi possint."
+    )
+  return plain.raw
 
 
 def antigravity_time(stamp: int | bytes | None) -> dt.datetime:
-    """A {seconds, nanos} stamp as a datetime; anything else fails loudly."""
-    if not isinstance(stamp, bytes):
-        raise ValueError("stamp missing")
-    fields = wire(stamp)
-    seconds, nanos = pb_get(fields, 1), pb_get(fields, 2) or 0
-    if not isinstance(seconds, int) or not isinstance(nanos, int):
-        raise ValueError("stamp without seconds")
-    return dt.datetime.fromtimestamp(seconds, tz=UTC) + dt.timedelta(microseconds=nanos // 1000)
+  """A {seconds, nanos} stamp as a datetime; anything else fails loudly."""
+  if not isinstance(stamp, bytes):
+    raise ValueError("stamp missing")
+  fields = wire(stamp)
+  seconds, nanos = pb_get(fields, 1), pb_get(fields, 2) or 0
+  if not isinstance(seconds, int) or not isinstance(nanos, int):
+    raise ValueError("stamp without seconds")
+  return dt.datetime.fromtimestamp(seconds, tz=UTC) + dt.timedelta(microseconds=nanos // 1000)
 
 
 def antigravity_exchanges(path: Path, repo: Path, key: bytes) -> tuple[list[Exchange], set[Holding]]:
-    try:
-        return antigravity_parse(path, repo, key)
-    except ValueError as exc:
-        # TODO: Says an Antigravity transcript has a shape this tool does not
-        # understand (what and where) — the store format seems to have
-        # changed — and that nothing is exported until it can be read.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Forma transcripti Antigravity ignota ({exc}): {path}\n"
-            "Forma repositi mutata videtur; nihil exportatur dum legi possit."
-        ) from exc
+  try:
+    return antigravity_parse(path, repo, key)
+  except ValueError as exc:
+    # TODO: Says an Antigravity transcript has a shape this tool does not
+    # understand (what and where) — the store format seems to have
+    # changed — and that nothing is exported until it can be read.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Forma transcripti Antigravity ignota ({exc}): {path}\n"
+      "Forma repositi mutata videtur; nihil exportatur dum legi possit."
+    ) from exc
 
 
 def antigravity_parse(path: Path, repo: Path, key: bytes) -> tuple[list[Exchange], set[Holding]]:
-    top = wire(antigravity_open(path, key))
-    session = pb_text(top, 6) or path.stem
-    steps = [wire(step) for number, step in top if number == 2 and isinstance(step, bytes)]
-    # Attribution is by conversation: the workspace its prompts name. A
-    # prompt carries that context only sometimes, so every prompt inherits
-    # the one workspace the conversation names; a second one is a shape
-    # this tool has not seen.
-    workspaces: set[str] = set()
-    for step in steps:
-        if pb_get(step, 1) == ANTIGRAVITY_USER:
-            for number, item in pb_message(pb_message(step, 19), 4):
-                uri = pb_text(wire(item), 13) if isinstance(item, bytes) else None
-                if uri is not None:
-                    workspaces.add(uri)
-    if len(workspaces) > 1:
-        raise ValueError(f"workspaces {sorted(workspaces)}")
-    folder = decode_file_uri(next(iter(workspaces))) if workspaces else None
-    if folder is None or not under_dir(folder, repo, path):
-        return [], set()
-    messages: list[Message] = []
-    holdings: set[Holding] = set()
-    pending = 0.0  # seconds the agent spent in steps since the last emitted message
-    for step in steps:
-        kind, status = pb_get(step, 1), pb_get(step, 4)
-        if status not in ANTIGRAVITY_STATUSES:
-            raise ValueError(f"step status {status}")
-        meta = pb_message(step, 5)
-        created = antigravity_time(pb_get(meta, 1))
-        if kind == ANTIGRAVITY_USER:
-            payload = pb_message(step, 19)
-            click = pb_message(payload, 7)
-            unknown = ({n for n, _ in payload} - ANTIGRAVITY_USER_FIELDS) | (
-                {n for n, _ in click} - ANTIGRAVITY_CLICK_FIELDS
-            )
-            if unknown:
-                raise ValueError(f"prompt fields {sorted(unknown)}")
-            text = pb_text(payload, 2)
-            if text is None and click:
-                # An action on an artifact (approving a plan, say) types
-                # nothing unless a comment rides along.
-                text = pb_text(click, 5) or ""
-            if text is None:
-                if status != ANTIGRAVITY_EMPTIED:
-                    raise ValueError("prompt without words")
-                continue  # emptied by the application: no words left, so no holding
-            holdings.add(("Antigravity", created))
-            if text != "":
-                messages.append(Message("user", created, text, active=pending))
-                pending = 0.0
-            continue
-        if kind not in (ANTIGRAVITY_PLANNER, ANTIGRAVITY_NOTIFY) and kind not in ANTIGRAVITY_MACHINE:
-            raise ValueError(f"step type {kind}")
-        start, end = pb_get(meta, 6), pb_get(meta, 7)
-        if isinstance(start, bytes) and isinstance(end, bytes):
-            pending += (antigravity_time(end) - antigravity_time(start)).total_seconds()
-        if kind in ANTIGRAVITY_MACHINE:
-            continue
-        enum = pb_get(meta, 11)
-        # The model label when the store's enum is not in the table:
-        model = "" if enum is None else ANTIGRAVITY_MODELS.get(enum, f"unknown model {enum}")
-        if kind == ANTIGRAVITY_PLANNER:
-            payload, number, allowed = pb_message(step, 20), 1, ANTIGRAVITY_PLANNER_FIELDS
-        else:
-            payload, number, allowed = pb_message(step, 94), 2, ANTIGRAVITY_NOTIFY_FIELDS
-        unknown = {n for n, _ in payload} - allowed
-        if unknown:
-            raise ValueError(f"step {kind} fields {sorted(unknown)}")
-        text = pb_text(payload, number)
-        if not text:
-            continue  # thinking or tool calls only, or a step the application emptied
-        when = antigravity_time(end) if isinstance(end, bytes) else created
-        messages.append(Message("assistant", when, text, model, active=pending))
+  top = wire(antigravity_open(path, key))
+  session = pb_text(top, 6) or path.stem
+  steps = [wire(step) for number, step in top if number == 2 and isinstance(step, bytes)]
+  # Attribution is by conversation: the workspace its prompts name. A
+  # prompt carries that context only sometimes, so every prompt inherits
+  # the one workspace the conversation names; a second one is a shape
+  # this tool has not seen.
+  workspaces: set[str] = set()
+  for step in steps:
+    if pb_get(step, 1) == ANTIGRAVITY_USER:
+      for number, item in pb_message(pb_message(step, 19), 4):
+        uri = pb_text(wire(item), 13) if isinstance(item, bytes) else None
+        if uri is not None:
+          workspaces.add(uri)
+  if len(workspaces) > 1:
+    raise ValueError(f"workspaces {sorted(workspaces)}")
+  folder = decode_file_uri(next(iter(workspaces))) if workspaces else None
+  if folder is None or not under_dir(folder, repo, path):
+    return [], set()
+  messages: list[Message] = []
+  holdings: set[Holding] = set()
+  pending = 0.0  # seconds the agent spent in steps since the last emitted message
+  for step in steps:
+    kind, status = pb_get(step, 1), pb_get(step, 4)
+    if status not in ANTIGRAVITY_STATUSES:
+      raise ValueError(f"step status {status}")
+    meta = pb_message(step, 5)
+    created = antigravity_time(pb_get(meta, 1))
+    if kind == ANTIGRAVITY_USER:
+      payload = pb_message(step, 19)
+      click = pb_message(payload, 7)
+      unknown = ({n for n, _ in payload} - ANTIGRAVITY_USER_FIELDS) | (
+        {n for n, _ in click} - ANTIGRAVITY_CLICK_FIELDS
+      )
+      if unknown:
+        raise ValueError(f"prompt fields {sorted(unknown)}")
+      text = pb_text(payload, 2)
+      if text is None and click:
+        # An action on an artifact (approving a plan, say) types
+        # nothing unless a comment rides along.
+        text = pb_text(click, 5) or ""
+      if text is None:
+        if status != ANTIGRAVITY_EMPTIED:
+          raise ValueError("prompt without words")
+        continue  # emptied by the application: no words left, so no holding
+      holdings.add(("Antigravity", created))
+      if text != "":
+        messages.append(Message("user", created, text, active=pending))
         pending = 0.0
-    return paired("Antigravity", session, messages, path, (pending, 0, 0)), holdings
+      continue
+    if kind not in (ANTIGRAVITY_PLANNER, ANTIGRAVITY_NOTIFY) and kind not in ANTIGRAVITY_MACHINE:
+      raise ValueError(f"step type {kind}")
+    start, end = pb_get(meta, 6), pb_get(meta, 7)
+    if isinstance(start, bytes) and isinstance(end, bytes):
+      pending += (antigravity_time(end) - antigravity_time(start)).total_seconds()
+    if kind in ANTIGRAVITY_MACHINE:
+      continue
+    enum = pb_get(meta, 11)
+    # The model label when the store's enum is not in the table:
+    model = "" if enum is None else ANTIGRAVITY_MODELS.get(enum, f"unknown model {enum}")
+    if kind == ANTIGRAVITY_PLANNER:
+      payload, number, allowed = pb_message(step, 20), 1, ANTIGRAVITY_PLANNER_FIELDS
+    else:
+      payload, number, allowed = pb_message(step, 94), 2, ANTIGRAVITY_NOTIFY_FIELDS
+    unknown = {n for n, _ in payload} - allowed
+    if unknown:
+      raise ValueError(f"step {kind} fields {sorted(unknown)}")
+    text = pb_text(payload, number)
+    if not text:
+      continue  # thinking or tool calls only, or a step the application emptied
+    when = antigravity_time(end) if isinstance(end, bytes) else created
+    messages.append(Message("assistant", when, text, model, active=pending))
+    pending = 0.0
+  return paired("Antigravity", session, messages, path, (pending, 0, 0)), holdings
 
 
 # ------------------------------------------------------------------- Codebuff
@@ -2857,10 +2859,10 @@ CODEBUFF_CHECKPOINTS = re.compile(r"[0-9a-f]{64}")
 # for the human (a question, say), so it is refused, not passed; tools of
 # MCP servers (SERVER__TOOL) pass, as server output.
 CODEBUFF_TOOLS = frozenset({
-    "add_subgoal", "browser_logs", "code_search", "create_plan", "end_turn", "glob", "list_directory",
-    "parse_error", "propose_str_replace", "propose_write_file", "read_docs", "read_files", "read_subtree",
-    "run_terminal_command", "set_messages", "set_output", "spawn_agents", "str_replace", "suggest_followups",
-    "think_deeply", "update_subgoal", "web_search", "write_file", "write_todos",
+  "add_subgoal", "browser_logs", "code_search", "create_plan", "end_turn", "glob", "list_directory",
+  "parse_error", "propose_str_replace", "propose_write_file", "read_docs", "read_files", "read_subtree",
+  "run_terminal_command", "set_messages", "set_output", "spawn_agents", "str_replace", "suggest_followups",
+  "think_deeply", "update_subgoal", "web_search", "write_file", "write_todos",
 })
 CODEBUFF_MCP_TOOL = re.compile(r"[a-z0-9-]+__[a-z0-9_]+")
 # The tools whose results report a change made to a file. (A best-of-n run's
@@ -2872,19 +2874,19 @@ CODEBUFF_CREATED = "Created new file"
 # The messages history puts in the user role, beside the words typed, text
 # Codebuff wrote: wrappers that open it,
 CODEBUFF_WRAPPERS = (
-    "<system>", "<system_instructions>", "<tool_result>", "<tool_results>", "<previous_assistant_message>",
-    "<user_edits_since_last_chat>", "<subgoal>", "<terminal_command_result>",
+  "<system>", "<system_instructions>", "<tool_result>", "<tool_results>", "<previous_assistant_message>",
+  "<user_edits_since_last_chat>", "<subgoal>", "<terminal_command_result>",
 )
 # its standing instructions, after any knowledge files it sent along,
 CODEBUFF_INSTRUCTIONS = re.compile(r"<system_instructions>.*</system_instructions>", re.DOTALL)
 # and the openings of its other injections, a browser tool's result among
 # them, which early versions sent as the human's.
 CODEBUFF_INJECTIONS = (
-    "Instructions for THIS turn (Follow ALL applicable points below):",
-    "If the tool result above is of a terminal command succeeding",
-    "Please summarize briefly the action taken, but do not call the think_deeply tool again",
-    "\n\n## Tools\nUse the tools below to complete the user request",
-    '{"success":',
+  "Instructions for THIS turn (Follow ALL applicable points below):",
+  "If the tool result above is of a terminal command succeeding",
+  "Please summarize briefly the action taken, but do not call the think_deeply tool again",
+  "\n\n## Tools\nUse the tools below to complete the user request",
+  '{"success":',
 )
 # Words typed, as the history wraps them from 2025-06; before, they stand
 # bare.
@@ -2896,29 +2898,29 @@ CODEBUFF_TYPED = re.compile(r"<user_message>(.*)</user_message>", re.DOTALL)
 # where the replies it replaced stood, so the page says what the store says
 # ("No response." would be false: there was one, Codebuff dropped it).
 CODEBUFF_SAID = re.compile(
-    r"<previous_assistant_message>(.*)</previous_assistant_message>"
-    r"|<system><assistant_message>(.*)</assistant_message>\[RESPONSE_CANCELED_BY_USER\]</system>"
-    r"|(<system>Previous message\(s\) omitted due to length</system>)",
-    re.DOTALL,
+  r"<previous_assistant_message>(.*)</previous_assistant_message>"
+  r"|<system><assistant_message>(.*)</assistant_message>\[RESPONSE_CANCELED_BY_USER\]</system>"
+  r"|(<system>Previous message\(s\) omitted due to length</system>)",
+  re.DOTALL,
 )
 # Tool calls in the agent's words, in each form Codebuff wrote them, cut from
 # the reply as other agents' tool calls are.
 CODEBUFF_CALLS = re.compile(
-    r"<codebuff_tool_call>.*?</codebuff_tool_call>|<tool_call name=\"[^\"]*\">.*?</tool_call>"
-    r"|<(add_subgoal|await_tool_results|browser_logs|code_search|create_plan|end_turn|read_files|research"
-    r"|run_terminal_command|spawn_agents|str_replace|think_deeply|update_subgoal|write_file)>.*?</\1>",
-    re.DOTALL,
+  r"<codebuff_tool_call>.*?</codebuff_tool_call>|<tool_call name=\"[^\"]*\">.*?</tool_call>"
+  r"|<(add_subgoal|await_tool_results|browser_logs|code_search|create_plan|end_turn|read_files|research"
+  r"|run_terminal_command|spawn_agents|str_replace|think_deeply|update_subgoal|write_file)>.*?</\1>",
+  re.DOTALL,
 )
 CODEBUFF_MESSAGE_KEYS = (
-    frozenset({"role", "content"}),
-    frozenset({"tags", "keepDuringTruncation", "keepLastTags", "providerOptions", "timeToLive"}),
+  frozenset({"role", "content"}),
+  frozenset({"tags", "keepDuringTruncation", "keepLastTags", "providerOptions", "timeToLive"}),
 )
 CODEBUFF_TAGS = frozenset({"USER_PROMPT", "INSTRUCTIONS_PROMPT"})
 # The pieces a user message's content may be: words, and an image (only
 # ever a screenshot a browser tool took).
 CODEBUFF_PIECES = {
-    "text": (frozenset({"type", "text"}), frozenset({"cache_control"})),
-    "image": (frozenset({"type", "source"}), frozenset()),
+  "text": (frozenset({"type", "text"}), frozenset({"cache_control"})),
+  "image": (frozenset({"type", "source"}), frozenset()),
 }
 # The label of the log record of an input as it is typed.
 CODEBUFF_STAMP = "CLI auto-detect: Extracted image paths"
@@ -2926,8 +2928,8 @@ CODEBUFF_STAMP = "CLI auto-detect: Extracted image paths"
 # The keys each message of a blocks history has, then those only some have.
 CODEBUFF_PROMPT_KEYS = (frozenset({"id", "variant", "content", "timestamp"}), frozenset({"textAttachments", "validationErrors"}))
 CODEBUFF_REPLY_KEYS = (
-    frozenset({"id", "variant", "content", "blocks", "timestamp"}),
-    frozenset({"completionTime", "credits", "isComplete", "metadata", "userError"}),
+  frozenset({"id", "variant", "content", "blocks", "timestamp"}),
+  frozenset({"completionTime", "credits", "isComplete", "metadata", "userError"}),
 )
 CODEBUFF_ATTACHMENT_KEYS = (frozenset({"id", "content"}), frozenset({"preview", "charCount"}))
 CODEBUFF_QUESTION_KEYS = (frozenset({"question", "options", "multiSelect"}), frozenset({"header"}))
@@ -2948,458 +2950,458 @@ CODEBUFF_TEXT_KINDS = frozenset({"text", "reasoning"})
 
 
 def codebuff_keys(record: Any, keys: tuple[frozenset[str], frozenset[str]], what: str) -> None:
-    """Refuse a record that lacks a key every such record has, or holds one
-    no store has shown."""
-    required, optional = keys
-    if not (isinstance(record, dict) and required <= record.keys() <= required | optional):
-        raise ValueError(f"{what} {sorted(record) if isinstance(record, dict) else type(record).__name__}")
+  """Refuse a record that lacks a key every such record has, or holds one
+  no store has shown."""
+  required, optional = keys
+  if not (isinstance(record, dict) and required <= record.keys() <= required | optional):
+    raise ValueError(f"{what} {sorted(record) if isinstance(record, dict) else type(record).__name__}")
 
 
 def codebuff_match(pattern: re.Pattern[str], text: Any, what: str) -> re.Match[str]:
-    found = pattern.fullmatch(text) if isinstance(text, str) else None
-    if found is None:
-        raise ValueError(f"{what} {text!r:.80}")
-    return found
+  found = pattern.fullmatch(text) if isinstance(text, str) else None
+  if found is None:
+    raise ValueError(f"{what} {text!r:.80}")
+  return found
 
 
 def codebuff_after(at: dt.datetime, count: int) -> dt.datetime:
-    """The time given a human act the store records no time for: a prompt
-    in a chat older than the log's stamps, or answers to the agent's
-    questions. It is the last time the store records before the act, plus
-    the act's place among such acts in microseconds, so the acts keep their
-    order and each its own holding; the page, showing minutes, shows that
-    recorded time."""
-    return at + dt.timedelta(microseconds=count)
+  """The time given a human act the store records no time for: a prompt
+  in a chat older than the log's stamps, or answers to the agent's
+  questions. It is the last time the store records before the act, plus
+  the act's place among such acts in microseconds, so the acts keep their
+  order and each its own holding; the page, showing minutes, shows that
+  recorded time."""
+  return at + dt.timedelta(microseconds=count)
 
 
 def codebuff_tool(name: Any) -> str:
-    if not isinstance(name, str) or not (name in CODEBUFF_TOOLS or CODEBUFF_MCP_TOOL.fullmatch(name)):
-        raise ValueError(f"tool {name!r}")
-    return name
+  if not isinstance(name, str) or not (name in CODEBUFF_TOOLS or CODEBUFF_MCP_TOOL.fullmatch(name)):
+    raise ValueError(f"tool {name!r}")
+  return name
 
 
 def codebuff_change_tally(created: bool, change: str) -> tuple[int, int]:
-    """A created file's lines, every one added; otherwise a diff's hunks."""
-    if created:
-        return (len(change.splitlines()), 0)
-    lines = change.split("\n")
-    if not lines[0].startswith("@@"):
-        raise ValueError(f"change {change!r:.80}")
-    return diff_tally(lines)
+  """A created file's lines, every one added; otherwise a diff's hunks."""
+  if created:
+    return (len(change.splitlines()), 0)
+  lines = change.split("\n")
+  if not lines[0].startswith("@@"):
+    raise ValueError(f"change {change!r:.80}")
+  return diff_tally(lines)
 
 
 def codebuff_edit_tally(output: Any) -> tuple[int, int]:
-    """The lines a blocks-history edit changed, from its output: the file,
-    a message, and the change, set out as an indented block. An edit that
-    changed nothing says so instead."""
-    if not isinstance(output, str):
-        raise ValueError(f"edit output {output!r:.80}")
-    if not output.startswith("file: "):
-        if not output.endswith("No change to the file"):
-            raise ValueError(f"edit output {output!r:.80}")
-        return (0, 0)
-    lines = output.split("\n")
-    body = lines[lines.index("unifiedDiff: |") + 1:]
-    if not all(line.startswith("    ") for line in body):
-        raise ValueError(f"edit output {output!r:.80}")
-    return codebuff_change_tally(lines[1] == f"message: {CODEBUFF_CREATED}", "\n".join(line[4:] for line in body))
+  """The lines a blocks-history edit changed, from its output: the file,
+  a message, and the change, set out as an indented block. An edit that
+  changed nothing says so instead."""
+  if not isinstance(output, str):
+    raise ValueError(f"edit output {output!r:.80}")
+  if not output.startswith("file: "):
+    if not output.endswith("No change to the file"):
+      raise ValueError(f"edit output {output!r:.80}")
+    return (0, 0)
+  lines = output.split("\n")
+  body = lines[lines.index("unifiedDiff: |") + 1:]
+  if not all(line.startswith("    ") for line in body):
+    raise ValueError(f"edit output {output!r:.80}")
+  return codebuff_change_tally(lines[1] == f"message: {CODEBUFF_CREATED}", "\n".join(line[4:] for line in body))
 
 
 def codebuff_block_tally(block: Mapping[str, Any]) -> tuple[int, int]:
-    """The lines a block changed: an edit's, every edit of a subagent's
-    (Codebuff's main agent hands most edits to subagents), or none."""
-    match block["type"]:
-        case "tool":
-            name = codebuff_tool(block["toolName"])
-            return codebuff_edit_tally(block["output"]) if name in CODEBUFF_EDITS else (0, 0)
-        case "agent":
-            added = deleted = 0
-            for inner in block["blocks"]:
-                if inner["type"] not in CODEBUFF_SUBAGENT_BLOCKS:
-                    raise ValueError(f"subagent block {inner['type']!r}")
-                a, d = codebuff_block_tally(inner)
-                added, deleted = added + a, deleted + d
-            return (added, deleted)
-        case _:
-            return (0, 0)
+  """The lines a block changed: an edit's, every edit of a subagent's
+  (Codebuff's main agent hands most edits to subagents), or none."""
+  match block["type"]:
+    case "tool":
+      name = codebuff_tool(block["toolName"])
+      return codebuff_edit_tally(block["output"]) if name in CODEBUFF_EDITS else (0, 0)
+    case "agent":
+      added = deleted = 0
+      for inner in block["blocks"]:
+        if inner["type"] not in CODEBUFF_SUBAGENT_BLOCKS:
+          raise ValueError(f"subagent block {inner['type']!r}")
+        a, d = codebuff_block_tally(inner)
+        added, deleted = added + a, deleted + d
+      return (added, deleted)
+    case _:
+      return (0, 0)
 
 
 def codebuff_answers(block: Mapping[str, Any]) -> tuple[str, tuple[Ballot, ...]] | None:
-    """The human's answers to the agent's questions: the words typed, and a
-    ballot for each question answered, its picked options those clicked
-    (none for a typed answer). None when the human skipped the questions."""
-    codebuff_keys(block, (frozenset({"type", "toolCallId", "questions"}), frozenset({"answers", "skipped"})), "questions")
-    questions: list[tuple[str, tuple[str, ...]]] = []
-    for question in block["questions"]:
-        codebuff_keys(question, CODEBUFF_QUESTION_KEYS, "question")
-        for option in question["options"]:
-            codebuff_keys(option, (frozenset({"label", "description"}), frozenset()), "option")
-        questions.append((question["question"], tuple(option["label"] for option in question["options"])))
-    match block:
-        case {"skipped": True} if "answers" not in block:
-            return None
-        case {"answers": list() as answers} if "skipped" not in block:
-            pass
-        case _:
-            raise ValueError("questions neither answered nor skipped")
-    typed: list[str] = []
-    ballots: list[Ballot] = []
-    for answer in answers:
-        match answer:
-            case {"questionIndex": int() as index, "selectedOption": str() as label} if len(answer) == 2:
-                picked: tuple[str, ...] = (label,)
-            case {"questionIndex": int() as index, "selectedOptions": list() as labels} if len(answer) == 2:
-                picked = tuple(labels)
-            case {"questionIndex": int() as index, "otherText": str() as words} if len(answer) == 2:
-                picked = ()
-                typed.append(words)
-            case _:
-                raise ValueError(f"answer {answer!r:.80}")
-        question, options = questions[index]
-        if not set(picked) <= set(options):
-            raise ValueError(f"answer naming no option {picked!r:.80}")
-        ballots.append(Ballot(question=question, options=options, picked=picked))
-    return "\n\n".join(typed), tuple(ballots)
+  """The human's answers to the agent's questions: the words typed, and a
+  ballot for each question answered, its picked options those clicked
+  (none for a typed answer). None when the human skipped the questions."""
+  codebuff_keys(block, (frozenset({"type", "toolCallId", "questions"}), frozenset({"answers", "skipped"})), "questions")
+  questions: list[tuple[str, tuple[str, ...]]] = []
+  for question in block["questions"]:
+    codebuff_keys(question, CODEBUFF_QUESTION_KEYS, "question")
+    for option in question["options"]:
+      codebuff_keys(option, (frozenset({"label", "description"}), frozenset()), "option")
+    questions.append((question["question"], tuple(option["label"] for option in question["options"])))
+  match block:
+    case {"skipped": True} if "answers" not in block:
+      return None
+    case {"answers": list() as answers} if "skipped" not in block:
+      pass
+    case _:
+      raise ValueError("questions neither answered nor skipped")
+  typed: list[str] = []
+  ballots: list[Ballot] = []
+  for answer in answers:
+    match answer:
+      case {"questionIndex": int() as index, "selectedOption": str() as label} if len(answer) == 2:
+        picked: tuple[str, ...] = (label,)
+      case {"questionIndex": int() as index, "selectedOptions": list() as labels} if len(answer) == 2:
+        picked = tuple(labels)
+      case {"questionIndex": int() as index, "otherText": str() as words} if len(answer) == 2:
+        picked = ()
+        typed.append(words)
+      case _:
+        raise ValueError(f"answer {answer!r:.80}")
+    question, options = questions[index]
+    if not set(picked) <= set(options):
+      raise ValueError(f"answer naming no option {picked!r:.80}")
+    ballots.append(Ballot(question=question, options=options, picked=picked))
+  return "\n\n".join(typed), tuple(ballots)
 
 
 def codebuff_reply(message: Mapping[str, Any], prompted: dt.datetime, logged: str) -> list[Message]:
-    """A blocks-history reply to the prompt sent at `prompted`, as messages:
-    the agent's words, and, at each set of questions the human answered,
-    the answers, which begin an exchange of their own. The reply's run
-    records the model, in its run state's template of the main agent (a
-    reply cut short has no run state; one from before 2025-12 has no
-    templates, and takes the model its chat's log names, `logged`), and the
-    run's span, the agent's work unless the run waited on the human."""
-    codebuff_keys(message, CODEBUFF_REPLY_KEYS, "reply")
-    codebuff_match(CODEBUFF_REPLY_CONTENT, message["content"], "reply content")
-    began = parse_time(int(codebuff_match(CODEBUFF_REPLY_ID, message["id"], "reply id")[1]))
-    model = logged
-    if "metadata" in message:
-        state = message["metadata"]["runState"]["sessionState"]
-        templates = state["fileContext"]["agentTemplates"]
-        model = templates[state["mainAgentState"]["agentType"]]["model"] if templates else logged
-    blocks = message["blocks"]
-    seconds = 0.0
-    if "completionTime" in message and not any(block["type"] == "ask-user" for block in blocks):
-        found = codebuff_match(CODEBUFF_COMPLETION, message["completionTime"], "completion time")
-        seconds = float(int(found[1] or 0) + 60 * int(found[2] or 0) + int(found[3] or 0))
-    messages: list[Message] = []
-    words: list[str] = []
-    added = deleted = 0
-    at = prompted
-    for block in blocks:
-        kind = block["type"]
-        if kind not in CODEBUFF_BLOCKS:
-            raise ValueError(f"block {kind!r}")
-        a, d = codebuff_block_tally(block)
-        added, deleted = added + a, deleted + d
-        match kind:
-            case "text":
-                if block["textType"] not in CODEBUFF_TEXT_KINDS:
-                    raise ValueError(f"text kind {block['textType']!r}")
-                if block["textType"] == "text" and block["content"].strip():
-                    words.append(block["content"])
-            case "plan":
-                codebuff_keys(block, (frozenset({"type", "content"}), frozenset()), "plan")
-                words.append(block["content"])
-            case "ask-user":
-                answers = codebuff_answers(block)
-                if answers is not None:
-                    messages.append(Message("assistant", at, "\n\n".join(words), model, added=added, deleted=deleted))
-                    words, added, deleted = [], 0, 0
-                    at = codebuff_after(began, sum(m.role == "user" for m in messages) + 1)
-                    messages.append(Message("user", at, answers[0], ballots=answers[1]))
-    messages.append(Message(
-        "assistant", at + dt.timedelta(seconds=seconds), "\n\n".join(words), model,
-        active=seconds, added=added, deleted=deleted,
-    ))
-    return messages
+  """A blocks-history reply to the prompt sent at `prompted`, as messages:
+  the agent's words, and, at each set of questions the human answered,
+  the answers, which begin an exchange of their own. The reply's run
+  records the model, in its run state's template of the main agent (a
+  reply cut short has no run state; one from before 2025-12 has no
+  templates, and takes the model its chat's log names, `logged`), and the
+  run's span, the agent's work unless the run waited on the human."""
+  codebuff_keys(message, CODEBUFF_REPLY_KEYS, "reply")
+  codebuff_match(CODEBUFF_REPLY_CONTENT, message["content"], "reply content")
+  began = parse_time(int(codebuff_match(CODEBUFF_REPLY_ID, message["id"], "reply id")[1]))
+  model = logged
+  if "metadata" in message:
+    state = message["metadata"]["runState"]["sessionState"]
+    templates = state["fileContext"]["agentTemplates"]
+    model = templates[state["mainAgentState"]["agentType"]]["model"] if templates else logged
+  blocks = message["blocks"]
+  seconds = 0.0
+  if "completionTime" in message and not any(block["type"] == "ask-user" for block in blocks):
+    found = codebuff_match(CODEBUFF_COMPLETION, message["completionTime"], "completion time")
+    seconds = float(int(found[1] or 0) + 60 * int(found[2] or 0) + int(found[3] or 0))
+  messages: list[Message] = []
+  words: list[str] = []
+  added = deleted = 0
+  at = prompted
+  for block in blocks:
+    kind = block["type"]
+    if kind not in CODEBUFF_BLOCKS:
+      raise ValueError(f"block {kind!r}")
+    a, d = codebuff_block_tally(block)
+    added, deleted = added + a, deleted + d
+    match kind:
+      case "text":
+        if block["textType"] not in CODEBUFF_TEXT_KINDS:
+          raise ValueError(f"text kind {block['textType']!r}")
+        if block["textType"] == "text" and block["content"].strip():
+          words.append(block["content"])
+      case "plan":
+        codebuff_keys(block, (frozenset({"type", "content"}), frozenset()), "plan")
+        words.append(block["content"])
+      case "ask-user":
+        answers = codebuff_answers(block)
+        if answers is not None:
+          messages.append(Message("assistant", at, "\n\n".join(words), model, added=added, deleted=deleted))
+          words, added, deleted = [], 0, 0
+          at = codebuff_after(began, sum(m.role == "user" for m in messages) + 1)
+          messages.append(Message("user", at, answers[0], ballots=answers[1]))
+  messages.append(Message(
+    "assistant", at + dt.timedelta(seconds=seconds), "\n\n".join(words), model,
+    active=seconds, added=added, deleted=deleted,
+  ))
+  return messages
 
 
 def codebuff_logged_model(log: Path) -> str:
-    """The model a blocks chat's log names at every step its main agent
-    took; "" when the steps name several (nothing says which reply used
-    which) or none."""
-    models: set[str] = set()
-    for line in log.read_bytes().split(b"\n"):
-        if b"main-agent" in line and b"Start agent " in line:
-            record = json.loads(line)
-            if record["msg"].startswith("Start agent ") and record["data"].get("agentId") == "main-agent":
-                models.add(record["data"]["model"])
-    return models.pop() if len(models) == 1 else ""
+  """The model a blocks chat's log names at every step its main agent
+  took; "" when the steps name several (nothing says which reply used
+  which) or none."""
+  models: set[str] = set()
+  for line in log.read_bytes().split(b"\n"):
+    if b"main-agent" in line and b"Start agent " in line:
+      record = json.loads(line)
+      if record["msg"].startswith("Start agent ") and record["data"].get("agentId") == "main-agent":
+        models.add(record["data"]["model"])
+  return models.pop() if len(models) == 1 else ""
 
 
 def codebuff_blocks(chat: Path, repo: Path) -> tuple[list[Exchange], set[Holding]] | None:
-    """A chat's blocks history: its prompts, the replies (a reply the human
-    stopped may be followed by a second, the agent summing up), and the
-    human's answers to the agent's questions. None when its run state says
-    Codebuff ran in another directory of the repo's name."""
-    context = read_json(chat / "run-state.json")["sessionState"]["fileContext"]
-    if not under_dir(context["projectRoot"], repo, chat):
-        return None
-    # Before 2025-12 a run state held no agent templates, so only the log
-    # names the main agent's model; only then is the log opened.
-    logged = "" if context["agentTemplates"] else codebuff_logged_model(chat / "log.jsonl")
-    messages: list[Message] = []
-    sent: dt.datetime | None = None  # when the last prompt was sent
-    for message in read_json(chat / "chat-messages.json"):
-        match message["variant"]:
-            case "user":
-                codebuff_keys(message, CODEBUFF_PROMPT_KEYS, "prompt")
-                sent = parse_time(int(codebuff_match(CODEBUFF_PROMPT_ID, message["id"], "prompt id")[1]))
-                # A long paste Codebuff kept apart, as a text attachment
-                # (beside a preview and a count of its characters).
-                pasted = []
-                for attachment in message.get("textAttachments", []):
-                    codebuff_keys(attachment, CODEBUFF_ATTACHMENT_KEYS, "attachment")
-                    pasted.append(attachment["content"])
-                messages.append(Message("user", sent, "\n\n".join(part for part in [message["content"], *pasted] if part)))
-            case "ai" if message["id"].startswith("divider-"):
-                # The marker shown where the chat's mode changed.
-                codebuff_keys(message, CODEBUFF_REPLY_KEYS, "divider")
-                codebuff_match(CODEBUFF_DIVIDER_ID, message["id"], "divider id")
-                match message["content"], message["blocks"]:
-                    case "", [{"type": "mode-divider", "mode": str()} as divider] if len(divider) == 2:
-                        pass
-                    case _:
-                        raise ValueError(f"divider {message['blocks']!r:.80}")
-            case "ai":
-                if sent is None:
-                    raise ValueError("a reply to no prompt")
-                messages.extend(codebuff_reply(message, sent, logged))
-            case variant:
-                raise ValueError(f"message {variant!r}")
-    holdings = {("Codebuff", message.timestamp) for message in messages if message.role == "user"}
-    return paired("Codebuff", chat.name, messages, chat), holdings
+  """A chat's blocks history: its prompts, the replies (a reply the human
+  stopped may be followed by a second, the agent summing up), and the
+  human's answers to the agent's questions. None when its run state says
+  Codebuff ran in another directory of the repo's name."""
+  context = read_json(chat / "run-state.json")["sessionState"]["fileContext"]
+  if not under_dir(context["projectRoot"], repo, chat):
+    return None
+  # Before 2025-12 a run state held no agent templates, so only the log
+  # names the main agent's model; only then is the log opened.
+  logged = "" if context["agentTemplates"] else codebuff_logged_model(chat / "log.jsonl")
+  messages: list[Message] = []
+  sent: dt.datetime | None = None  # when the last prompt was sent
+  for message in read_json(chat / "chat-messages.json"):
+    match message["variant"]:
+      case "user":
+        codebuff_keys(message, CODEBUFF_PROMPT_KEYS, "prompt")
+        sent = parse_time(int(codebuff_match(CODEBUFF_PROMPT_ID, message["id"], "prompt id")[1]))
+        # A long paste Codebuff kept apart, as a text attachment
+        # (beside a preview and a count of its characters).
+        pasted = []
+        for attachment in message.get("textAttachments", []):
+          codebuff_keys(attachment, CODEBUFF_ATTACHMENT_KEYS, "attachment")
+          pasted.append(attachment["content"])
+        messages.append(Message("user", sent, "\n\n".join(part for part in [message["content"], *pasted] if part)))
+      case "ai" if message["id"].startswith("divider-"):
+        # The marker shown where the chat's mode changed.
+        codebuff_keys(message, CODEBUFF_REPLY_KEYS, "divider")
+        codebuff_match(CODEBUFF_DIVIDER_ID, message["id"], "divider id")
+        match message["content"], message["blocks"]:
+          case "", [{"type": "mode-divider", "mode": str()} as divider] if len(divider) == 2:
+            pass
+          case _:
+            raise ValueError(f"divider {message['blocks']!r:.80}")
+      case "ai":
+        if sent is None:
+          raise ValueError("a reply to no prompt")
+        messages.extend(codebuff_reply(message, sent, logged))
+      case variant:
+        raise ValueError(f"message {variant!r}")
+  holdings = {("Codebuff", message.timestamp) for message in messages if message.role == "user"}
+  return paired("Codebuff", chat.name, messages, chat), holdings
 
 
 def codebuff_typed(text: str) -> str | None:
-    """The words a messages-history text in the user role holds as typed,
-    or None when Codebuff wrote it. A text that is no known injection is
-    typed, as a prompt opening with markup may be."""
-    found = CODEBUFF_TYPED.fullmatch(text)
-    if found is not None:
-        return found[1]
-    if text.startswith(CODEBUFF_WRAPPERS + CODEBUFF_INJECTIONS) or CODEBUFF_INSTRUCTIONS.search(text):
-        return None
-    return text
+  """The words a messages-history text in the user role holds as typed,
+  or None when Codebuff wrote it. A text that is no known injection is
+  typed, as a prompt opening with markup may be."""
+  found = CODEBUFF_TYPED.fullmatch(text)
+  if found is not None:
+    return found[1]
+  if text.startswith(CODEBUFF_WRAPPERS + CODEBUFF_INJECTIONS) or CODEBUFF_INSTRUCTIONS.search(text):
+    return None
+  return text
 
 
 def codebuff_said(text: str) -> str:
-    """The agent's words a messages-history text in the user role holds,
-    without its tool calls; "" when it holds none."""
-    found = CODEBUFF_SAID.fullmatch(text)
-    return CODEBUFF_CALLS.sub("", "".join(part for part in found.groups() if part)) if found else ""
+  """The agent's words a messages-history text in the user role holds,
+  without its tool calls; "" when it holds none."""
+  found = CODEBUFF_SAID.fullmatch(text)
+  return CODEBUFF_CALLS.sub("", "".join(part for part in found.groups() if part)) if found else ""
 
 
 def codebuff_stamps(log: Path) -> list[tuple[dt.datetime, str]] | None:
-    """The inputs the log stamps as typed, in order, with their times; an
-    empty input (Return on an empty line) types nothing. None when the log
-    stamps no input, as Codebuff's logs did not before 2025-09."""
-    label = json.dumps(CODEBUFF_STAMP).encode()
-    stamps: list[tuple[dt.datetime, str]] = []
-    stamping = False  # whether the log stamps inputs at all
-    for line in log.read_bytes().split(b"\n"):
-        if label not in line:
-            continue
-        record = json.loads(line)
-        if record.get("data") != CODEBUFF_STAMP:
-            continue  # a record quoting the label, which is no stamp
-        match record["msg"]:
-            case {"input": str() as words, "imagePaths": [], "count": 0} if len(record["msg"]) == 3:
-                stamping = True
-            case stamp:
-                raise ValueError(f"stamp {stamp!r:.80}")
-        if words:
-            stamps.append((parse_time(record["timestamp"]), words))
-    return stamps if stamping else None
+  """The inputs the log stamps as typed, in order, with their times; an
+  empty input (Return on an empty line) types nothing. None when the log
+  stamps no input, as Codebuff's logs did not before 2025-09."""
+  label = json.dumps(CODEBUFF_STAMP).encode()
+  stamps: list[tuple[dt.datetime, str]] = []
+  stamping = False  # whether the log stamps inputs at all
+  for line in log.read_bytes().split(b"\n"):
+    if label not in line:
+      continue
+    record = json.loads(line)
+    if record.get("data") != CODEBUFF_STAMP:
+      continue  # a record quoting the label, which is no stamp
+    match record["msg"]:
+      case {"input": str() as words, "imagePaths": [], "count": 0} if len(record["msg"]) == 3:
+        stamping = True
+      case stamp:
+        raise ValueError(f"stamp {stamp!r:.80}")
+    if words:
+      stamps.append((parse_time(record["timestamp"]), words))
+  return stamps if stamping else None
 
 
 def codebuff_history(chat: Path, repo: Path) -> tuple[list[Exchange], set[Holding]]:
-    """A chat's messages history, or its log alone: the prompts and replies,
-    each prompt at the time the log stamped it, or, in a chat whose log
-    stamps none, at the time the chat began, in order (see codebuff_after).
-    An input the log stamps that never reached the history is a prompt
-    with no reply; a prompt in the history the log never stamped is a shape
-    no store has shown. Such a chat records no directory, so its folder
-    alone makes it the repo's, and `repo` goes unread."""
-    source = chat / "messages.json"
-    history: list[Any] = []
-    if source.exists():
-        record = read_json(source)
-        codebuff_keys(record, (frozenset({"id", "messages", "updatedAt"}), frozenset()), "history")
-        if record["id"] != chat.name:
-            raise ValueError(f"history of {record['id']!r}")
-        history = record["messages"]
-    log = chat / "log.jsonl"
-    stamped = codebuff_stamps(log) if log.exists() else None
-    stamps = iter(stamped or [])
-    start = codebuff_time(chat)
-    messages: list[Message] = []
-    added = deleted = 0  # lines changed since the last message
-    at = start  # when the last prompt was typed
+  """A chat's messages history, or its log alone: the prompts and replies,
+  each prompt at the time the log stamped it, or, in a chat whose log
+  stamps none, at the time the chat began, in order (see codebuff_after).
+  An input the log stamps that never reached the history is a prompt
+  with no reply; a prompt in the history the log never stamped is a shape
+  no store has shown. Such a chat records no directory, so its folder
+  alone makes it the repo's, and `repo` goes unread."""
+  source = chat / "messages.json"
+  history: list[Any] = []
+  if source.exists():
+    record = read_json(source)
+    codebuff_keys(record, (frozenset({"id", "messages", "updatedAt"}), frozenset()), "history")
+    if record["id"] != chat.name:
+      raise ValueError(f"history of {record['id']!r}")
+    history = record["messages"]
+  log = chat / "log.jsonl"
+  stamped = codebuff_stamps(log) if log.exists() else None
+  stamps = iter(stamped or [])
+  start = codebuff_time(chat)
+  messages: list[Message] = []
+  added = deleted = 0  # lines changed since the last message
+  at = start  # when the last prompt was typed
 
-    def emit(role: str, when: dt.datetime, text: str) -> None:
-        nonlocal added, deleted
-        messages.append(Message(role, when, text, added=added, deleted=deleted))
-        added = deleted = 0
+  def emit(role: str, when: dt.datetime, text: str) -> None:
+    nonlocal added, deleted
+    messages.append(Message(role, when, text, added=added, deleted=deleted))
+    added = deleted = 0
 
-    for message in history:
-        codebuff_keys(message, CODEBUFF_MESSAGE_KEYS, "message")
-        if not {*message.get("tags", []), *message.get("keepLastTags", [])} <= CODEBUFF_TAGS:
-            raise ValueError(f"tags {message.get('tags')!r} {message.get('keepLastTags')!r}")
-        match message["role"], message["content"]:
-            case "tool", content:
-                a, d = codebuff_result_tally(content)
-                added, deleted = added + a, deleted + d
-            case "assistant", str() as content:
-                words = CODEBUFF_CALLS.sub("", content)
-                if words.strip():
-                    emit("assistant", at, words)
-            case "user", content:
-                pieces = [{"type": "text", "text": content}] if isinstance(content, str) else content
-                for piece in pieces:
-                    if piece["type"] not in CODEBUFF_PIECES:
-                        raise ValueError(f"piece {piece['type']!r}")
-                    codebuff_keys(piece, CODEBUFF_PIECES[piece["type"]], "piece")
-                texts = [piece["text"] for piece in pieces if piece["type"] == "text"]
-                typed = [words for words in map(codebuff_typed, texts) if words is not None]
-                if typed and len(texts) < len(pieces):
-                    raise ValueError("an image beside typed words")
-                for text in texts:
-                    said = codebuff_said(text)
-                    if said.strip():
-                        emit("assistant", at, said)
-                for words in typed:
-                    if stamped is None:
-                        at = codebuff_after(start, sum(m.role == "user" for m in messages))
-                    else:
-                        for at, entered in stamps:
-                            if entered == words:
-                                break
-                            emit("user", at, entered)  # typed, but it never reached the history
-                        else:
-                            raise ValueError(f"a prompt no stamp names {words!r:.80}")
-                    emit("user", at, words)
-            case role, _:
-                raise ValueError(f"message {role!r}")
-    for at, entered in stamps:
-        emit("user", at, entered)
-    holdings = {("Codebuff", message.timestamp) for message in messages if message.role == "user"}
-    return paired("Codebuff", chat.name, messages, chat, (0.0, added, deleted)), holdings
+  for message in history:
+    codebuff_keys(message, CODEBUFF_MESSAGE_KEYS, "message")
+    if not {*message.get("tags", []), *message.get("keepLastTags", [])} <= CODEBUFF_TAGS:
+      raise ValueError(f"tags {message.get('tags')!r} {message.get('keepLastTags')!r}")
+    match message["role"], message["content"]:
+      case "tool", content:
+        a, d = codebuff_result_tally(content)
+        added, deleted = added + a, deleted + d
+      case "assistant", str() as content:
+        words = CODEBUFF_CALLS.sub("", content)
+        if words.strip():
+          emit("assistant", at, words)
+      case "user", content:
+        pieces = [{"type": "text", "text": content}] if isinstance(content, str) else content
+        for piece in pieces:
+          if piece["type"] not in CODEBUFF_PIECES:
+            raise ValueError(f"piece {piece['type']!r}")
+          codebuff_keys(piece, CODEBUFF_PIECES[piece["type"]], "piece")
+        texts = [piece["text"] for piece in pieces if piece["type"] == "text"]
+        typed = [words for words in map(codebuff_typed, texts) if words is not None]
+        if typed and len(texts) < len(pieces):
+          raise ValueError("an image beside typed words")
+        for text in texts:
+          said = codebuff_said(text)
+          if said.strip():
+            emit("assistant", at, said)
+        for words in typed:
+          if stamped is None:
+            at = codebuff_after(start, sum(m.role == "user" for m in messages))
+          else:
+            for at, entered in stamps:
+              if entered == words:
+                break
+              emit("user", at, entered)  # typed, but it never reached the history
+            else:
+              raise ValueError(f"a prompt no stamp names {words!r:.80}")
+          emit("user", at, words)
+      case role, _:
+        raise ValueError(f"message {role!r}")
+  for at, entered in stamps:
+    emit("user", at, entered)
+  holdings = {("Codebuff", message.timestamp) for message in messages if message.role == "user"}
+  return paired("Codebuff", chat.name, messages, chat, (0.0, added, deleted)), holdings
 
 
 def codebuff_result_tally(content: Any) -> tuple[int, int]:
-    """The lines a messages-history tool result says it changed: only an
-    edit's result kept whole says by how much."""
-    codebuff_keys(content, (frozenset({"type", "toolCallId", "toolName", "output"}), frozenset()), "tool result")
-    if content["type"] != "tool-result":
-        raise ValueError(f"tool result {content['type']!r}")
-    name = codebuff_tool(content["toolName"])
-    added = deleted = 0
-    for item in content["output"]:
-        codebuff_keys(item, (frozenset({"type", "value"}), frozenset()), "tool output")
-        if item["type"] != "json":
-            raise ValueError(f"tool output {item['type']!r}")
-        value = item["value"]
-        if name in CODEBUFF_EDITS and isinstance(value, dict) and "unifiedDiff" in value:
-            a, d = codebuff_change_tally(value["message"] == CODEBUFF_CREATED, value["unifiedDiff"])
-            added, deleted = added + a, deleted + d
-    return (added, deleted)
+  """The lines a messages-history tool result says it changed: only an
+  edit's result kept whole says by how much."""
+  codebuff_keys(content, (frozenset({"type", "toolCallId", "toolName", "output"}), frozenset()), "tool result")
+  if content["type"] != "tool-result":
+    raise ValueError(f"tool result {content['type']!r}")
+  name = codebuff_tool(content["toolName"])
+  added = deleted = 0
+  for item in content["output"]:
+    codebuff_keys(item, (frozenset({"type", "value"}), frozenset()), "tool output")
+    if item["type"] != "json":
+      raise ValueError(f"tool output {item['type']!r}")
+    value = item["value"]
+    if name in CODEBUFF_EDITS and isinstance(value, dict) and "unifiedDiff" in value:
+      a, d = codebuff_change_tally(value["message"] == CODEBUFF_CREATED, value["unifiedDiff"])
+      added, deleted = added + a, deleted + d
+  return (added, deleted)
 
 
 def codebuff_time(chat: Path) -> dt.datetime:
-    """When the chat began, as its folder's name records it."""
-    found = codebuff_match(CODEBUFF_CHAT, chat.name, "chat")
-    return parse_time(f"{found[1]}{found[2]}:{found[3]}:{found[4]}")
+  """When the chat began, as its folder's name records it."""
+  found = codebuff_match(CODEBUFF_CHAT, chat.name, "chat")
+  return parse_time(f"{found[1]}{found[2]}:{found[3]}:{found[4]}")
 
 
 # The files a chat's folder holds, by layout, and the reader of each.
 CODEBUFF_LAYOUTS: dict[frozenset[str], Callable[[Path, Path], tuple[list[Exchange], set[Holding]] | None]] = {
-    frozenset({"log.jsonl"}): codebuff_history,
-    frozenset({"messages.json"}): codebuff_history,
-    frozenset({"messages.json", "log.jsonl"}): codebuff_history,
-    frozenset({"chat-messages.json", "run-state.json", "log.jsonl"}): codebuff_blocks,
+  frozenset({"log.jsonl"}): codebuff_history,
+  frozenset({"messages.json"}): codebuff_history,
+  frozenset({"messages.json", "log.jsonl"}): codebuff_history,
+  frozenset({"chat-messages.json", "run-state.json", "log.jsonl"}): codebuff_blocks,
 }
 
 
 def codebuff_chats(root: Path, repo: Path) -> list[Path]:
-    """The chat folders Codebuff keeps under the repo's directory name. Any
-    entry there that is neither a chat nor what Codebuff keeps beside its
-    chats may hold a transcript, and is refused."""
-    project = root / "projects" / repo.name
-    if not project.is_dir():
-        return []
-    for entry in sorted(p for p in project.iterdir() if p.name not in STORE_LITTER):
-        if not entry.is_dir() or not (entry.name in CODEBUFF_BESIDE or CODEBUFF_CHECKPOINTS.fullmatch(entry.name)):
-            raise unread_file(entry, "Codebuff", "chats/")
-    chats = project / "chats"
-    if not chats.is_dir():
-        return []
-    found = sorted(p for p in chats.iterdir() if p.name not in STORE_LITTER)
-    for chat in found:
-        if not chat.is_dir() or CODEBUFF_CHAT.fullmatch(chat.name) is None:
-            raise unread_file(chat, "Codebuff", "chats/YYYY-MM-DDTHH-MM-SS.mmmZ/")
-    return found
+  """The chat folders Codebuff keeps under the repo's directory name. Any
+  entry there that is neither a chat nor what Codebuff keeps beside its
+  chats may hold a transcript, and is refused."""
+  project = root / "projects" / repo.name
+  if not project.is_dir():
+    return []
+  for entry in sorted(p for p in project.iterdir() if p.name not in STORE_LITTER):
+    if not entry.is_dir() or not (entry.name in CODEBUFF_BESIDE or CODEBUFF_CHECKPOINTS.fullmatch(entry.name)):
+      raise unread_file(entry, "Codebuff", "chats/")
+  chats = project / "chats"
+  if not chats.is_dir():
+    return []
+  found = sorted(p for p in chats.iterdir() if p.name not in STORE_LITTER)
+  for chat in found:
+    if not chat.is_dir() or CODEBUFF_CHAT.fullmatch(chat.name) is None:
+      raise unread_file(chat, "Codebuff", "chats/YYYY-MM-DDTHH-MM-SS.mmmZ/")
+  return found
 
 
 def codebuff_exchanges(
-    chat: Path, repo: Path, session_seen: Callable[[str, bool], None] = lambda session, held: None
+  chat: Path, repo: Path, session_seen: Callable[[str, bool], None] = lambda session, held: None
 ) -> tuple[list[Exchange], set[Holding]]:
-    """Every exchange a chat folder holds for the repo, with its holdings.
-    `session_seen` hears of the chat when it is the repo's, with whether it
-    holds any holding."""
-    layout = frozenset(p.name for p in chat.iterdir() if p.name not in STORE_LITTER)
-    read = CODEBUFF_LAYOUTS.get(layout)
-    if read is None:
-        raise unread_file(chat, "Codebuff", "messages.json, log.jsonl; chat-messages.json, run-state.json, log.jsonl")
-    try:
-        parsed = read(chat, repo)
-    except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
-        # TODO: Says a Codebuff chat has a shape this tool does not
-        # understand (what, and the chat's folder) — the store's format
-        # seems to have changed — and that nothing is exported until it can
-        # be read.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Forma colloquii Codebuff ignota ({exc}): {chat}\n"
-            "Forma repositi mutata videtur; nihil exportatur dum legi possit."
-        ) from exc
-    if parsed is None:
-        return [], set()
-    session_seen(chat.name, bool(parsed[1]))
-    return parsed
+  """Every exchange a chat folder holds for the repo, with its holdings.
+  `session_seen` hears of the chat when it is the repo's, with whether it
+  holds any holding."""
+  layout = frozenset(p.name for p in chat.iterdir() if p.name not in STORE_LITTER)
+  read = CODEBUFF_LAYOUTS.get(layout)
+  if read is None:
+    raise unread_file(chat, "Codebuff", "messages.json, log.jsonl; chat-messages.json, run-state.json, log.jsonl")
+  try:
+    parsed = read(chat, repo)
+  except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+    # TODO: Says a Codebuff chat has a shape this tool does not
+    # understand (what, and the chat's folder) — the store's format
+    # seems to have changed — and that nothing is exported until it can
+    # be read.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Forma colloquii Codebuff ignota ({exc}): {chat}\n"
+      "Forma repositi mutata videtur; nihil exportatur dum legi possit."
+    ) from exc
+  if parsed is None:
+    return [], set()
+  session_seen(chat.name, bool(parsed[1]))
+  return parsed
 
 
 def chronology(exchange: Exchange) -> tuple[dt.datetime, str, str, str]:
-    """The page's order: by time, ties broken by provider, session, prompt."""
-    return (exchange.timestamp, exchange.provider, exchange.session, exchange.prompt)
+  """The page's order: by time, ties broken by provider, session, prompt."""
+  return (exchange.timestamp, exchange.provider, exchange.session, exchange.prompt)
 
 
 def weave(exchanges: Iterable[Exchange]) -> list[Exchange]:
-    """Merge all providers into one chronology, collapsing exact duplicates
-    (resumed or forked sessions replay identical records into new files)."""
-    unique: dict[Exchange, Exchange] = {}
-    for exchange in exchanges:
-        identity = dataclasses.replace(exchange, session="", source=Path())
-        unique.setdefault(identity, exchange)
-    return sorted(unique.values(), key=chronology)
+  """Merge all providers into one chronology, collapsing exact duplicates
+  (resumed or forked sessions replay identical records into new files)."""
+  unique: dict[Exchange, Exchange] = {}
+  for exchange in exchanges:
+    identity = dataclasses.replace(exchange, session="", source=Path())
+    unique.setdefault(identity, exchange)
+  return sorted(unique.values(), key=chronology)
 
 
 def require_dir(root: Path) -> bool:
-    if not root.exists():
-        return False
-    if not root.is_dir():
-        # TODO: Says a configured transcript root exists but is not a
-        # directory.
-        raise UserError(f"{LATIN_PREFIX}\n" f"Radix transcriptuum directorium non est: {root}")
-    return True
+  if not root.exists():
+    return False
+  if not root.is_dir():
+    # TODO: Says a configured transcript root exists but is not a
+    # directory.
+    raise UserError(f"{LATIN_PREFIX}\n" f"Radix transcriptuum directorium non est: {root}")
+  return True
 
 
 def codex_session_dirs(root: Path) -> tuple[Path, ...]:
-    if root.name in {"sessions", "archived_sessions"}:
-        return (root,)
-    return tuple(root / name for name in ("sessions", "archived_sessions"))
+  if root.name in {"sessions", "archived_sessions"}:
+    return (root,)
+  return tuple(root / name for name in ("sessions", "archived_sessions"))
 
 
 # Files a store's folders may hold that are no transcript: the metadata
@@ -3415,128 +3417,128 @@ WAKATIME_STATE = re.compile(rb'\{\n  "lastHeartbeatAt": [0-9]+(\.[0-9]+)?\n\}')
 
 
 def wakatime_state(path: Path) -> bool:
-    """Whether a file in the Claude Code store is the WakaTime plugin's
-    state for a session, which holds no transcript."""
-    return path.name.endswith(".jsonl.wakatime") and WAKATIME_STATE.fullmatch(path.read_bytes()) is not None
+  """Whether a file in the Claude Code store is the WakaTime plugin's
+  state for a session, which holds no transcript."""
+  return path.name.endswith(".jsonl.wakatime") and WAKATIME_STATE.fullmatch(path.read_bytes()) is not None
 
 
 def unread_file(path: Path, agent: str, forms: str) -> UserError:
-    """The refusal of a file in an agent's transcript store that is in none
-    of the forms sourcery reads there. Codex began compressing its rollouts,
-    and the compressed ones went unread in silence; a file in another form
-    may be a transcript too."""
-    # TODO: Says this file in the named agent's transcript store is in a
-    # form sourcery does not read (it reads only the forms named there),
-    # though it may hold a transcript: if it does, sourcery needs updating;
-    # if not, move it out of the transcript store; then rerun. Nothing
-    # written.
-    return UserError(
-        f"{LATIN_PREFIX}\n"
-        f"Fasciculus in reposito transcriptorum {agent} formam habet quam sourcery non legit "
-        f"(legit tantum {forms}):\n{path}\n"
-        "Si transcriptum tenet, sourcery renovandum est; sin minus, eum e reposito "
-        "transcriptorum alio move. Deinde iterum curre.\nNihil scriptum est."
-    )
+  """The refusal of a file in an agent's transcript store that is in none
+  of the forms sourcery reads there. Codex began compressing its rollouts,
+  and the compressed ones went unread in silence; a file in another form
+  may be a transcript too."""
+  # TODO: Says this file in the named agent's transcript store is in a
+  # form sourcery does not read (it reads only the forms named there),
+  # though it may hold a transcript: if it does, sourcery needs updating;
+  # if not, move it out of the transcript store; then rerun. Nothing
+  # written.
+  return UserError(
+    f"{LATIN_PREFIX}\n"
+    f"Fasciculus in reposito transcriptorum {agent} formam habet quam sourcery non legit "
+    f"(legit tantum {forms}):\n{path}\n"
+    "Si transcriptum tenet, sourcery renovandum est; sin minus, eum e reposito "
+    "transcriptorum alio move. Deinde iterum curre.\nNihil scriptum est."
+  )
 
 
 def collect(
-    repo: Path, roots: Roots, seen: Callable[[str, str, Path, bool], None] = lambda provider, session, path, held: None
+  repo: Path, roots: Roots, seen: Callable[[str, str, Path, bool], None] = lambda provider, session, path, held: None
 ) -> tuple[list[Exchange], set[Holding]]:
-    """Every exchange the stores hold for the repo, unwoven, with the
-    holdings: every prompt record they still hold, kept or dropped. `seen`
-    hears of every session the stores hold for the repo, with its agent and
-    file and whether it holds any holding."""
-    exchanges: list[Exchange] = []
-    holdings: set[Holding] = set()
+  """Every exchange the stores hold for the repo, unwoven, with the
+  holdings: every prompt record they still hold, kept or dropped. `seen`
+  hears of every session the stores hold for the repo, with its agent and
+  file and whether it holds any holding."""
+  exchanges: list[Exchange] = []
+  holdings: set[Holding] = set()
 
-    def gather(parsed: tuple[list[Exchange], set[Holding]]) -> None:
-        exchanges.extend(parsed[0])
-        holdings.update(parsed[1])
+  def gather(parsed: tuple[list[Exchange], set[Holding]]) -> None:
+    exchanges.extend(parsed[0])
+    holdings.update(parsed[1])
 
-    # One Claude Code session's records can lie in two files: a cloud
-    # workspace that restarted continued its session in a second file under
-    # another project directory. claude_exchanges keeps a session's state
-    # within one file, so read apart the second file's redelivered prompts
-    # look new and its replies to the first file's last prompt are lost.
-    # Such a session is refused, for every repo alike. `session_files` maps
-    # each session to the file, line, and timestamp of its first record.
-    session_files: dict[str, tuple[Path, int, Any]] = {}
+  # One Claude Code session's records can lie in two files: a cloud
+  # workspace that restarted continued its session in a second file under
+  # another project directory. claude_exchanges keeps a session's state
+  # within one file, so read apart the second file's redelivered prompts
+  # look new and its replies to the first file's last prompt are lost.
+  # Such a session is refused, for every repo alike. `session_files` maps
+  # each session to the file, line, and timestamp of its first record.
+  session_files: dict[str, tuple[Path, int, Any]] = {}
 
-    def session_file(session: str, path: Path, line_number: int, timestamp: Any) -> None:
-        first_path, first_line, first_timestamp = session_files.setdefault(
-            session, (path, line_number, timestamp)
-        )
-        # Files are compared, not paths: one file reached by two paths (a
-        # root listed beside a symlink to it, a transcript symlinked or hard
-        # linked into another project directory) is read twice, which weave
-        # collapses, and is no split session.
-        if not first_path.samefile(path):
-            # TODO: Says one session's records lie in two transcript files,
-            # citing the session's first record in each with that record's
-            # timestamp as the record holds it, so the file the session
-            # begins in can be told; to merge the two files into one, the
-            # file the session begins in first, or, when one file is a copy
-            # of the other, to delete the copy instead of merging; then to
-            # rerun.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"Sessio {session} in duobus fasciculis est:\n"
-                f"  {first_path}:{first_line} ({first_timestamp})\n  {path}:{line_number} ({timestamp})\n"
-                "Coniunge eos in unum fasciculum, prius eum in quo sessio incipit; "
-                "si alter alterius exemplar est, exemplar dele, noli coniungere. Deinde iterum curre."
-            )
+  def session_file(session: str, path: Path, line_number: int, timestamp: Any) -> None:
+    first_path, first_line, first_timestamp = session_files.setdefault(
+      session, (path, line_number, timestamp)
+    )
+    # Files are compared, not paths: one file reached by two paths (a
+    # root listed beside a symlink to it, a transcript symlinked or hard
+    # linked into another project directory) is read twice, which weave
+    # collapses, and is no split session.
+    if not first_path.samefile(path):
+      # TODO: Says one session's records lie in two transcript files,
+      # citing the session's first record in each with that record's
+      # timestamp as the record holds it, so the file the session
+      # begins in can be told; to merge the two files into one, the
+      # file the session begins in first, or, when one file is a copy
+      # of the other, to delete the copy instead of merging; then to
+      # rerun.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Sessio {session} in duobus fasciculis est:\n"
+        f"  {first_path}:{first_line} ({first_timestamp})\n  {path}:{line_number} ({timestamp})\n"
+        "Coniunge eos in unum fasciculum, prius eum in quo sessio incipit; "
+        "si alter alterius exemplar est, exemplar dele, noli coniungere. Deinde iterum curre."
+      )
 
-    # Claude Code keeps its transcripts as .jsonl files among other files
-    # of every kind (workflow artifacts, memory notes); one named past
-    # ".jsonl" (compressed, say) is a transcript sourcery would not read,
-    # unless it is the WakaTime plugin's state.
-    for root in roots.claude:
-        if require_dir(root):
-            for path in sorted(p for p in root.rglob("*") if p.is_file()):
-                if ".jsonl." in path.name and not wakatime_state(path):
-                    raise unread_file(path, "Claude Code", ".jsonl")
-                if path.suffix == ".jsonl":
-                    gather(claude_exchanges(
-                        path, repo, session_file, lambda session, held: seen("Claude Code", session, path, held)
-                    ))
-    for root in roots.codex:
-        if require_dir(root):
-            for directory in codex_session_dirs(root):
-                if directory.is_dir():
-                    for path in sorted(p for p in directory.rglob("*") if p.is_file() and p.name not in STORE_LITTER):
-                        if not path.name.endswith((".jsonl", ".jsonl.zst")):
-                            raise unread_file(path, "Codex", ".jsonl, .jsonl.zst")
-                        gather(codex_exchanges(path, repo, lambda session, held: seen("Codex", session, path, held)))
-    for root in roots.vscode:
-        storage_root = root / "workspaceStorage"
-        if not require_dir(root) or not storage_root.is_dir():
-            continue
-        for storage in sorted(p for p in storage_root.iterdir() if p.is_dir()):
-            session_dir = storage / "chatSessions"
-            if not session_dir.is_dir():
-                continue
-            workspace = workspace_roots(storage)
-            for path in sorted(p for p in session_dir.iterdir() if p.name not in STORE_LITTER):
-                if not (path.is_file() and path.suffix in {".json", ".jsonl"}):
-                    raise unread_file(path, "Copilot Chat", ".json, .jsonl")
-                gather(vscode_exchanges(
-                    path, workspace, repo, lambda session, held: seen("Copilot Chat", session, path, held)
-                ))
-    for root in roots.antigravity:
-        conversations = root / "conversations"
-        if not require_dir(root) or not conversations.is_dir():
-            continue
-        for path in sorted(p for p in conversations.iterdir() if p.name not in STORE_LITTER):
-            if not (path.is_file() and path.suffix == ".pb"):
-                raise unread_file(path, "Antigravity", ".pb")
-            gather(antigravity_exchanges(path, repo, antigravity_key()))
-    # Codebuff keeps a project's chats under the name of the directory it ran
-    # in, so only the folder of the repo's name is opened.
-    for root in roots.codebuff:
-        if require_dir(root):
-            for chat in codebuff_chats(root, repo):
-                gather(codebuff_exchanges(chat, repo, lambda session, held: seen("Codebuff", session, chat, held)))
-    return exchanges, holdings
+  # Claude Code keeps its transcripts as .jsonl files among other files
+  # of every kind (workflow artifacts, memory notes); one named past
+  # ".jsonl" (compressed, say) is a transcript sourcery would not read,
+  # unless it is the WakaTime plugin's state.
+  for root in roots.claude:
+    if require_dir(root):
+      for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        if ".jsonl." in path.name and not wakatime_state(path):
+          raise unread_file(path, "Claude Code", ".jsonl")
+        if path.suffix == ".jsonl":
+          gather(claude_exchanges(
+            path, repo, session_file, lambda session, held: seen("Claude Code", session, path, held)
+          ))
+  for root in roots.codex:
+    if require_dir(root):
+      for directory in codex_session_dirs(root):
+        if directory.is_dir():
+          for path in sorted(p for p in directory.rglob("*") if p.is_file() and p.name not in STORE_LITTER):
+            if not path.name.endswith((".jsonl", ".jsonl.zst")):
+              raise unread_file(path, "Codex", ".jsonl, .jsonl.zst")
+            gather(codex_exchanges(path, repo, lambda session, held: seen("Codex", session, path, held)))
+  for root in roots.vscode:
+    storage_root = root / "workspaceStorage"
+    if not require_dir(root) or not storage_root.is_dir():
+      continue
+    for storage in sorted(p for p in storage_root.iterdir() if p.is_dir()):
+      session_dir = storage / "chatSessions"
+      if not session_dir.is_dir():
+        continue
+      workspace = workspace_roots(storage)
+      for path in sorted(p for p in session_dir.iterdir() if p.name not in STORE_LITTER):
+        if not (path.is_file() and path.suffix in {".json", ".jsonl"}):
+          raise unread_file(path, "Copilot Chat", ".json, .jsonl")
+        gather(vscode_exchanges(
+          path, workspace, repo, lambda session, held: seen("Copilot Chat", session, path, held)
+        ))
+  for root in roots.antigravity:
+    conversations = root / "conversations"
+    if not require_dir(root) or not conversations.is_dir():
+      continue
+    for path in sorted(p for p in conversations.iterdir() if p.name not in STORE_LITTER):
+      if not (path.is_file() and path.suffix == ".pb"):
+        raise unread_file(path, "Antigravity", ".pb")
+      gather(antigravity_exchanges(path, repo, antigravity_key()))
+  # Codebuff keeps a project's chats under the name of the directory it ran
+  # in, so only the folder of the repo's name is opened.
+  for root in roots.codebuff:
+    if require_dir(root):
+      for chat in codebuff_chats(root, repo):
+        gather(codebuff_exchanges(chat, repo, lambda session, held: seen("Codebuff", session, chat, held)))
+  return exchanges, holdings
 
 
 # --------------------------------------------------------------------- humans
@@ -3554,33 +3556,33 @@ GH_USER = ("gh", "config", "get", "user", "-h", "github.com")
 
 
 def gh_user() -> subprocess.CompletedProcess[str]:
-    """The one call sourcery makes to gh, and the seam quals replace: they
-    never call the real gh."""
-    return subprocess.run(GH_USER, capture_output=True, encoding="utf-8", errors="replace", check=False)
+  """The one call sourcery makes to gh, and the seam quals replace: they
+  never call the real gh."""
+  return subprocess.run(GH_USER, capture_output=True, encoding="utf-8", errors="replace", check=False)
 
 
 def login_error(found: str) -> UserError:
-    # TODO: Says the GitHub login the gh command-line tool saved could not
-    # be read, naming the command asked and what came back instead, and to
-    # run "gh auth login", then rerun.
-    return UserError(
-        f"{LATIN_PREFIX}\n"
-        f"Nomen GitHub a gh servatum legi non potest: {' '.join(GH_USER)}\n{found}\n"
-        "Curre 'gh auth login', deinde iterum curre."
-    )
+  # TODO: Says the GitHub login the gh command-line tool saved could not
+  # be read, naming the command asked and what came back instead, and to
+  # run "gh auth login", then rerun.
+  return UserError(
+    f"{LATIN_PREFIX}\n"
+    f"Nomen GitHub a gh servatum legi non potest: {' '.join(GH_USER)}\n{found}\n"
+    "Curre 'gh auth login', deinde iterum curre."
+  )
 
 
 def github_login() -> str:
-    """The runner's login. gh missing, failing (as when no one is signed
-    in), or printing anything but one GitHub login is refused."""
-    try:
-        done = gh_user()
-    except OSError as exc:  # gh not installed, or not runnable
-        raise login_error(str(exc)) from exc
-    login = done.stdout.removesuffix("\n")
-    if done.returncode != 0 or not GITHUB_LOGIN.fullmatch(login):
-        raise login_error(f"exit {done.returncode}, stdout {done.stdout!r}, stderr {done.stderr!r}")
-    return login.lower()
+  """The runner's login. gh missing, failing (as when no one is signed
+  in), or printing anything but one GitHub login is refused."""
+  try:
+    done = gh_user()
+  except OSError as exc:  # gh not installed, or not runnable
+    raise login_error(str(exc)) from exc
+  login = done.stdout.removesuffix("\n")
+  if done.returncode != 0 or not GITHUB_LOGIN.fullmatch(login):
+    raise login_error(f"exit {done.returncode}, stdout {done.stdout!r}, stderr {done.stderr!r}")
+  return login.lower()
 
 
 # A "display name" is what the page calls a human: the name this table
@@ -3590,96 +3592,96 @@ DISPLAY_NAMES = {"dreeves": "dreev", "mister-person": "logan"}
 
 
 def display_name(login: str) -> str:
-    return DISPLAY_NAMES.get(login, login)
+  return DISPLAY_NAMES.get(login, login)
 
 
 # ------------------------------------------------------------------ rendering
 
 
 def markdown_inline(text: str) -> str:
-    """Render a deliberately small, inert subset of inline Markdown."""
-    escaped = html.escape(text, quote=True)
-    stashed: list[str] = []
+  """Render a deliberately small, inert subset of inline Markdown."""
+  escaped = html.escape(text, quote=True)
+  stashed: list[str] = []
 
-    def stash(match: re.Match[str]) -> str:
-        token = f"{len(stashed)}"
-        stashed.append(f"<code>{match.group(2)}</code>")
-        return token
+  def stash(match: re.Match[str]) -> str:
+    token = f"{len(stashed)}"
+    stashed.append(f"<code>{match.group(2)}</code>")
+    return token
 
-    escaped = re.sub(r"(`+)(.+?)\1", stash, escaped)
-    escaped = re.sub(
-        r"\[([^\]]+)\]\((https?://[^\s)]+|mailto:[^\s)]+)\)",
-        lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>',
-        escaped,
-    )
-    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
-    escaped = re.sub(r"__(.+?)__", r"<strong>\1</strong>", escaped)
-    for index, fragment in enumerate(stashed):
-        escaped = escaped.replace(f"{index}", fragment)
-    return escaped
+  escaped = re.sub(r"(`+)(.+?)\1", stash, escaped)
+  escaped = re.sub(
+    r"\[([^\]]+)\]\((https?://[^\s)]+|mailto:[^\s)]+)\)",
+    lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>',
+    escaped,
+  )
+  escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+  escaped = re.sub(r"__(.+?)__", r"<strong>\1</strong>", escaped)
+  for index, fragment in enumerate(stashed):
+    escaped = escaped.replace(f"{index}", fragment)
+  return escaped
 
 
 def markdown_html(text: str) -> str:
-    """Render common assistant Markdown without accepting raw HTML."""
-    lines = text.splitlines()
-    out: list[str] = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if line.strip() == "":
-            i += 1
-            continue
+  """Render common assistant Markdown without accepting raw HTML."""
+  lines = text.splitlines()
+  out: list[str] = []
+  i = 0
+  while i < len(lines):
+    line = lines[i]
+    if line.strip() == "":
+      i += 1
+      continue
 
-        fence = re.match(r"^\s*(```+|~~~+)\s*([A-Za-z0-9_.+-]*)\s*$", line)
-        if fence:
-            marker, language = fence.group(1), fence.group(2)
-            i += 1
-            code: list[str] = []
-            while i < len(lines) and not re.match(rf"^\s*{re.escape(marker)}\s*$", lines[i]):
-                code.append(lines[i])
-                i += 1
-            i += 1 if i < len(lines) else 0
-            attrs = f' data-language="{html.escape(language, quote=True)}"' if language else ""
-            body = html.escape("\n".join(code), quote=True)
-            out.append(f'<pre class="code"><code{attrs}>{body}</code></pre>')
-            continue
+    fence = re.match(r"^\s*(```+|~~~+)\s*([A-Za-z0-9_.+-]*)\s*$", line)
+    if fence:
+      marker, language = fence.group(1), fence.group(2)
+      i += 1
+      code: list[str] = []
+      while i < len(lines) and not re.match(rf"^\s*{re.escape(marker)}\s*$", lines[i]):
+        code.append(lines[i])
+        i += 1
+      i += 1 if i < len(lines) else 0
+      attrs = f' data-language="{html.escape(language, quote=True)}"' if language else ""
+      body = html.escape("\n".join(code), quote=True)
+      out.append(f'<pre class="code"><code{attrs}>{body}</code></pre>')
+      continue
 
-        heading = re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", line)
-        if heading:
-            level = min(len(heading.group(1)) + 1, 6)
-            out.append(f"<h{level}>{markdown_inline(heading.group(2))}</h{level}>")
-            i += 1
-            continue
+    heading = re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", line)
+    if heading:
+      level = min(len(heading.group(1)) + 1, 6)
+      out.append(f"<h{level}>{markdown_inline(heading.group(2))}</h{level}>")
+      i += 1
+      continue
 
-        bullet = re.compile(r"^\s*[-*+]\s+(.+)$")
-        numbered = re.compile(r"^\s*\d+[.)]\s+(.+)$")
-        for pattern, tag in ((bullet, "ul"), (numbered, "ol")):
-            if pattern.match(line):
-                items: list[str] = []
-                while i < len(lines) and (m := pattern.match(lines[i])):
-                    items.append(f"<li>{markdown_inline(m.group(1))}</li>")
-                    i += 1
-                out.append(f"<{tag}>" + "".join(items) + f"</{tag}>")
-                break
-        else:
-            if line.startswith(">"):
-                quoted: list[str] = []
-                while i < len(lines) and lines[i].startswith(">"):
-                    quoted.append(lines[i][1:].lstrip())
-                    i += 1
-                inner = "<br>".join(markdown_inline(part) for part in quoted)
-                out.append(f"<blockquote><p>{inner}</p></blockquote>")
-                continue
+    bullet = re.compile(r"^\s*[-*+]\s+(.+)$")
+    numbered = re.compile(r"^\s*\d+[.)]\s+(.+)$")
+    for pattern, tag in ((bullet, "ul"), (numbered, "ol")):
+      if pattern.match(line):
+        items: list[str] = []
+        while i < len(lines) and (m := pattern.match(lines[i])):
+          items.append(f"<li>{markdown_inline(m.group(1))}</li>")
+          i += 1
+        out.append(f"<{tag}>" + "".join(items) + f"</{tag}>")
+        break
+    else:
+      if line.startswith(">"):
+        quoted: list[str] = []
+        while i < len(lines) and lines[i].startswith(">"):
+          quoted.append(lines[i][1:].lstrip())
+          i += 1
+        inner = "<br>".join(markdown_inline(part) for part in quoted)
+        out.append(f"<blockquote><p>{inner}</p></blockquote>")
+        continue
 
-            paragraph = [line]
-            i += 1
-            while i < len(lines) and lines[i].strip() != "":
-                if re.match(r"^\s*(```+|~~~+|#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>)", lines[i]):
-                    break
-                paragraph.append(lines[i])
-                i += 1
-            out.append("<p>" + "<br>".join(markdown_inline(part) for part in paragraph) + "</p>")
-    return "\n".join(out)
+      paragraph = [line]
+      i += 1
+      while i < len(lines) and lines[i].strip() != "":
+        if re.match(r"^\s*(```+|~~~+|#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>)", lines[i]):
+          break
+        paragraph.append(lines[i])
+        i += 1
+      out.append("<p>" + "<br>".join(markdown_inline(part) for part in paragraph) + "</p>")
+  return "\n".join(out)
 
 
 # The whole design brief: with nothing expanded, the page is the human's
@@ -4191,93 +4193,93 @@ ZONE = "UTC"
 
 
 def elapsed_text(seconds: float) -> str:
-    total = round(seconds)
-    hours, rest = divmod(total, 3600)
-    minutes, secs = divmod(rest, 60)
-    return "".join(f"{n}{unit}" for n, unit in ((hours, "h"), (minutes, "m"), (secs, "s")) if n) or "0s"
+  total = round(seconds)
+  hours, rest = divmod(total, 3600)
+  minutes, secs = divmod(rest, 60)
+  return "".join(f"{n}{unit}" for n, unit in ((hours, "h"), (minutes, "m"), (secs, "s")) if n) or "0s"
 
 
 def tally_text(added: int, deleted: int) -> str:
-    """Signed line counts, added then deleted, as every diffstat writes
-    them."""
-    return f"+{added:,} −{deleted:,}"
+  """Signed line counts, added then deleted, as every diffstat writes
+  them."""
+  return f"+{added:,} −{deleted:,}"
 
 
 def diffstat(added: int, deleted: int) -> str:
-    """The prompt's infographic: signed line counts and five blocks split by
-    the added:deleted ratio (each whole line a block when five would cover
-    it, unfilled blocks padding the difference). Sign and order carry the
-    same polarity as the block colors, so no reading depends on color."""
-    if (added, deleted) == (0, 0):
-        return ""
-    total = added + deleted
-    if total <= 5:
-        plus, minus = added, deleted
-    else:
-        # Floor both shares (never overstating either side, and splitting a
-        # tie symmetrically), but give any nonzero side its block.
-        plus = max(5 * added // total, 1 if added else 0)
-        minus = max(5 * deleted // total, 1 if deleted else 0)
-    blocks = (
-        '<span class="add"></span>' * plus
-        + '<span class="del"></span>' * minus
-        + '<span class="nil"></span>' * (5 - plus - minus)
-    )
-    return (
-        f'\n<div class="diffstat">{tally_text(added, deleted)}'
-        f' <span class="blocks" aria-hidden="true">{blocks}</span></div>'
-    )
+  """The prompt's infographic: signed line counts and five blocks split by
+  the added:deleted ratio (each whole line a block when five would cover
+  it, unfilled blocks padding the difference). Sign and order carry the
+  same polarity as the block colors, so no reading depends on color."""
+  if (added, deleted) == (0, 0):
+    return ""
+  total = added + deleted
+  if total <= 5:
+    plus, minus = added, deleted
+  else:
+    # Floor both shares (never overstating either side, and splitting a
+    # tie symmetrically), but give any nonzero side its block.
+    plus = max(5 * added // total, 1 if added else 0)
+    minus = max(5 * deleted // total, 1 if deleted else 0)
+  blocks = (
+    '<span class="add"></span>' * plus
+    + '<span class="del"></span>' * minus
+    + '<span class="nil"></span>' * (5 - plus - minus)
+  )
+  return (
+    f'\n<div class="diffstat">{tally_text(added, deleted)}'
+    f' <span class="blocks" aria-hidden="true">{blocks}</span></div>'
+  )
 
 
 # All rendered copy here is human-written or human-specified; everything
 # else on the page (repository name/path/remote, provider, model, effort,
 # timestamps, weekdays, prompts, ballots, replies) is source data.
 def minimap(exchanges: Sequence[Exchange], instants: Sequence[dt.datetime]) -> str:
-    """A clickable map of the whole dialog: one sliver per prompt, in order,
-    linking to its permalink anchor. Added lines rise from the midline and
-    deleted lines hang below it, on a square-root scale against the peak so
-    small edits stay visible beside the big rewrite spikes; a prompt that
-    touched no code is a tick on the midline. Each sliver's hover title is
-    its time plus its counts — numerals only, so nothing here needs prose."""
-    peak = max(max(e.added, e.deleted) for e in exchanges)
-    unit = lambda v: f"{round(v, 1):g}"  # 30.0 -> "30"
-    slots: list[str] = []
-    for i, (e, at) in enumerate(zip(exchanges, instants)):
-        x = 3 * i
-        stamp = at.strftime("%H:%M")
-        title = f"{stamp} {tally_text(e.added, e.deleted)}" if e.added or e.deleted else stamp
-        bars = f'<rect class="hit" x="{x}" y="0" width="3" height="64"/>'
-        if e.added:
-            rise = round(30 * (e.added / peak) ** 0.5, 1)
-            bars += f'<rect class="add" x="{x}" y="{unit(32 - rise)}" width="2" height="{unit(rise)}"/>'
-        if e.deleted:
-            drop = 30 * (e.deleted / peak) ** 0.5
-            bars += f'<rect class="del" x="{x}" y="32" width="2" height="{unit(drop)}"/>'
-        if (e.added, e.deleted) == (0, 0):
-            bars += f'<rect class="nil" x="{x}" y="31" width="2" height="2"/>'
-        slots.append(f'<a href="#p{i + 1}"><title>{title}</title>{bars}</a>')
-    width = 3 * len(exchanges)
-    # TODO: The label says this is a map of the dialog, prompt by prompt.
-    return (
-        f'<svg class="minimap" viewBox="0 0 {width} 64" preserveAspectRatio="none"'
-        f' style="width:min(100%, {2 * width}px)" aria-label="Tabula dialogi, rogatio post rogationem">'
-        + "".join(slots)
-        + "</svg>"
-    )
+  """A clickable map of the whole dialog: one sliver per prompt, in order,
+  linking to its permalink anchor. Added lines rise from the midline and
+  deleted lines hang below it, on a square-root scale against the peak so
+  small edits stay visible beside the big rewrite spikes; a prompt that
+  touched no code is a tick on the midline. Each sliver's hover title is
+  its time plus its counts — numerals only, so nothing here needs prose."""
+  peak = max(max(e.added, e.deleted) for e in exchanges)
+  unit = lambda v: f"{round(v, 1):g}"  # 30.0 -> "30"
+  slots: list[str] = []
+  for i, (e, at) in enumerate(zip(exchanges, instants)):
+    x = 3 * i
+    stamp = at.strftime("%H:%M")
+    title = f"{stamp} {tally_text(e.added, e.deleted)}" if e.added or e.deleted else stamp
+    bars = f'<rect class="hit" x="{x}" y="0" width="3" height="64"/>'
+    if e.added:
+      rise = round(30 * (e.added / peak) ** 0.5, 1)
+      bars += f'<rect class="add" x="{x}" y="{unit(32 - rise)}" width="2" height="{unit(rise)}"/>'
+    if e.deleted:
+      drop = 30 * (e.deleted / peak) ** 0.5
+      bars += f'<rect class="del" x="{x}" y="32" width="2" height="{unit(drop)}"/>'
+    if (e.added, e.deleted) == (0, 0):
+      bars += f'<rect class="nil" x="{x}" y="31" width="2" height="2"/>'
+    slots.append(f'<a href="#p{i + 1}"><title>{title}</title>{bars}</a>')
+  width = 3 * len(exchanges)
+  # TODO: The label says this is a map of the dialog, prompt by prompt.
+  return (
+    f'<svg class="minimap" viewBox="0 0 {width} 64" preserveAspectRatio="none"'
+    f' style="width:min(100%, {2 * width}px)" aria-label="Tabula dialogi, rogatio post rogationem">'
+    + "".join(slots)
+    + "</svg>"
+  )
 
 
 # CSS class per provider, keying the exchange's edge stripe and meta-line
 # chip to its agent. A provider missing here crashes render() (KeyError)
 # rather than shipping an unmarked exchange.
 PROVIDER_SLUGS = {
-    "Claude Code": "claude", "Codex": "codex", "Copilot Chat": "copilot", "Antigravity": "antigravity",
-    # claude.ai chats have no store parser: their exchanges enter a page only
-    # by being seeded into a ledger from outside sourcery, and every run
-    # keeps them, since no store holds them. They wear Claude Code's color.
-    "claude.ai": "claudeai",
-    # Codebuff chats wear Claude Code's color too: a color of their own
-    # would need the provider palette's validation (see CSS) redone.
-    "Codebuff": "codebuff",
+  "Claude Code": "claude", "Codex": "codex", "Copilot Chat": "copilot", "Antigravity": "antigravity",
+  # claude.ai chats have no store parser: their exchanges enter a page only
+  # by being seeded into a ledger from outside sourcery, and every run
+  # keeps them, since no store holds them. They wear Claude Code's color.
+  "claude.ai": "claudeai",
+  # Codebuff chats wear Claude Code's color too: a color of their own
+  # would need the provider palette's validation (see CSS) redone.
+  "Codebuff": "codebuff",
 }
 # page_credits reads a page's provider back from its slug, so no two
 # providers may share one.
@@ -4289,121 +4291,121 @@ assert len(set(PROVIDER_SLUGS.values())) == len(PROVIDER_SLUGS)
 
 
 def chronicle(ledgers: Mapping[str, Sequence[Exchange]]) -> tuple[list[tuple[str, Exchange]], list[dt.datetime]]:
-    """Every row of the ledgers, given as login to rows, as login and
-    exchange, all in one chronology; and each row's instant in UTC. Every
-    time and date a page shows is written in UTC, so the file is a function
-    of the ledgers alone, whoever runs sourcery; the page's script (JS)
-    re-renders them in the viewer's own zone."""
-    rows = sorted(
-        ((login, exchange) for login, exchanges in ledgers.items() for exchange in exchanges),
-        key=lambda row: chronology(row[1]),
-    )
-    assert rows, "a page requires at least one exchange"
-    return rows, [exchange.timestamp.astimezone(UTC) for _, exchange in rows]
+  """Every row of the ledgers, given as login to rows, as login and
+  exchange, all in one chronology; and each row's instant in UTC. Every
+  time and date a page shows is written in UTC, so the file is a function
+  of the ledgers alone, whoever runs sourcery; the page's script (JS)
+  re-renders them in the viewer's own zone."""
+  rows = sorted(
+    ((login, exchange) for login, exchanges in ledgers.items() for exchange in exchanges),
+    key=lambda row: chronology(row[1]),
+  )
+  assert rows, "a page requires at least one exchange"
+  return rows, [exchange.timestamp.astimezone(UTC) for _, exchange in rows]
 
 
 def deck_text(
-    exchanges: Sequence[Exchange],
-    instants: Sequence[dt.datetime],
-    ranged: Callable[[Sequence[str]], str] = " – ".join,
+  exchanges: Sequence[Exchange],
+  instants: Sequence[dt.datetime],
+  ranged: Callable[[Sequence[str]], str] = " – ".join,
 ) -> str:
-    """The masthead's deck: how many prompts, the days they span (the one,
-    or the first and last), written by `ranged`, and the lines they
-    changed."""
-    first, last = instants[0].date().isoformat(), instants[-1].date().isoformat()
-    count = len(exchanges)
-    noun = "prompt" if count == 1 else "prompts"
-    dates = (first,) if first == last else (first, last)
-    total_added = sum(e.added for e in exchanges)
-    total_deleted = sum(e.deleted for e in exchanges)
-    totals = f" · {tally_text(total_added, total_deleted)}" if (total_added, total_deleted) != (0, 0) else ""
-    return f"{count} {noun} · {ranged(dates)}{totals}"
+  """The masthead's deck: how many prompts, the days they span (the one,
+  or the first and last), written by `ranged`, and the lines they
+  changed."""
+  first, last = instants[0].date().isoformat(), instants[-1].date().isoformat()
+  count = len(exchanges)
+  noun = "prompt" if count == 1 else "prompts"
+  dates = (first,) if first == last else (first, last)
+  total_added = sum(e.added for e in exchanges)
+  total_deleted = sum(e.deleted for e in exchanges)
+  totals = f" · {tally_text(total_added, total_deleted)}" if (total_added, total_deleted) != (0, 0) else ""
+  return f"{count} {noun} · {ranged(dates)}{totals}"
 
 
 def day_label(at: dt.datetime) -> str:
-    """A day header's text: the instant's date and weekday."""
-    return f"{at.date().isoformat()} {WEEKDAYS[at.date().weekday()]}"
+  """A day header's text: the instant's date and weekday."""
+  return f"{at.date().isoformat()} {WEEKDAYS[at.date().weekday()]}"
 
 
 def credit_tag(number: int, login: str, exchange: Exchange) -> str:
-    """The article's opening tag, which carries its credit (see CREDIT)."""
-    return (
-        f'<article class="exchange {PROVIDER_SLUGS[exchange.provider]}" id="p{number}"'
-        f' data-login="{html.escape(login, quote=True)}">'
-    )
+  """The article's opening tag, which carries its credit (see CREDIT)."""
+  return (
+    f'<article class="exchange {PROVIDER_SLUGS[exchange.provider]}" id="p{number}"'
+    f' data-login="{html.escape(login, quote=True)}">'
+  )
 
 
 def ballots_html(exchange: Exchange) -> str:
-    """The exchange's ballots, one after another; "" when none."""
-    return "\n".join(
-        '<div class="ballot machine">'
-        f'\n<div class="ballot-question">{html.escape(ballot.question, quote=False)}</div>'
-        + "".join(
-            f'\n<div class="option{" picked" if label in ballot.picked else ""}">'
-            f'{"✓" if label in ballot.picked else "·"} {html.escape(label, quote=False)}</div>'
-            for label in ballot.options
-        )
-        + "\n</div>"
-        for ballot in exchange.ballots
+  """The exchange's ballots, one after another; "" when none."""
+  return "\n".join(
+    '<div class="ballot machine">'
+    f'\n<div class="ballot-question">{html.escape(ballot.question, quote=False)}</div>'
+    + "".join(
+      f'\n<div class="option{" picked" if label in ballot.picked else ""}">'
+      f'{"✓" if label in ballot.picked else "·"} {html.escape(label, quote=False)}</div>'
+      for label in ballot.options
     )
+    + "\n</div>"
+    for ballot in exchange.ballots
+  )
 
 
 def prompt_html(exchange: Exchange) -> str:
-    return (
-        f'<pre class="prompt">{html.escape(exchange.prompt, quote=False)}</pre>'
-        if exchange.prompt != ""
-        else ""
-    )
+  return (
+    f'<pre class="prompt">{html.escape(exchange.prompt, quote=False)}</pre>'
+    if exchange.prompt != ""
+    else ""
+  )
 
 
 def attachments_html(exchange: Exchange) -> str:
-    attached = "".join(
-        f'<img class="attachment" src="{html.escape(uri, quote=True)}" alt="">'
-        for uri in exchange.images
-    )
-    return f'<div class="attachments">{attached}</div>' if attached else ""
+  attached = "".join(
+    f'<img class="attachment" src="{html.escape(uri, quote=True)}" alt="">'
+    for uri in exchange.images
+  )
+  return f'<div class="attachments">{attached}</div>' if attached else ""
 
 
 def summary_html(number: int, exchange: Exchange, at: dt.datetime) -> str:
-    """The exchange's disclosure line: its time, linking to its article,
-    then its agent, model, effort, working time, and session title."""
-    model = f' <span class="model">{html.escape(exchange.model)}</span>' if exchange.model else ""
-    effort = f' <span class="effort">({html.escape(exchange.effort)})</span>' if exchange.effort else ""
-    # The wall span renders only when it reads longer than the working
-    # time: an equal-at-display-precision span repeats the number beside
-    # it, and a shorter one (activity credited off records later than the
-    # last reply) answers a question nobody asked.
-    # TODO: Says the turn's full span by the wall clock, prompt to final
-    # reply, beside the active working time already shown.
-    wall = (
-        f" · {elapsed_text(exchange.wall)} wall-clock time"
-        if exchange.wall > exchange.elapsed
-        and elapsed_text(exchange.wall) != elapsed_text(exchange.elapsed)
-        else ""
-    )
-    thought = (
-        f' <span class="elapsed">thought for {elapsed_text(exchange.elapsed)}{wall}</span>'
-        if exchange.elapsed >= 0.5
-        else ""
-    )
-    # The session's title tells apart sessions the chronology interleaves.
-    # It is as often made up as typed, so it rides the meta line, never
-    # beside the human's words.
-    session_title = f' <span class="title">{html.escape(exchange.title)}</span>' if exchange.title else ""
-    return (
-        f'<a class="anchor" href="#p{number}">'
-        f'<time datetime="{exchange.timestamp.isoformat()}">{at.strftime("%H:%M")}</time></a>'
-        f' <span class="chip"></span>'
-        f' <span class="agent">{html.escape(exchange.provider)}</span>{model}{effort}{thought}{session_title}'
-    )
+  """The exchange's disclosure line: its time, linking to its article,
+  then its agent, model, effort, working time, and session title."""
+  model = f' <span class="model">{html.escape(exchange.model)}</span>' if exchange.model else ""
+  effort = f' <span class="effort">({html.escape(exchange.effort)})</span>' if exchange.effort else ""
+  # The wall span renders only when it reads longer than the working
+  # time: an equal-at-display-precision span repeats the number beside
+  # it, and a shorter one (activity credited off records later than the
+  # last reply) answers a question nobody asked.
+  # TODO: Says the turn's full span by the wall clock, prompt to final
+  # reply, beside the active working time already shown.
+  wall = (
+    f" · {elapsed_text(exchange.wall)} wall-clock time"
+    if exchange.wall > exchange.elapsed
+    and elapsed_text(exchange.wall) != elapsed_text(exchange.elapsed)
+    else ""
+  )
+  thought = (
+    f' <span class="elapsed">thought for {elapsed_text(exchange.elapsed)}{wall}</span>'
+    if exchange.elapsed >= 0.5
+    else ""
+  )
+  # The session's title tells apart sessions the chronology interleaves.
+  # It is as often made up as typed, so it rides the meta line, never
+  # beside the human's words.
+  session_title = f' <span class="title">{html.escape(exchange.title)}</span>' if exchange.title else ""
+  return (
+    f'<a class="anchor" href="#p{number}">'
+    f'<time datetime="{exchange.timestamp.isoformat()}">{at.strftime("%H:%M")}</time></a>'
+    f' <span class="chip"></span>'
+    f' <span class="agent">{html.escape(exchange.provider)}</span>{model}{effort}{thought}{session_title}'
+  )
 
 
 def empty_reply_note(last: bool) -> str:
-    """What an exchange whose reply is empty shows in its place. The final
-    exchange of the export is the only one that can plausibly still be in
-    flight, so an empty reply there gets the still-generating note; an
-    empty reply anywhere else means there is none."""
-    return "Response still generating when this transcript was captured" if last else "No response."
+  """What an exchange whose reply is empty shows in its place. The final
+  exchange of the export is the only one that can plausibly still be in
+  flight, so an empty reply there gets the still-generating note; an
+  empty reply anywhere else means there is none."""
+  return "Response still generating when this transcript was captured" if last else "No response."
 
 
 # TODO: Says this file is generated by sourcery and never hand-edited;
@@ -4417,76 +4419,76 @@ WARNING_COMMENT = """<!-- Fasciculus hic a sourcery generatus est, numquam manu 
 
 
 def render(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = "") -> str:
-    """The page for every row of the ledgers, given as login to rows, all
-    in one chronology."""
-    rows, instants = chronicle(ledgers)
-    exchanges = [exchange for _, exchange in rows]
-    deck = deck_text(exchanges, instants)
-    # On the page, the deck's date range is time elements in a span of its
-    # own, for the script to rewrite; the description meta tags carry the
-    # deck as plain text.
-    deck_html = deck_text(
-        exchanges,
-        instants,
-        lambda dates: '<span class="range">'
-        + " – ".join(f'<time datetime="{day}">{day}</time>' for day in dates)
-        + "</span>",
-    )
+  """The page for every row of the ledgers, given as login to rows, all
+  in one chronology."""
+  rows, instants = chronicle(ledgers)
+  exchanges = [exchange for _, exchange in rows]
+  deck = deck_text(exchanges, instants)
+  # On the page, the deck's date range is time elements in a span of its
+  # own, for the script to rewrite; the description meta tags carry the
+  # deck as plain text.
+  deck_html = deck_text(
+    exchanges,
+    instants,
+    lambda dates: '<span class="range">'
+    + " – ".join(f'<time datetime="{day}">{day}</time>' for day in dates)
+    + "</span>",
+  )
 
-    chunks: list[str] = []
-    days: list[tuple[str, str]] = []  # (day, header text), one per day header
-    current_day = None
-    for number, ((login, exchange), at) in enumerate(zip(rows, instants), start=1):
-        day = at.date().isoformat()
-        if day != current_day:
-            chunks.append(
-                f'<h2 class="day" id="d{day}"><time datetime="{day}">{day_label(at)}</time>'
-                f' <span class="zone">{ZONE}</span></h2>'
-            )
-            days.append((day, day_label(at)))
-            current_day = day
-        if exchange.reply == "":
-            reply = f'<div class="reply machine empty"><p>{empty_reply_note(number == len(rows))}</p></div>'
-        else:
-            reply = f'<div class="reply machine">{markdown_html(exchange.reply)}</div>'
-        parts = "".join(
-            f"\n{part}" for part in (ballots_html(exchange), prompt_html(exchange), attachments_html(exchange)) if part
-        )
-        chunks.append(
-            f"{credit_tag(number, login, exchange)}"
-            f'\n<header><p class="speaker">{html.escape(display_name(login))}</p>'
-            f"{diffstat(exchange.added, exchange.deleted)}</header>{parts}\n"
-            f"<details>\n<summary>{summary_html(number, exchange, at)}</summary>\n{reply}\n</details>\n"
-            "</article>"
-        )
-
-    body = "\n".join(chunks)
-    # The reading-progress rail's day marks are generated here, where the
-    # days are known; the script only measures and positions them.
-    marks = "".join(
-        f'\n<a class="daymark" href="#d{day}">'
-        f'<span class="tick"></span><span class="text">{label}</span></a>'
-        for day, label in days
-    )
-    # TODO: The label names the day-mark rail, for assistive tech, as the
-    # index of the dialog's days.
-    rail = (
-        '<div id="progress">\n'
-        '<div class="progress-bar" aria-hidden="true"></div>\n'
-        f'<nav class="daymarks" aria-label="Index dierum">{marks}\n</nav>\n'
-        "</div>"
-    )
-    title = html.escape(repo.name)
-    # The subtitle answers "where this lives": the public remote when there
-    # is one, the local directory otherwise.
-    if remote:
-        label = html.escape(remote.removeprefix("https://").removeprefix("http://"))
-        where = f'<a href="{html.escape(remote, quote=True)}">{label}</a>'
+  chunks: list[str] = []
+  days: list[tuple[str, str]] = []  # (day, header text), one per day header
+  current_day = None
+  for number, ((login, exchange), at) in enumerate(zip(rows, instants), start=1):
+    day = at.date().isoformat()
+    if day != current_day:
+      chunks.append(
+        f'<h2 class="day" id="d{day}"><time datetime="{day}">{day_label(at)}</time>'
+        f' <span class="zone">{ZONE}</span></h2>'
+      )
+      days.append((day, day_label(at)))
+      current_day = day
+    if exchange.reply == "":
+      reply = f'<div class="reply machine empty"><p>{empty_reply_note(number == len(rows))}</p></div>'
     else:
-        where = html.escape(str(repo))
-    # The warning comment must follow the doctype — a comment before it
-    # would throw browsers into quirks mode.
-    return f"""<!doctype html>
+      reply = f'<div class="reply machine">{markdown_html(exchange.reply)}</div>'
+    parts = "".join(
+      f"\n{part}" for part in (ballots_html(exchange), prompt_html(exchange), attachments_html(exchange)) if part
+    )
+    chunks.append(
+      f"{credit_tag(number, login, exchange)}"
+      f'\n<header><p class="speaker">{html.escape(display_name(login))}</p>'
+      f"{diffstat(exchange.added, exchange.deleted)}</header>{parts}\n"
+      f"<details>\n<summary>{summary_html(number, exchange, at)}</summary>\n{reply}\n</details>\n"
+      "</article>"
+    )
+
+  body = "\n".join(chunks)
+  # The reading-progress rail's day marks are generated here, where the
+  # days are known; the script only measures and positions them.
+  marks = "".join(
+    f'\n<a class="daymark" href="#d{day}">'
+    f'<span class="tick"></span><span class="text">{label}</span></a>'
+    for day, label in days
+  )
+  # TODO: The label names the day-mark rail, for assistive tech, as the
+  # index of the dialog's days.
+  rail = (
+    '<div id="progress">\n'
+    '<div class="progress-bar" aria-hidden="true"></div>\n'
+    f'<nav class="daymarks" aria-label="Index dierum">{marks}\n</nav>\n'
+    "</div>"
+  )
+  title = html.escape(repo.name)
+  # The subtitle answers "where this lives": the public remote when there
+  # is one, the local directory otherwise.
+  if remote:
+    label = html.escape(remote.removeprefix("https://").removeprefix("http://"))
+    where = f'<a href="{html.escape(remote, quote=True)}">{label}</a>'
+  else:
+    where = html.escape(str(repo))
+  # The warning comment must follow the doctype — a comment before it
+  # would throw browsers into quirks mode.
+  return f"""<!doctype html>
 {WARNING_COMMENT}
 <html lang="und">
 <head>
@@ -4535,73 +4537,73 @@ ASCII_PUNCTUATION = re.compile(r"[!-/:-@\[-`{-~]")
 
 
 def markdown_text(text: str) -> str:
-    """Data as Markdown text that reads as itself: every ASCII punctuation
-    character escaped, whether or not it would be markup where it lands.
-    Text holding a line ending is refused: no escape keeps it on its line."""
-    assert "\n" not in text and "\r" not in text, text
-    return ASCII_PUNCTUATION.sub(r"\\\g<0>", text)
+  """Data as Markdown text that reads as itself: every ASCII punctuation
+  character escaped, whether or not it would be markup where it lands.
+  Text holding a line ending is refused: no escape keeps it on its line."""
+  assert "\n" not in text and "\r" not in text, text
+  return ASCII_PUNCTUATION.sub(r"\\\g<0>", text)
 
 
 def markdown_destination(url: str) -> str:
-    """A link destination that is url exactly: in angle brackets, which
-    allow anything but a line ending, escaping the angle brackets and
-    backslashes url holds."""
-    assert "\n" not in url and "\r" not in url, url
-    return "<" + re.sub(r"[<>\\]", r"\\\g<0>", url) + ">"
+  """A link destination that is url exactly: in angle brackets, which
+  allow anything but a line ending, escaping the angle brackets and
+  backslashes url holds."""
+  assert "\n" not in url and "\r" not in url, url
+  return "<" + re.sub(r"[<>\\]", r"\\\g<0>", url) + ">"
 
 
 def quoted(text: str) -> str:
-    """Markdown as a blockquote: every line, at each of Markdown's line
-    endings (CRLF, CR, LF), behind a quote marker, a blank line behind a
-    bare one. Whatever block the text opens (a code fence it never closes,
-    say) ends with the quote, and no line of it starts a line of the
-    Markdown page, where a credit would be read."""
-    return "\n".join(f"> {line}" if line else ">" for line in re.split(r"\r\n|\r|\n", text))
+  """Markdown as a blockquote: every line, at each of Markdown's line
+  endings (CRLF, CR, LF), behind a quote marker, a blank line behind a
+  bare one. Whatever block the text opens (a code fence it never closes,
+  say) ends with the quote, and no line of it starts a line of the
+  Markdown page, where a credit would be read."""
+  return "\n".join(f"> {line}" if line else ">" for line in re.split(r"\r\n|\r|\n", text))
 
 
 def render_markdown(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = "") -> str:
-    """The Markdown page for every row of the ledgers, given as login to
-    rows, all in one chronology."""
-    rows, instants = chronicle(ledgers)
-    exchanges = [exchange for _, exchange in rows]
-    if remote:
-        label = remote.removeprefix("https://").removeprefix("http://")
-        where = f"[{markdown_text(label)}]({markdown_destination(remote)})"
-    else:
-        where = markdown_text(str(repo))
-    blocks = [
-        WARNING_COMMENT,
-        "[generated by sourcery](https://github.com/beeminder/sourcery)",
-        f"# {markdown_text(repo.name)}",
-        deck_text(exchanges, instants),
-        where,
+  """The Markdown page for every row of the ledgers, given as login to
+  rows, all in one chronology."""
+  rows, instants = chronicle(ledgers)
+  exchanges = [exchange for _, exchange in rows]
+  if remote:
+    label = remote.removeprefix("https://").removeprefix("http://")
+    where = f"[{markdown_text(label)}]({markdown_destination(remote)})"
+  else:
+    where = markdown_text(str(repo))
+  blocks = [
+    WARNING_COMMENT,
+    "[generated by sourcery](https://github.com/beeminder/sourcery)",
+    f"# {markdown_text(repo.name)}",
+    deck_text(exchanges, instants),
+    where,
+  ]
+  current_day = None
+  for number, ((login, exchange), at) in enumerate(zip(rows, instants), start=1):
+    day = at.date().isoformat()
+    if day != current_day:
+      blocks.append(f"## {day_label(at)} {ZONE}")
+      current_day = day
+    changed = (exchange.added, exchange.deleted) != (0, 0)
+    tally = f" · {tally_text(exchange.added, exchange.deleted)}" if changed else ""
+    blocks += [
+      credit_tag(number, login, exchange),
+      f"**{markdown_text(display_name(login))}**{tally}",
+      ballots_html(exchange),
+      prompt_html(exchange),
+      attachments_html(exchange),
+      f"<details>\n<summary>{summary_html(number, exchange, at)}</summary>",
+      quoted(exchange.reply or empty_reply_note(number == len(rows))),
+      "</details>",
+      "</article>",
     ]
-    current_day = None
-    for number, ((login, exchange), at) in enumerate(zip(rows, instants), start=1):
-        day = at.date().isoformat()
-        if day != current_day:
-            blocks.append(f"## {day_label(at)} {ZONE}")
-            current_day = day
-        changed = (exchange.added, exchange.deleted) != (0, 0)
-        tally = f" · {tally_text(exchange.added, exchange.deleted)}" if changed else ""
-        blocks += [
-            credit_tag(number, login, exchange),
-            f"**{markdown_text(display_name(login))}**{tally}",
-            ballots_html(exchange),
-            prompt_html(exchange),
-            attachments_html(exchange),
-            f"<details>\n<summary>{summary_html(number, exchange, at)}</summary>",
-            quoted(exchange.reply or empty_reply_note(number == len(rows))),
-            "</details>",
-            "</article>",
-        ]
-    return "\n\n".join(block for block in blocks if block) + "\n"
+  return "\n\n".join(block for block in blocks if block) + "\n"
 
 
 def renderer(output: Path) -> Callable[[Path, Mapping[str, Sequence[Exchange]], str], str]:
-    """What renders the output, by its name: the Markdown page when its last
-    suffix is exactly .md, the page otherwise."""
-    return render_markdown if output.suffix == ".md" else render
+  """What renders the output, by its name: the Markdown page when its last
+  suffix is exactly .md, the page otherwise."""
+  return render_markdown if output.suffix == ".md" else render
 
 
 # ------------------------------------------------------------------- ledgers
@@ -4620,12 +4622,12 @@ def renderer(output: Path) -> Callable[[Path, Mapping[str, Sequence[Exchange]], 
 
 
 def freeze(exchange: Exchange) -> dict[str, Any]:
-    """The exchange as JSON-ready fields, minus the store path: private to
-    this machine and irrelevant to the merge, so it never reaches a ledger."""
-    frozen = dataclasses.asdict(exchange)
-    del frozen["source"]
-    frozen["timestamp"] = exchange.timestamp.isoformat()
-    return frozen
+  """The exchange as JSON-ready fields, minus the store path: private to
+  this machine and irrelevant to the merge, so it never reaches a ledger."""
+  frozen = dataclasses.asdict(exchange)
+  del frozen["source"]
+  frozen["timestamp"] = exchange.timestamp.isoformat()
+  return frozen
 
 
 # What a frozen exchange must look like, field by field: the JSON type of
@@ -4633,56 +4635,56 @@ def freeze(exchange: Exchange) -> dict[str, Any]:
 # a value of another type, means a ledger row another schema wrote or a hand
 # edit — never thawed into a guess.
 SHAPE: dict[str, type | tuple[type, ...]] = {
-    "timestamp": str, "provider": str, "model": str, "session": str, "prompt": str,
-    "reply": str, "effort": str, "images": list, "elapsed": (int, float), "wall": (int, float),
-    "ballots": list, "added": int, "deleted": int, "title": str,
+  "timestamp": str, "provider": str, "model": str, "session": str, "prompt": str,
+  "reply": str, "effort": str, "images": list, "elapsed": (int, float), "wall": (int, float),
+  "ballots": list, "added": int, "deleted": int, "title": str,
 }
 assert set(SHAPE) == {field.name for field in dataclasses.fields(Exchange)} - {"source"}
 
 
 def shaped(value: Any, kind: type | tuple[type, ...]) -> bool:
-    return isinstance(value, kind) and not isinstance(value, bool)
+  return isinstance(value, kind) and not isinstance(value, bool)
 
 
 def thaw(
-    frozen: Mapping[str, Any], source: Path, shape: Mapping[str, type | tuple[type, ...]] = SHAPE
+  frozen: Mapping[str, Any], source: Path, shape: Mapping[str, type | tuple[type, ...]] = SHAPE
 ) -> Exchange:
-    """Inverse of freeze; the ledger is the source. The field set and every
-    field's type and range are checked against the row shape of the
-    ledger format the row is in (see ROW_SHAPES), so a row another schema
-    wrote, or one edited by hand, fails loudly instead of thawing into
-    nonsense. A field the shape lacks thaws as Exchange's default."""
-    fields = dict(frozen)
-    sound = (
-        set(fields) == set(shape)
-        and all(shaped(fields[name], kind) for name, kind in shape.items())
-        and fields["provider"] in PROVIDER_SLUGS
-        and all(0 <= fields[name] < float("inf") for name in ("elapsed", "wall", "added", "deleted"))
-        and all(isinstance(uri, str) for uri in fields["images"])
-        and all(
-            isinstance(ballot, dict)
-            and set(ballot) == {"question", "options", "picked"}
-            and isinstance(ballot["question"], str)
-            and all(
-                isinstance(ballot[key], list) and all(isinstance(label, str) for label in ballot[key])
-                for key in ("options", "picked")
-            )
-            for ballot in fields["ballots"]
-        )
+  """Inverse of freeze; the ledger is the source. The field set and every
+  field's type and range are checked against the row shape of the
+  ledger format the row is in (see ROW_SHAPES), so a row another schema
+  wrote, or one edited by hand, fails loudly instead of thawing into
+  nonsense. A field the shape lacks thaws as Exchange's default."""
+  fields = dict(frozen)
+  sound = (
+    set(fields) == set(shape)
+    and all(shaped(fields[name], kind) for name, kind in shape.items())
+    and fields["provider"] in PROVIDER_SLUGS
+    and all(0 <= fields[name] < float("inf") for name in ("elapsed", "wall", "added", "deleted"))
+    and all(isinstance(uri, str) for uri in fields["images"])
+    and all(
+      isinstance(ballot, dict)
+      and set(ballot) == {"question", "options", "picked"}
+      and isinstance(ballot["question"], str)
+      and all(
+        isinstance(ballot[key], list) and all(isinstance(label, str) for label in ballot[key])
+        for key in ("options", "picked")
+      )
+      for ballot in fields["ballots"]
     )
-    if not sound:
-        raise ValueError(f"exchange fields {sorted(fields)}")
-    fields["timestamp"] = parse_time(fields["timestamp"])
-    fields["images"] = tuple(fields["images"])
-    fields["ballots"] = tuple(
-        Ballot(ballot["question"], tuple(ballot["options"]), tuple(ballot["picked"]))
-        for ballot in fields["ballots"]
-    )
-    return Exchange(source=source, **fields)
+  )
+  if not sound:
+    raise ValueError(f"exchange fields {sorted(fields)}")
+  fields["timestamp"] = parse_time(fields["timestamp"])
+  fields["images"] = tuple(fields["images"])
+  fields["ballots"] = tuple(
+    Ballot(ballot["question"], tuple(ballot["options"]), tuple(ballot["picked"]))
+    for ballot in fields["ballots"]
+  )
+  return Exchange(source=source, **fields)
 
 
 def ledger_path(output: Path, login: str) -> Path:
-    return output.parent / f"sourcery.{login}.jsonl"
+  return output.parent / f"sourcery.{login}.jsonl"
 
 
 # The "ledger format": the number a ledger's header names it by, which
@@ -4704,112 +4706,112 @@ HEADER_SHAPE = {"ledger": "int", "repo": "str"}
 
 
 def ledger_text(project: str, exchanges: Sequence[Exchange]) -> str:
-    """A ledger's whole text: the header line, naming the ledger format
-    and the project, then one exchange per line."""
-    lines = [{"ledger": LEDGER_FORMAT, "repo": project}, *map(freeze, exchanges)]
-    return "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines)
+  """A ledger's whole text: the header line, naming the ledger format
+  and the project, then one exchange per line."""
+  lines = [{"ledger": LEDGER_FORMAT, "repo": project}, *map(freeze, exchanges)]
+  return "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines)
 
 
 def json_object(line: str) -> dict[str, Any]:
-    value = json.loads(line)
-    if not isinstance(value, dict):
-        raise ValueError(f"{type(value).__name__} != dict")
-    return value
+  value = json.loads(line)
+  if not isinstance(value, dict):
+    raise ValueError(f"{type(value).__name__} != dict")
+  return value
 
 
 def read_ledger(path: Path, repo: Path, remote: str) -> dict[Exchange, str]:
-    """A ledger's exchanges, every line checked: a damaged line, a header
-    naming a ledger format not in ROW_SHAPES, or a header
-    naming a project other than the checkout's (repo's project name, given
-    its public home, remote, as repo_remote found it), fails loudly instead
-    of thawing into a guess. They are woven, as a run weaves the runner's
-    own, so a row a merge left doubled shows once whoever runs. Each maps to
-    its "citation", where a refusal finds it: the ledger's path and the
-    number of the first line holding it."""
-    project = project_name(repo, remote)
-    try:
-        text = path.read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        # TODO: Says this ledger could not be read as a UTF-8 file, gives
-        # the reason, and that nothing was written.
-        raise UserError(f"{LATIN_PREFIX}\n" f"Tabula legi non potest: {path}\n{exc}\nNihil scriptum est.") from exc
-    # Lines end at "\n" alone: JSON escapes it inside strings, but leaves
-    # other characters str.splitlines would break at (U+2028, say) as typed.
-    header, *rows = text.removesuffix("\n").split("\n")
-    number = 1  # the line being read, cited if it fails
-    try:
-        head = json_object(header)
-        form = ({key: type(value).__name__ for key, value in head.items()}, head.get("ledger"))
-        forms = [(HEADER_SHAPE, known) for known in ROW_SHAPES]
-        if form not in forms:
-            raise ValueError(f"{form} not in {forms}")
-        cited: dict[Exchange, str] = {}
-        for number, row in enumerate(rows, start=2):
-            cited.setdefault(thaw(json_object(row), path, ROW_SHAPES[head["ledger"]]), f"{path}:{number}")
-    except (ValueError, UserError) as exc:
-        # TODO: Says this ledger cannot be read at this line, with the
-        # reason: a ledger is a header line, then one exchange per line. If
-        # the header line names a ledger format other than those ROW_SHAPES
-        # holds (named), another sourcery release wrote the ledger: run a
-        # release that reads that format, then rerun. If it holds git conflict
-        # markers, resolve the conflict by keeping both sides' lines (the
-        # header line once), then rerun. With the line
-        # "sourcery.*.jsonl merge=union" added to the attributes file git
-        # reads for all of the human's repositories (normally
-        # ~/.config/git/attributes: per gitattributes(5), the file
-        # core.attributesFile names, by default
-        # $XDG_CONFIG_HOME/git/attributes, or ~/.config/git/attributes when
-        # XDG_CONFIG_HOME is unset or empty), git keeps both sides' lines by
-        # itself; but such a merge can leave the header line twice: keep on
-        # the first line the one naming this project (named), delete the
-        # other, then rerun. Nothing was written.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Tabula legi non potest: {path}:{number}\n{exc}\n"
-            "Tabula est linea capitis, deinde una rogatio per lineam. "
-            f"Si linea capitis formam tabulae aliam quam {' aut '.join(map(str, ROW_SHAPES))} nominat, "
-            "tabulam alia editio sourcery "
-            "scripsit: curre editionem quae illam formam legit, deinde iterum curre. Si signa conflictus git fert, "
-            "conflictum solve utriusque partis lineas servando (lineam capitis semel), deinde iterum curre.\n"
-            "Linea 'sourcery.*.jsonl merge=union' in fasciculo attributorum quem git omnibus repositoriis "
-            "tuis legit (plerumque ~/.config/git/attributes) addita, git sponte utriusque partis lineas "
-            f"servat; sed fusio talis lineam capitis bis relinquere potest: eam quae {project!r} nominat in "
-            "prima linea serva, alteram dele, deinde iterum curre.\n"
-            "Nihil scriptum est."
-        ) from exc
-    if head["repo"] != project:
-        # TODO: Says this ledger belongs to another project, naming the
-        # project its first line names, then this checkout's project and
-        # directory, then the ledger; then names this checkout's public
-        # home as sourcery found it from the origin remote ('' when it found
-        # none); nothing was written. A project is named by the last part
-        # of the path of its public home's URL (the origin remote's), or,
-        # when it has no public home, by its directory's name. When a
-        # repository is renamed on GitHub, sourcery refuses its ledgers
-        # until each ledger's first line names the new repository. If the
-        # ledger is this project's: if the repository is now named as this
-        # checkout names it (named), write that name in place of the
-        # ledger's (named) in each ledger's first line; if not, fix this
-        # checkout: set origin's URL to the repository's home, or, when it
-        # has no public home, rename the directory as the ledger names the
-        # project (named). If the ledger is in fact another project's,
-        # choose another output path. Then rerun.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Tabula ad aliud inceptum pertinet: {head['repo']!r}, non {project!r} ({repo}): {path}\n"
-            f"Sedes publica huius directorii (ex remoto 'origin'): {remote!r}\n"
-            "Inceptum nominatur ultima parte viae URL sedis suae publicae (remoti 'origin'), "
-            "aut, si sedem publicam non habet, nomine directorii sui.\n"
-            "Repositorio in GitHub renominato, sourcery tabulas eius recusat donec prima linea "
-            "cuiusque tabulae novum repositorium nominet.\n"
-            f"Si tabula ad hoc inceptum pertinet: si repositorium nunc {project!r} nominatur, in prima "
-            f"linea cuiusque tabulae pro {head['repo']!r} scribe {project!r}; sin minus, hic corrige: "
-            "URL ipsius 'origin' ad sedem repositorii constitue, aut, si sedem publicam non habet, "
-            f"directorium renomina {head['repo']!r}. Si vero re vera ad aliud inceptum pertinet, "
-            "aliam viam output elige.\n"
-            "Deinde iterum curre.\nNihil scriptum est."
-        )
-    return {exchange: cited[exchange] for exchange in weave(cited)}
+  """A ledger's exchanges, every line checked: a damaged line, a header
+  naming a ledger format not in ROW_SHAPES, or a header
+  naming a project other than the checkout's (repo's project name, given
+  its public home, remote, as repo_remote found it), fails loudly instead
+  of thawing into a guess. They are woven, as a run weaves the runner's
+  own, so a row a merge left doubled shows once whoever runs. Each maps to
+  its "citation", where a refusal finds it: the ledger's path and the
+  number of the first line holding it."""
+  project = project_name(repo, remote)
+  try:
+    text = path.read_bytes().decode("utf-8")
+  except (OSError, UnicodeDecodeError) as exc:
+    # TODO: Says this ledger could not be read as a UTF-8 file, gives
+    # the reason, and that nothing was written.
+    raise UserError(f"{LATIN_PREFIX}\n" f"Tabula legi non potest: {path}\n{exc}\nNihil scriptum est.") from exc
+  # Lines end at "\n" alone: JSON escapes it inside strings, but leaves
+  # other characters str.splitlines would break at (U+2028, say) as typed.
+  header, *rows = text.removesuffix("\n").split("\n")
+  number = 1  # the line being read, cited if it fails
+  try:
+    head = json_object(header)
+    form = ({key: type(value).__name__ for key, value in head.items()}, head.get("ledger"))
+    forms = [(HEADER_SHAPE, known) for known in ROW_SHAPES]
+    if form not in forms:
+      raise ValueError(f"{form} not in {forms}")
+    cited: dict[Exchange, str] = {}
+    for number, row in enumerate(rows, start=2):
+      cited.setdefault(thaw(json_object(row), path, ROW_SHAPES[head["ledger"]]), f"{path}:{number}")
+  except (ValueError, UserError) as exc:
+    # TODO: Says this ledger cannot be read at this line, with the
+    # reason: a ledger is a header line, then one exchange per line. If
+    # the header line names a ledger format other than those ROW_SHAPES
+    # holds (named), another sourcery release wrote the ledger: run a
+    # release that reads that format, then rerun. If it holds git conflict
+    # markers, resolve the conflict by keeping both sides' lines (the
+    # header line once), then rerun. With the line
+    # "sourcery.*.jsonl merge=union" added to the attributes file git
+    # reads for all of the human's repositories (normally
+    # ~/.config/git/attributes: per gitattributes(5), the file
+    # core.attributesFile names, by default
+    # $XDG_CONFIG_HOME/git/attributes, or ~/.config/git/attributes when
+    # XDG_CONFIG_HOME is unset or empty), git keeps both sides' lines by
+    # itself; but such a merge can leave the header line twice: keep on
+    # the first line the one naming this project (named), delete the
+    # other, then rerun. Nothing was written.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Tabula legi non potest: {path}:{number}\n{exc}\n"
+      "Tabula est linea capitis, deinde una rogatio per lineam. "
+      f"Si linea capitis formam tabulae aliam quam {' aut '.join(map(str, ROW_SHAPES))} nominat, "
+      "tabulam alia editio sourcery "
+      "scripsit: curre editionem quae illam formam legit, deinde iterum curre. Si signa conflictus git fert, "
+      "conflictum solve utriusque partis lineas servando (lineam capitis semel), deinde iterum curre.\n"
+      "Linea 'sourcery.*.jsonl merge=union' in fasciculo attributorum quem git omnibus repositoriis "
+      "tuis legit (plerumque ~/.config/git/attributes) addita, git sponte utriusque partis lineas "
+      f"servat; sed fusio talis lineam capitis bis relinquere potest: eam quae {project!r} nominat in "
+      "prima linea serva, alteram dele, deinde iterum curre.\n"
+      "Nihil scriptum est."
+    ) from exc
+  if head["repo"] != project:
+    # TODO: Says this ledger belongs to another project, naming the
+    # project its first line names, then this checkout's project and
+    # directory, then the ledger; then names this checkout's public
+    # home as sourcery found it from the origin remote ('' when it found
+    # none); nothing was written. A project is named by the last part
+    # of the path of its public home's URL (the origin remote's), or,
+    # when it has no public home, by its directory's name. When a
+    # repository is renamed on GitHub, sourcery refuses its ledgers
+    # until each ledger's first line names the new repository. If the
+    # ledger is this project's: if the repository is now named as this
+    # checkout names it (named), write that name in place of the
+    # ledger's (named) in each ledger's first line; if not, fix this
+    # checkout: set origin's URL to the repository's home, or, when it
+    # has no public home, rename the directory as the ledger names the
+    # project (named). If the ledger is in fact another project's,
+    # choose another output path. Then rerun.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Tabula ad aliud inceptum pertinet: {head['repo']!r}, non {project!r} ({repo}): {path}\n"
+      f"Sedes publica huius directorii (ex remoto 'origin'): {remote!r}\n"
+      "Inceptum nominatur ultima parte viae URL sedis suae publicae (remoti 'origin'), "
+      "aut, si sedem publicam non habet, nomine directorii sui.\n"
+      "Repositorio in GitHub renominato, sourcery tabulas eius recusat donec prima linea "
+      "cuiusque tabulae novum repositorium nominet.\n"
+      f"Si tabula ad hoc inceptum pertinet: si repositorium nunc {project!r} nominatur, in prima "
+      f"linea cuiusque tabulae pro {head['repo']!r} scribe {project!r}; sin minus, hic corrige: "
+      "URL ipsius 'origin' ad sedem repositorii constitue, aut, si sedem publicam non habet, "
+      f"directorium renomina {head['repo']!r}. Si vero re vera ad aliud inceptum pertinet, "
+      "aliam viam output elige.\n"
+      "Deinde iterum curre.\nNihil scriptum est."
+    )
+  return {exchange: cited[exchange] for exchange in weave(cited)}
 
 
 # Any file named like a ledger, ignoring case. read_ledgers refuses one whose
@@ -4819,32 +4821,32 @@ LEDGER_NAME = re.compile(r"sourcery\.(.*)\.jsonl", re.IGNORECASE | re.DOTALL)
 
 
 def read_ledgers(
-    output: Path, repo: Path, remote: str
+  output: Path, repo: Path, remote: str
 ) -> tuple[dict[str, list[Exchange]], dict[Exchange, str]]:
-    """Every ledger beside the output page, by login, in login order, and
-    every row's citation (see read_ledger)."""
-    ledgers: dict[str, list[Exchange]] = {}
-    citations: dict[Exchange, str] = {}
-    for path in sorted(output.parent.glob("*")):
-        named = LEDGER_NAME.fullmatch(path.name)
-        if named is None:
-            continue  # no ledger
-        login = named[1]
-        if path.name != ledger_path(output, login.lower()).name or not GITHUB_LOGIN.fullmatch(login):
-            # TODO: Says this file is named like a ledger but is none: a
-            # ledger's name is sourcery.LOGIN.jsonl, all lowercase, LOGIN
-            # being a GitHub login; rename the file so, or move it away, then
-            # rerun. Nothing was written.
-            raise UserError(
-                f"{LATIN_PREFIX}\n"
-                f"Fasciculus nomen tabulae imitatur, sed tabula non est: {path}\n"
-                "Nomen tabulae est sourcery.LOGIN.jsonl, totum minusculis litteris, LOGIN nomen GitHub. "
-                "Fasciculum renomina vel remove, deinde iterum curre.\nNihil scriptum est."
-            )
-        cited = read_ledger(path, repo, remote)
-        ledgers[login] = list(cited)
-        citations.update(cited)
-    return ledgers, citations
+  """Every ledger beside the output page, by login, in login order, and
+  every row's citation (see read_ledger)."""
+  ledgers: dict[str, list[Exchange]] = {}
+  citations: dict[Exchange, str] = {}
+  for path in sorted(output.parent.glob("*")):
+    named = LEDGER_NAME.fullmatch(path.name)
+    if named is None:
+      continue  # no ledger
+    login = named[1]
+    if path.name != ledger_path(output, login.lower()).name or not GITHUB_LOGIN.fullmatch(login):
+      # TODO: Says this file is named like a ledger but is none: a
+      # ledger's name is sourcery.LOGIN.jsonl, all lowercase, LOGIN
+      # being a GitHub login; rename the file so, or move it away, then
+      # rerun. Nothing was written.
+      raise UserError(
+        f"{LATIN_PREFIX}\n"
+        f"Fasciculus nomen tabulae imitatur, sed tabula non est: {path}\n"
+        "Nomen tabulae est sourcery.LOGIN.jsonl, totum minusculis litteris, LOGIN nomen GitHub. "
+        "Fasciculum renomina vel remove, deinde iterum curre.\nNihil scriptum est."
+      )
+    cited = read_ledger(path, repo, remote)
+    ledgers[login] = list(cited)
+    citations.update(cited)
+  return ledgers, citations
 
 
 # A "credit" records, on the page, whose ledger holds each row it shows:
@@ -4857,137 +4859,137 @@ def read_ledgers(
 # start.
 PROVIDER_NAMES = {slug: name for name, slug in PROVIDER_SLUGS.items()}
 CREDIT = re.compile(
-    rf'^<article class="exchange ({"|".join(map(re.escape, PROVIDER_NAMES))})" id="p[0-9]+"'
-    r' data-login="([^"]*)">.*?<time datetime="([^"]*)">',
-    re.DOTALL | re.MULTILINE,
+  rf'^<article class="exchange ({"|".join(map(re.escape, PROVIDER_NAMES))})" id="p[0-9]+"'
+  r' data-login="([^"]*)">.*?<time datetime="([^"]*)">',
+  re.DOTALL | re.MULTILINE,
 )
 ARTICLE = re.compile(r"^<article ", re.MULTILINE)
 
 
 def page_credits(output: Path) -> set[tuple[str, Holding]]:
-    """Every row the existing page credits, as its login and holding;
-    nothing when there is no page yet. A page that does not credit every
-    row it shows cannot be checked against the ledgers and is refused: one
-    sourcery 5 wrote, or no sourcery page at all."""
-    if not output.exists():
-        return set()
-    try:
-        page = output.read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        # TODO: Says the existing output could not be read as a UTF-8 file
-        # (it may be a directory, unreadable, or not text), gives the reason,
-        # and that nothing was written.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Pagina exsistens legi non potest: {output}\n{exc}\nNihil scriptum est."
-        ) from exc
-    credits = CREDIT.findall(page)
-    if not 0 < len(credits) == len(ARTICLE.findall(page)):
-        # TODO: Says the existing output was not written by sourcery 6: it
-        # does not credit every prompt it shows to a ledger, so it cannot be
-        # checked against the ledgers. A page sourcery 5 wrote, carrying a
-        # snapshot, is first imported by adopt.py, run as shown, LOGIN being
-        # the GitHub login of the human whose sourcery 5 wrote the page,
-        # perhaps not the human running sourcery now; for any other file,
-        # choose another output path. Nothing was written.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Pagina exsistens a sourcery 6 scripta non est: {output}\n"
-            "Si pagina sourcery 5 est (memoriam snapshot fert), curre prius:\n"
-            f"  python3 adopt.py REPODIR {output} {output} LOGIN\n"
-            "LOGIN est nomen GitHub hominis cuius sourcery 5 paginam scripsit, fortasse non tuum.\n"
-            "Aliter elige aliam viam output.\nNihil scriptum est."
-        )
-    return {(login, (PROVIDER_NAMES[slug], parse_time(when))) for slug, login, when in credits}
+  """Every row the existing page credits, as its login and holding;
+  nothing when there is no page yet. A page that does not credit every
+  row it shows cannot be checked against the ledgers and is refused: one
+  sourcery 5 wrote, or no sourcery page at all."""
+  if not output.exists():
+    return set()
+  try:
+    page = output.read_bytes().decode("utf-8")
+  except (OSError, UnicodeDecodeError) as exc:
+    # TODO: Says the existing output could not be read as a UTF-8 file
+    # (it may be a directory, unreadable, or not text), gives the reason,
+    # and that nothing was written.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Pagina exsistens legi non potest: {output}\n{exc}\nNihil scriptum est."
+    ) from exc
+  credits = CREDIT.findall(page)
+  if not 0 < len(credits) == len(ARTICLE.findall(page)):
+    # TODO: Says the existing output was not written by sourcery 6: it
+    # does not credit every prompt it shows to a ledger, so it cannot be
+    # checked against the ledgers. A page sourcery 5 wrote, carrying a
+    # snapshot, is first imported by adopt.py, run as shown, LOGIN being
+    # the GitHub login of the human whose sourcery 5 wrote the page,
+    # perhaps not the human running sourcery now; for any other file,
+    # choose another output path. Nothing was written.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Pagina exsistens a sourcery 6 scripta non est: {output}\n"
+      "Si pagina sourcery 5 est (memoriam snapshot fert), curre prius:\n"
+      f"  python3 adopt.py REPODIR {output} {output} LOGIN\n"
+      "LOGIN est nomen GitHub hominis cuius sourcery 5 paginam scripsit, fortasse non tuum.\n"
+      "Aliter elige aliam viam output.\nNihil scriptum est."
+    )
+  return {(login, (PROVIDER_NAMES[slug], parse_time(when))) for slug, login, when in credits}
 
 
 def listed(output: Path, credits: Iterable[tuple[str, Holding]]) -> str:
-    """Prompts for a refusal to list, given as login and holding: under
-    each login's ledger path and its count of them, each prompt by agent
-    and time, one per line."""
-    by_login: dict[str, list[Holding]] = {}
-    for login, held in credits:
-        by_login.setdefault(login, []).append(held)
-    return "".join(
-        f"\n  {ledger_path(output, login)}: {len(helds)}"
-        + "".join(f"\n    {provider} {when.isoformat()}" for provider, when in helds)
-        for login, helds in by_login.items()
-    )
+  """Prompts for a refusal to list, given as login and holding: under
+  each login's ledger path and its count of them, each prompt by agent
+  and time, one per line."""
+  by_login: dict[str, list[Holding]] = {}
+  for login, held in credits:
+    by_login.setdefault(login, []).append(held)
+  return "".join(
+    f"\n  {ledger_path(output, login)}: {len(helds)}"
+    + "".join(f"\n    {provider} {when.isoformat()}" for provider, when in helds)
+    for login, helds in by_login.items()
+  )
 
 
 def check_ledgers(
-    output: Path,
-    login: str,
-    ledgers: Mapping[str, Sequence[Exchange]],
-    credits: set[tuple[str, Holding]],
-    holdings: set[Holding],
+  output: Path,
+  login: str,
+  ledgers: Mapping[str, Sequence[Exchange]],
+  credits: set[tuple[str, Holding]],
+  holdings: set[Holding],
 ) -> None:
-    """Refuse, before anything is written, ledgers that disagree with the
-    page, with each other, or with the runner's stores. Each prompt belongs
-    to one human, so each holding belongs to one ledger."""
-    held = {other: {holding(exchange) for exchange in rows} for other, rows in ledgers.items()}
-    lacking = sorted(credit for credit in credits if credit[1] not in held.get(credit[0], set()))
-    if lacking:
-        # TODO: Says the existing page shows this many prompts that the
-        # ledgers it credits them to do not hold, listing under each such
-        # ledger how many and each prompt by agent and time. Such a ledger
-        # may be uncommitted, deleted, or renamed: restore it, then rerun;
-        # git brings back a deleted one: "git log --diff-filter=D -- PATH"
-        # names the commit REV that deleted it, "git checkout REV^ -- PATH"
-        # restores it. Only if the prompts were removed from their ledger on
-        # purpose: delete the page, then rerun; that drops every credit the
-        # page holds, every human's, so first make sure every other ledger
-        # is whole. Nothing was written.
+  """Refuse, before anything is written, ledgers that disagree with the
+  page, with each other, or with the runner's stores. Each prompt belongs
+  to one human, so each holding belongs to one ledger."""
+  held = {other: {holding(exchange) for exchange in rows} for other, rows in ledgers.items()}
+  lacking = sorted(credit for credit in credits if credit[1] not in held.get(credit[0], set()))
+  if lacking:
+    # TODO: Says the existing page shows this many prompts that the
+    # ledgers it credits them to do not hold, listing under each such
+    # ledger how many and each prompt by agent and time. Such a ledger
+    # may be uncommitted, deleted, or renamed: restore it, then rerun;
+    # git brings back a deleted one: "git log --diff-filter=D -- PATH"
+    # names the commit REV that deleted it, "git checkout REV^ -- PATH"
+    # restores it. Only if the prompts were removed from their ledger on
+    # purpose: delete the page, then rerun; that drops every credit the
+    # page holds, every human's, so first make sure every other ledger
+    # is whole. Nothing was written.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Pagina exsistens {len(lacking)} rogationes ostendit quas tabulae quibus tribuuntur non tenent:"
+      f"{listed(output, lacking)}\n"
+      "Fortasse tabula non commissa, deleta, vel renominata est: restitue eam, deinde iterum curre. "
+      "Tabulam deletam git restituit: 'git log --diff-filter=D -- VIA' commissum REV nominat quod eam "
+      "delevit, 'git checkout REV^ -- VIA' eam reddit.\n"
+      "Solum si rogationes consulto e tabula sua remotae sunt, paginam dele, deinde iterum curre: "
+      "ita pagina omnes tributiones omnium hominum amittit, ergo prius cave ut ceterae tabulae integrae sint.\n"
+      "Nihil scriptum est."
+    )
+  owners: dict[Holding, str] = {}
+  for other, holds in held.items():
+    for h in sorted(holds):
+      first = owners.setdefault(h, other)
+      if first != other:
+        # TODO: Says one prompt (agent and time) is held by two
+        # ledgers, naming both: each prompt belongs to one human, so
+        # remove it from the ledger it does not belong to, then
+        # rerun. Nothing was written.
         raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Pagina exsistens {len(lacking)} rogationes ostendit quas tabulae quibus tribuuntur non tenent:"
-            f"{listed(output, lacking)}\n"
-            "Fortasse tabula non commissa, deleta, vel renominata est: restitue eam, deinde iterum curre. "
-            "Tabulam deletam git restituit: 'git log --diff-filter=D -- VIA' commissum REV nominat quod eam "
-            "delevit, 'git checkout REV^ -- VIA' eam reddit.\n"
-            "Solum si rogationes consulto e tabula sua remotae sunt, paginam dele, deinde iterum curre: "
-            "ita pagina omnes tributiones omnium hominum amittit, ergo prius cave ut ceterae tabulae integrae sint.\n"
-            "Nihil scriptum est."
+          f"{LATIN_PREFIX}\n"
+          f"Rogatio {h[0]} {h[1].isoformat()} in duabus tabulis est:\n"
+          f"  {ledger_path(output, first)}\n  {ledger_path(output, other)}\n"
+          "Rogatio unius hominis est: remove eam ex tabula ad quam non pertinet, "
+          "deinde iterum curre.\nNihil scriptum est."
         )
-    owners: dict[Holding, str] = {}
-    for other, holds in held.items():
-        for h in sorted(holds):
-            first = owners.setdefault(h, other)
-            if first != other:
-                # TODO: Says one prompt (agent and time) is held by two
-                # ledgers, naming both: each prompt belongs to one human, so
-                # remove it from the ledger it does not belong to, then
-                # rerun. Nothing was written.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"Rogatio {h[0]} {h[1].isoformat()} in duabus tabulis est:\n"
-                    f"  {ledger_path(output, first)}\n  {ledger_path(output, other)}\n"
-                    "Rogatio unius hominis est: remove eam ex tabula ad quam non pertinet, "
-                    "deinde iterum curre.\nNihil scriptum est."
-                )
-    claimed = sorted((owners[h], h) for h in holdings if owners.get(h, login) != login)
-    if claimed:
-        # TODO: Says this machine's transcript stores hold this many prompts
-        # that other humans' ledgers hold, listing under each such ledger
-        # how many and each prompt by agent and time: each prompt belongs to
-        # one human, so none is credited to the runner (named by login) too.
-        # Perhaps gh is signed in as someone else. Or that human's
-        # transcripts were copied to this machine: remove the copies from
-        # this machine's stores. Or this machine's transcripts reached that
-        # human's machine first, and their ledger holds the prompts wrongly:
-        # remove the copies from their stores and these rows from their
-        # ledger by hand, and delete the page. Then rerun. Nothing was
-        # written.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Reposita huius machinae {len(claimed)} rogationes tenent quas tabulae aliorum iam tenent:"
-            f"{listed(output, claimed)}\n"
-            f"Rogatio unius hominis est, nec tibi ({login}) quoque tribuitur. Fortasse gh alium hominem nominat. "
-            "Aut transcripta illius huc translata sunt: exemplaria e repositis huius machinae remove. "
-            "Aut transcripta huius machinae prius ad machinam illius pervenerunt, et tabula eius ea perperam "
-            "tenet: exemplaria e repositis eius et has lineas e tabula eius manu remove, paginamque dele. "
-            "Deinde iterum curre.\nNihil scriptum est."
-        )
+  claimed = sorted((owners[h], h) for h in holdings if owners.get(h, login) != login)
+  if claimed:
+    # TODO: Says this machine's transcript stores hold this many prompts
+    # that other humans' ledgers hold, listing under each such ledger
+    # how many and each prompt by agent and time: each prompt belongs to
+    # one human, so none is credited to the runner (named by login) too.
+    # Perhaps gh is signed in as someone else. Or that human's
+    # transcripts were copied to this machine: remove the copies from
+    # this machine's stores. Or this machine's transcripts reached that
+    # human's machine first, and their ledger holds the prompts wrongly:
+    # remove the copies from their stores and these rows from their
+    # ledger by hand, and delete the page. Then rerun. Nothing was
+    # written.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Reposita huius machinae {len(claimed)} rogationes tenent quas tabulae aliorum iam tenent:"
+      f"{listed(output, claimed)}\n"
+      f"Rogatio unius hominis est, nec tibi ({login}) quoque tribuitur. Fortasse gh alium hominem nominat. "
+      "Aut transcripta illius huc translata sunt: exemplaria e repositis huius machinae remove. "
+      "Aut transcripta huius machinae prius ad machinam illius pervenerunt, et tabula eius ea perperam "
+      "tenet: exemplaria e repositis eius et has lineas e tabula eius manu remove, paginamque dele. "
+      "Deinde iterum curre.\nNihil scriptum est."
+    )
 
 
 # Two "readings" of one prompt are two rows alike in provider, time,
@@ -5000,71 +5002,71 @@ def check_ledgers(
 # first with no reply, say). Exactly identical rows are no two readings:
 # weave collapses them before this check.
 def check_sessions(
-    rows: Iterable[Exchange], sessions: Mapping[tuple[str, str], tuple[Path, bool]], ledger: Path
+  rows: Iterable[Exchange], sessions: Mapping[tuple[str, str], tuple[Path, bool]], ledger: Path
 ) -> None:
-    """Refuse when a session the stores still hold for the repo yields no
-    prompt at all, though the runner's ledger holds prompts read from it.
-    `sessions` maps each such session, by agent and session id, to its file
-    and whether it holds any holding. The session kept its place, so its
-    prompts did not leave with a pruned file: most likely the store began to
-    record them in a form sourcery does not read, as when Codex rewrote its
-    rollouts and their prompts went unread in silence for weeks. A session
-    still yielding some of its prompts (a store restored from an older
-    backup) passes, its other prompts kept from the ledger."""
-    emptied = [row for row in rows if not sessions.get((row.provider, row.session), (ledger, True))[1]]
-    if emptied:
-        first = min(emptied, key=chronology)
-        path, _ = sessions[(first.provider, first.session)]
-        count = sum((row.provider, row.session) == (first.provider, first.session) for row in emptied)
-        # TODO: Says this session of the named agent is still in the
-        # transcript store, in the file named, but yields no prompt any more,
-        # though the human's ledger (named) holds the given number of prompts
-        # read from it, the first at the time named: the transcript format
-        # seems to have changed, so sourcery needs updating; if the prompts
-        # were deleted on purpose in the agent's own interface, their lines
-        # are to be deleted from the ledger instead; then rerun. Nothing
-        # written.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Sessio {first.provider} {first.session} in reposito transcriptorum adhuc est ({path}), "
-            f"sed nullam iam rogationem reddit, quamquam tabula {ledger} {count} rogationes ex ea lectas "
-            f"tenet, primam {first.timestamp.isoformat()}.\n"
-            "Forma transcripti mutata videtur; sourcery renovandum est. Si rogationes in ipsa machina "
-            "agentis consulto deletae sunt, lineas earum e tabula dele. Deinde iterum curre.\n"
-            "Nihil scriptum est."
-        )
+  """Refuse when a session the stores still hold for the repo yields no
+  prompt at all, though the runner's ledger holds prompts read from it.
+  `sessions` maps each such session, by agent and session id, to its file
+  and whether it holds any holding. The session kept its place, so its
+  prompts did not leave with a pruned file: most likely the store began to
+  record them in a form sourcery does not read, as when Codex rewrote its
+  rollouts and their prompts went unread in silence for weeks. A session
+  still yielding some of its prompts (a store restored from an older
+  backup) passes, its other prompts kept from the ledger."""
+  emptied = [row for row in rows if not sessions.get((row.provider, row.session), (ledger, True))[1]]
+  if emptied:
+    first = min(emptied, key=chronology)
+    path, _ = sessions[(first.provider, first.session)]
+    count = sum((row.provider, row.session) == (first.provider, first.session) for row in emptied)
+    # TODO: Says this session of the named agent is still in the
+    # transcript store, in the file named, but yields no prompt any more,
+    # though the human's ledger (named) holds the given number of prompts
+    # read from it, the first at the time named: the transcript format
+    # seems to have changed, so sourcery needs updating; if the prompts
+    # were deleted on purpose in the agent's own interface, their lines
+    # are to be deleted from the ledger instead; then rerun. Nothing
+    # written.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Sessio {first.provider} {first.session} in reposito transcriptorum adhuc est ({path}), "
+      f"sed nullam iam rogationem reddit, quamquam tabula {ledger} {count} rogationes ex ea lectas "
+      f"tenet, primam {first.timestamp.isoformat()}.\n"
+      "Forma transcripti mutata videtur; sourcery renovandum est. Si rogationes in ipsa machina "
+      "agentis consulto deletae sunt, lineas earum e tabula dele. Deinde iterum curre.\n"
+      "Nihil scriptum est."
+    )
 
 
 def prompt_key(row: Exchange) -> tuple[str, dt.datetime, str, str]:
-    """What every reading of one prompt shares: its agent, time, session,
-    and words."""
-    return (row.provider, row.timestamp, row.session, row.prompt)
+  """What every reading of one prompt shares: its agent, time, session,
+  and words."""
+  return (row.provider, row.timestamp, row.session, row.prompt)
 
 
 def check_readings(
-    ledgers: Mapping[str, Iterable[Exchange]], citations: Mapping[Exchange, str], advice: str
+  ledgers: Mapping[str, Iterable[Exchange]], citations: Mapping[Exchange, str], advice: str
 ) -> None:
-    """Refuse, before anything is written, two readings of one prompt among
-    the ledgers' rows, citing each as citations gives it, then giving the
-    advice the caller words to fit where it read the rows."""
-    first: dict[tuple[str, dt.datetime, str, str], Exchange] = {}
-    for rows in ledgers.values():
-        for row in rows:
-            seen = first.setdefault(prompt_key(row), row)
-            if seen != row:
-                # TODO: Says one prompt, named by agent, time, and session,
-                # has two readings (versions), rows alike in those and in
-                # its words but differing otherwise, citing each where it
-                # was read: a ledger's row by the ledger's file and line, a
-                # row read from a transcript, or from the snapshot of a page
-                # sourcery 5 wrote, by that file; then the caller's advice
-                # (see each call). Nothing was written.
-                raise UserError(
-                    f"{LATIN_PREFIX}\n"
-                    f"Rogationis {row.provider} {row.timestamp.isoformat()} (sessio {row.session}) "
-                    f"duae lectiones sunt:\n  {citations[seen]}\n  {citations[row]}\n"
-                    f"{advice}\nNihil scriptum est."
-                )
+  """Refuse, before anything is written, two readings of one prompt among
+  the ledgers' rows, citing each as citations gives it, then giving the
+  advice the caller words to fit where it read the rows."""
+  first: dict[tuple[str, dt.datetime, str, str], Exchange] = {}
+  for rows in ledgers.values():
+    for row in rows:
+      seen = first.setdefault(prompt_key(row), row)
+      if seen != row:
+        # TODO: Says one prompt, named by agent, time, and session,
+        # has two readings (versions), rows alike in those and in
+        # its words but differing otherwise, citing each where it
+        # was read: a ledger's row by the ledger's file and line, a
+        # row read from a transcript, or from the snapshot of a page
+        # sourcery 5 wrote, by that file; then the caller's advice
+        # (see each call). Nothing was written.
+        raise UserError(
+          f"{LATIN_PREFIX}\n"
+          f"Rogationis {row.provider} {row.timestamp.isoformat()} (sessio {row.session}) "
+          f"duae lectiones sunt:\n  {citations[seen]}\n  {citations[row]}\n"
+          f"{advice}\nNihil scriptum est."
+        )
 
 
 # ----------------------------------------------------------------------- exit
@@ -5077,156 +5079,156 @@ def check_readings(
 # whole: the page is always generated, never hand-edited (the page itself
 # opens with a warning comment saying so).
 def write_output(path: Path, page: str) -> None:
-    target = path.resolve()
-    if not target.parent.is_dir():
-        # TODO: Says the output directory doesn't exist and to deliberately
-        # create it, then rerun.
-        raise UserError(
-            f"{LATIN_PREFIX}\n"
-            f"Directorium output non exsistit: {target.parent}\n"
-            "Crea directorium consulto, deinde iterum curre."
-        )
-    fd, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent, text=True)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-            fh.write(page)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(temporary, target)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+  target = path.resolve()
+  if not target.parent.is_dir():
+    # TODO: Says the output directory doesn't exist and to deliberately
+    # create it, then rerun.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Directorium output non exsistit: {target.parent}\n"
+      "Crea directorium consulto, deinde iterum curre."
+    )
+  fd, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent, text=True)
+  temporary = Path(temporary_name)
+  try:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+      fh.write(page)
+      fh.flush()
+      os.fsync(fh.fileno())
+    os.replace(temporary, target)
+  except BaseException:
+    temporary.unlink(missing_ok=True)
+    raise
 
 
 def no_exchanges_error(repo: Path, roots: Roots) -> UserError:
-    sought = "\n".join(f"  {path}" for path in roots.all())
-    # Says no prompts were attributed to this project, lists the
-    # transcript roots that were searched, explains the environment
-    # variables for nonstandard locations, and notes that VS Code chats
-    # attribute correctly only when the project is opened as a plain folder.
-    return UserError(
-        f"No prompts found: {repo}\n\n"
-        f"Checked all of these places:\n{sought}\n\n"
-        "If this seems wrong, here's some stuff to paste to Claude to debug:\n"
-        "Si transcripta alibi sunt, variabiles AI_CHAT_CLAUDE_ROOTS, "
-        "AI_CHAT_CODEX_ROOTS, AI_CHAT_VSCODE_USER_ROOTS, AI_CHAT_ANTIGRAVITY_ROOTS, "
-        "vel AI_CHAT_CODEBUFF_ROOTS constitue.\n"
-        "VS Code: inceptum ipsum ut folder aperi, non workspace multiplex."
-    )
+  sought = "\n".join(f"  {path}" for path in roots.all())
+  # Says no prompts were attributed to this project, lists the
+  # transcript roots that were searched, explains the environment
+  # variables for nonstandard locations, and notes that VS Code chats
+  # attribute correctly only when the project is opened as a plain folder.
+  return UserError(
+    f"No prompts found: {repo}\n\n"
+    f"Checked all of these places:\n{sought}\n\n"
+    "If this seems wrong, here's some stuff to paste to Claude to debug:\n"
+    "Si transcripta alibi sunt, variabiles AI_CHAT_CLAUDE_ROOTS, "
+    "AI_CHAT_CODEX_ROOTS, AI_CHAT_VSCODE_USER_ROOTS, AI_CHAT_ANTIGRAVITY_ROOTS, "
+    "vel AI_CHAT_CODEBUFF_ROOTS constitue.\n"
+    "VS Code: inceptum ipsum ut folder aperi, non workspace multiplex."
+  )
 
 
 def run(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    environment = os.environ if env is None else env
-    try:
-        options = parse_args(args)
-        repo = canonical_repo(options.repo)
-        remote = repo_remote(repo)
-        project = project_name(repo, remote)
-        roots = discover_roots(environment)
-        login = github_login()
-        # Each session the stores hold for the repo, by agent and id: its
-        # file, and whether it holds any holding (see check_sessions).
-        sessions: dict[tuple[str, str], tuple[Path, bool]] = {}
+  args = list(sys.argv[1:] if argv is None else argv)
+  environment = os.environ if env is None else env
+  try:
+    options = parse_args(args)
+    repo = canonical_repo(options.repo)
+    remote = repo_remote(repo)
+    project = project_name(repo, remote)
+    roots = discover_roots(environment)
+    login = github_login()
+    # Each session the stores hold for the repo, by agent and id: its
+    # file, and whether it holds any holding (see check_sessions).
+    sessions: dict[tuple[str, str], tuple[Path, bool]] = {}
 
-        def seen(provider: str, session: str, path: Path, held: bool) -> None:
-            sessions[(provider, session)] = (path, sessions.get((provider, session), (path, False))[1] or held)
+    def seen(provider: str, session: str, path: Path, held: bool) -> None:
+      sessions[(provider, session)] = (path, sessions.get((provider, session), (path, False))[1] or held)
 
-        fresh, holdings = collect(repo, roots, seen)
-        credits = page_credits(options.output)
-        ledgers, citations = read_ledgers(options.output, repo, remote)
-        check_ledgers(options.output, login, ledgers, credits, holdings)
-        # The store is the truth for every record it still holds and the
-        # runner's ledger for the rest: a ledger copy of a record the store
-        # still has is dropped (the store's reading wins, so parser fixes
-        # purge stale copies), a ledger copy of a record the store lost is
-        # kept (nothing rendered is ever lost). Fresh first, so weave keeps
-        # the store's copy. The runner's ledger is absent until their first
-        # run: then it holds nothing.
-        old = ledgers.get(login, [])
-        check_sessions(old, sessions, ledger_path(options.output, login))
-        kept = [exchange for exchange in old if holding(exchange) not in holdings]
-        mine = weave(fresh + kept)
-        ledgers = dict(sorted({**ledgers, login: mine}.items()))
-        # Two readings of one prompt are sought only now, among the rows
-        # this run would write and render: two the runner's ledger held of
-        # a prompt the runner's stores hold were both just replaced by the
-        # stores' reading, so a rerun on the machine whose transcripts hold
-        # the prompt's session heals them. A row read from the stores has no
-        # ledger line yet, so it is cited by its transcript. Two readings
-        # both read from the stores are sought first, among the stores' rows
-        # alone: no ledger line holds either, and no run elsewhere settles
-        # them, so their advice is their own.
-        sources = {exchange: str(exchange.source) for exchange in fresh}
-        # TODO: Says both readings were read from this machine's own
-        # transcripts, which disagree about the prompt, and that if one file
-        # is a stale copy of the other, to move the copy out of the
-        # transcript store, then rerun; if not, as when one file is cited
-        # twice (it holds both readings), sourcery does not decide which
-        # reading to believe: the case is to be examined and the script
-        # updated.
-        check_readings(
-            {login: weave(fresh)},
-            sources,
-            "Ambae lectiones e transcriptis huius machinae lectae sunt, quae de rogatione dissentiunt. "
-            "Si alter fasciculus alterius exemplar obsoletum est, exemplar e reposito transcriptorum alio move, "
-            "deinde iterum curre. Sin minus, ut cum unus fasciculus bis citatur, utri lectioni credendum sit "
-            "sourcery non decernit: casus inspiciendus, scriptum renovandum est.",
-        )
-        # TODO: Says to delete the stale line, then rerun; or to rerun on
-        # the machine whose transcripts hold that session.
-        check_readings(
-            ledgers,
-            {**citations, **sources},
-            "Lineam obsoletam dele, deinde iterum curre; aut iterum curre in machina cuius "
-            "transcripta illam sessionem tenent.",
-        )
-        if not any(ledgers.values()):
-            raise no_exchanges_error(repo, roots)
-        # The page is rendered before anything is written, so a refusal found
-        # while rendering it writes nothing.
-        page = renderer(options.output)(repo, ledgers, remote)
-        ledger = ledger_path(options.output, login)
-        write_output(ledger, ledger_text(project, mine))
-        write_output(options.output, page)
-        output = options.output.resolve()
-        # TODO: Reports success with each path written (the runner's
-        # ledger, then the page), the number of exported prompts, and how
-        # many of them each human's ledger holds, by login.
-        print(
-            f"Written: {ledger.resolve()}\nWritten: {output}\nPrompts: {sum(map(len, ledgers.values()))}"
-            + "".join(f"\n  {who}: {len(rows)}" for who, rows in ledgers.items())
-        )
-        # A ledger prompt whose record the store still holds but no longer
-        # reads as a prompt was dropped by the merge above. It is named here,
-        # every run, so a parser change that dropped typed words by mistake
-        # cannot pass unseen: the diff of the ledger shows the loss, this
-        # line says why.
-        # Prompts are counted by prompt_key, so two readings the ledger
-        # held of one prompt count as the one prompt they read.
-        yielded = {holding(exchange) for exchange in fresh}
-        dropped = sorted(
-            {prompt_key(exchange) for exchange in old if holding(exchange) in holdings and holding(exchange) not in yielded}
-        )
-        # Reports how many prompts the runner's ledger held that the store
-        # now reads as machine text, each named by agent and time.
-        print(f"Prompts deleted: {len(dropped)}" + "".join(f"\n  {provider} {when.isoformat()}" for provider, when, _, _ in dropped))
-        if options.open_after and not webbrowser.open(output.as_uri()):
-            # Says the browser refused to open the file.
-            raise UserError(f"Browser failed to open: {output}")
-        return 0
-    except ExitMessage as exc:
-        print(exc)
-        return 0
-    except UserError as exc:
-        print(exc, file=sys.stderr)
-        return 2
+    fresh, holdings = collect(repo, roots, seen)
+    credits = page_credits(options.output)
+    ledgers, citations = read_ledgers(options.output, repo, remote)
+    check_ledgers(options.output, login, ledgers, credits, holdings)
+    # The store is the truth for every record it still holds and the
+    # runner's ledger for the rest: a ledger copy of a record the store
+    # still has is dropped (the store's reading wins, so parser fixes
+    # purge stale copies), a ledger copy of a record the store lost is
+    # kept (nothing rendered is ever lost). Fresh first, so weave keeps
+    # the store's copy. The runner's ledger is absent until their first
+    # run: then it holds nothing.
+    old = ledgers.get(login, [])
+    check_sessions(old, sessions, ledger_path(options.output, login))
+    kept = [exchange for exchange in old if holding(exchange) not in holdings]
+    mine = weave(fresh + kept)
+    ledgers = dict(sorted({**ledgers, login: mine}.items()))
+    # Two readings of one prompt are sought only now, among the rows
+    # this run would write and render: two the runner's ledger held of
+    # a prompt the runner's stores hold were both just replaced by the
+    # stores' reading, so a rerun on the machine whose transcripts hold
+    # the prompt's session heals them. A row read from the stores has no
+    # ledger line yet, so it is cited by its transcript. Two readings
+    # both read from the stores are sought first, among the stores' rows
+    # alone: no ledger line holds either, and no run elsewhere settles
+    # them, so their advice is their own.
+    sources = {exchange: str(exchange.source) for exchange in fresh}
+    # TODO: Says both readings were read from this machine's own
+    # transcripts, which disagree about the prompt, and that if one file
+    # is a stale copy of the other, to move the copy out of the
+    # transcript store, then rerun; if not, as when one file is cited
+    # twice (it holds both readings), sourcery does not decide which
+    # reading to believe: the case is to be examined and the script
+    # updated.
+    check_readings(
+      {login: weave(fresh)},
+      sources,
+      "Ambae lectiones e transcriptis huius machinae lectae sunt, quae de rogatione dissentiunt. "
+      "Si alter fasciculus alterius exemplar obsoletum est, exemplar e reposito transcriptorum alio move, "
+      "deinde iterum curre. Sin minus, ut cum unus fasciculus bis citatur, utri lectioni credendum sit "
+      "sourcery non decernit: casus inspiciendus, scriptum renovandum est.",
+    )
+    # TODO: Says to delete the stale line, then rerun; or to rerun on
+    # the machine whose transcripts hold that session.
+    check_readings(
+      ledgers,
+      {**citations, **sources},
+      "Lineam obsoletam dele, deinde iterum curre; aut iterum curre in machina cuius "
+      "transcripta illam sessionem tenent.",
+    )
+    if not any(ledgers.values()):
+      raise no_exchanges_error(repo, roots)
+    # The page is rendered before anything is written, so a refusal found
+    # while rendering it writes nothing.
+    page = renderer(options.output)(repo, ledgers, remote)
+    ledger = ledger_path(options.output, login)
+    write_output(ledger, ledger_text(project, mine))
+    write_output(options.output, page)
+    output = options.output.resolve()
+    # TODO: Reports success with each path written (the runner's
+    # ledger, then the page), the number of exported prompts, and how
+    # many of them each human's ledger holds, by login.
+    print(
+      f"Written: {ledger.resolve()}\nWritten: {output}\nPrompts: {sum(map(len, ledgers.values()))}"
+      + "".join(f"\n  {who}: {len(rows)}" for who, rows in ledgers.items())
+    )
+    # A ledger prompt whose record the store still holds but no longer
+    # reads as a prompt was dropped by the merge above. It is named here,
+    # every run, so a parser change that dropped typed words by mistake
+    # cannot pass unseen: the diff of the ledger shows the loss, this
+    # line says why.
+    # Prompts are counted by prompt_key, so two readings the ledger
+    # held of one prompt count as the one prompt they read.
+    yielded = {holding(exchange) for exchange in fresh}
+    dropped = sorted(
+      {prompt_key(exchange) for exchange in old if holding(exchange) in holdings and holding(exchange) not in yielded}
+    )
+    # Reports how many prompts the runner's ledger held that the store
+    # now reads as machine text, each named by agent and time.
+    print(f"Prompts deleted: {len(dropped)}" + "".join(f"\n  {provider} {when.isoformat()}" for provider, when, _, _ in dropped))
+    if options.open_after and not webbrowser.open(output.as_uri()):
+      # Says the browser refused to open the file.
+      raise UserError(f"Browser failed to open: {output}")
+    return 0
+  except ExitMessage as exc:
+    print(exc)
+    return 0
+  except UserError as exc:
+    print(exc, file=sys.stderr)
+    return 2
 
 
 def main() -> int:
-    return run()
+  return run()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+  raise SystemExit(main())

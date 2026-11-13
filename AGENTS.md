@@ -56,3 +56,7 @@ Codex rewrote and compressed its transcript store in 2026-09/10 and sourcery rea
 ## An error prints exactly what its raise site writes (2026.11.04-b)
 
 The printers in sourcery.py's and adopt.py's `run` print a UserError's message as raised and add nothing, not even an `Error:` line: every character the human sees is written where the error is raised (rule 9). Every UserError message still in Latin therefore opens with `f"{LATIN_PREFIX}\n"` written there, under the TODO that marks it untranslated, so the human sees it is to be pasted to Claude. A human translating one deletes the TODO and the prefix together; `test_every_untranslated_error_and_no_other_opens_with_the_paste_line` refuses either without the other. New Latin errors get both.
+
+## Python is indented two spaces (2026.11.13-b)
+
+dreeves prefers 2-space indentation. Each block sits exactly two spaces deeper than the block holding it, and `test_python_sources_indent_blocks_two_spaces` refuses anything else in any `*.py` here. Lines continued inside brackets may align freely. The switch from four spaces changed only leading spaces: the old and new files compile to identical bytecode and constants, docstrings included, because Python ≥3.13 strips a docstring's common indentation.
