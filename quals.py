@@ -69,6 +69,17 @@ def markup(page):
   return page[: page.index("<script>")]
 
 
+def contrast(a, b):
+  """The WCAG 2 contrast ratio of two colors written as #rrggbb, from 1
+  (the same lightness) to 21 (black on white)."""
+  def luminance(color):
+    channels = [int(color[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+    red, green, blue = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+  lighter, darker = sorted((luminance(a), luminance(b)), reverse=True)
+  return (lighter + 0.05) / (darker + 0.05)
+
+
 def write_jsonl(path: Path, records: list) -> Path:
   path.parent.mkdir(parents=True, exist_ok=True)
   path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
@@ -4188,14 +4199,14 @@ class RenderQuals(Fixture):
     # Replicata: an exchange from a claude.ai chat, which reaches a page
     # only through a ledger (no store parser reads claude.ai).
     # Expectata: its article carries the class claudeai, whose stripe
-    # and chip take Claude Code's color, defined for both color schemes,
+    # and chip take Claude Code's color, defined once,
     # and its meta line names claude.ai. Resultata (v5.5.0): KeyError,
     # claude.ai being no known provider.
     page = ace.render(self.repo, {LOGIN: [exchange(provider="claude.ai", model="claude-opus-5-5")]})
     self.assertIn('<article class="exchange claudeai"', page)
     self.assertIn('<span class="agent">claude.ai</span>', page)
     self.assertIn(".exchange.claudeai { --provider: var(--claude); }", ace.CSS)
-    self.assertEqual(ace.CSS.count("--claude:"), 2)
+    self.assertEqual(ace.CSS.count("--claude:"), 1)
 
   def test_codebuff_exchange_wears_claude_codes_color(self):
     # Replicata: an exchange from a Codebuff chat.
@@ -4285,6 +4296,72 @@ class RenderQuals(Fixture):
     self.assertNotIn("float", ace.CSS)
     self.assertNotIn("clear", ace.CSS)
     self.assertIn("\n.exchange > header + .ballot { margin-top: .3rem; }\n", ace.CSS)
+
+  def test_stylesheet_has_one_palette_and_three_conditions(self):
+    # Replicata: the stylesheet, and a page. Expectata: one palette, so
+    # the page looks the same whatever theme the viewer's system asks
+    # for: no prefers-color-scheme query, no color-scheme declaration
+    # in the stylesheet or the head, and each color defined once for
+    # the screen. The stylesheet's conditions, each of them a branch,
+    # are these three and no other: the rail's day marks leave below
+    # 54rem, the header hangs in the margin from 70rem, and print.
+    # Resultata (2026.11.14-a): a second, dark palette under
+    # @media (prefers-color-scheme: dark), a branch dreeves ruled out
+    # (2026-11-14: "i don't want dark mode. that's an if-statement").
+    self.assertEqual(
+      re.findall(r"@[a-z-]+[^{;]*\{", ace.CSS),
+      ["@media (max-width: 54rem) {", "@media screen and (min-width: 70rem) {", "@media print {"],
+    )
+    self.assertNotIn("color-scheme", ace.render(self.repo, {LOGIN: [exchange()]}))
+    screen = ace.CSS[: ace.CSS.index("\n@media print {")]
+    tokens = re.findall(r"\n\s+(--[a-z-]+):", screen)
+    self.assertEqual(sorted(tokens), sorted(set(tokens)))
+    for token in ("--bg", "--ink", "--accent", "--claude", "--codex", "--copilot", "--antigravity", "--m-bg", "--m-ink"):
+      self.assertIn(token, tokens)
+
+  def test_machine_container_is_a_quiet_slip_in_green_ink(self):
+    # Replicata: the stylesheet. Expectata: every machine container, a
+    # reply or a ballot, is a "slip": a box one tint step off the page
+    # (under 1.1:1 against it, so no dark mass) with a hairline frame,
+    # set in the monospace face and a green ink that reads at 7:1 or
+    # better on the slip. The dim ink, of ballot questions, unpicked
+    # options and quotations, reads at 4.5:1 or better. The human's ink
+    # on the page outdoes every machine ink on the slip, so typed words
+    # are the darkest text on the page. Code in a reply, inline or in a
+    # block, sits on a deeper tint of the slip, under which the ink
+    # still reads at 4.5:1 or better, with no box around it and no dark
+    # panel. The human's pick in a ballot is told from the other
+    # options by its check mark and its weight, its ink differing too
+    # little to carry that alone. Print restyles none of it. Resultata
+    # (2026.11.14-b): green on a near-black box, 17.3:1 against the
+    # page: with every reply closed the ballots, and with one open the
+    # reply, were the heaviest shapes on the page, inline code sat in
+    # boxes, and print swapped in a palette of its own.
+    token = lambda name: re.search(rf"\n\s+{name}: (#[0-9a-f]{{6}});", ace.CSS).group(1)
+    rule = lambda selector: ace.CSS[ace.CSS.index(f"\n{selector} {{") :].split("}")[0]
+    page, ink, slip, code = token("--bg"), token("--ink"), token("--m-bg"), token("--m-code")
+    inks = [token(name) for name in ("--m-ink", "--m-bright", "--m-dim")]
+    self.assertLess(contrast(slip, page), 1.1)
+    self.assertLess(contrast(code, slip), 1.2)
+    self.assertGreaterEqual(contrast(inks[0], slip), 7)
+    self.assertGreater(contrast(inks[1], slip), contrast(inks[0], slip))
+    self.assertGreaterEqual(contrast(inks[2], slip), 4.5)
+    self.assertGreaterEqual(contrast(inks[0], code), 4.5)
+    for machine_ink in inks:
+      self.assertGreater(contrast(ink, page), contrast(machine_ink, slip))
+    for declaration in (
+      "\n  font-family: var(--mono);\n", "\n  background: var(--m-bg);\n", "\n  color: var(--m-ink);\n",
+      "\n  border: 1px solid var(--m-line);\n",
+    ):
+      self.assertIn(declaration, rule(".machine"))
+    for selector in (".reply :not(pre) > code", ".reply pre.code"):
+      self.assertIn("\n  background: var(--m-code);\n", rule(selector))
+      self.assertNotIn("border:", rule(selector))
+    self.assertLess(contrast(inks[1], inks[2]), 3)
+    self.assertIn(" font-weight: 600; ", rule(".ballot .option.picked"))
+    printed = ace.CSS[ace.CSS.index("\n@media print {") :]
+    for restyling in ("machine", "--m-", "pre.code"):
+      self.assertNotIn(restyling, printed)
 
   def test_wide_screens_hang_the_header_in_the_left_margin(self):
     # Replicata: the stylesheet. Expectata: on a screen at least 70rem
@@ -4507,7 +4584,7 @@ class RenderQuals(Fixture):
   def test_ballot_stays_default_visible_outside_the_disclosure(self):
     # Deliberate exception to machine-words-collapsed: the human's picks
     # are legible only against the agent's question and labels, so the
-    # ballot renders before the closed <details>, still in phosphor.
+    # ballot renders before the closed <details>, still on its slip.
     ballot = ace.Ballot("Q?", ("A label", "B label"), ("A label",))
     page = ace.render(self.repo, {LOGIN: [exchange(prompt="typed words", ballots=(ballot,))]})
     article = page[page.index("<article") : page.index("</article>")]
@@ -8819,8 +8896,8 @@ class AntigravityQuals(Fixture):
     with self.assertRaises(ace.UserError):
       ace.antigravity_exchanges(path, self.repo, AG_TEST_KEY)
 
-  def test_provider_color_defined_in_both_modes(self):
-    self.assertEqual(ace.CSS.count("--antigravity:"), 2)
+  def test_provider_color_defined_once(self):
+    self.assertEqual(ace.CSS.count("--antigravity:"), 1)
     self.assertIn(".exchange.antigravity { --provider: var(--antigravity); }", ace.CSS)
     self.assertEqual(ace.PROVIDER_SLUGS["Antigravity"], "antigravity")
 

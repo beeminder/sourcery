@@ -82,7 +82,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 # agent changing sourcery sets today's date with the letter after HEAD's
 # when HEAD's version is today's, else with -a, and leaves a version the
 # working tree already moved to today alone.
-VERSION = "2026.11.14-a"
+VERSION = "2026.11.14-b"
 UTC = dt.timezone.utc
 
 # The line every error message still in Latin opens with, written out in
@@ -3686,17 +3686,19 @@ def markdown_html(text: str) -> str:
 
 # The whole design brief: with nothing expanded, the page is the human's
 # prompts and almost nothing else. Prompts get full ink and a reading face;
-# day markers and the disclosure line (time, agent, model) are set small and
-# faint; machine-written words always wear the phosphor style, and all of
+# day markers, the prompt's time and the disclosure line (agent, model) are
+# set small and faint; machine-written words always sit on a slip of their own, in
+# monospace and green ink, and all of
 # them sit inside a closed <details> except the ballot: the human's picks
 # are legible only against the question and labels the agent wrote, so the
 # ballot stays default-visible — in green, never mistakable for typing.
 CSS = r"""
-/* Beeminder hive: honey paper by day, warm black by night, goldenrod
-   accents throughout. Light-mode goldenrod is darkened for text contrast;
-   dark mode gets the full #FFB300. */
+/* Beeminder hive: honey paper, goldenrod
+   accents throughout. The goldenrod is darkened for text contrast;
+   the stripe gets the full #FFB300. One palette: the page reads the same
+   whatever theme the viewer's system asks for (a second palette would be
+   a branch). */
 :root {
-  color-scheme: light dark;
   --bg: #faf0d8;
   --ink: #1c1508;
   --muted: #77673f;
@@ -3706,17 +3708,17 @@ CSS = r"""
   --reply-ink: #4a3f22;
   --accent: #a97b00;
   --stripe: #ffb300;
-  /* Diffstat mark pair, teal for added and red for deleted, validated per
-     mode against its page surface (CVD-simulated ΔE >= 10, contrast >= 3:1;
+  /* Diffstat mark pair, teal for added and red for deleted, validated
+     against the page surface (CVD-simulated ΔE >= 10, contrast >= 3:1;
      a plain green fails deutan/protan separation against these reds). */
   --diff-add: #00785a;
   --diff-del: #cf222e;
   /* Provider identity quartet for the exchange edge stripe and meta-line
-     chip, validated per mode against its page surface: within the quartet
-     the worst CVD-simulated pair is 8.7 light / 7.2 dark (both inside the
-     original trio; the olive's own worst pair is 11.7 / 13.6), normal-vision
+     chip, validated against the page surface: within the quartet
+     the worst CVD-simulated pair is 8.7 (inside the
+     original trio; the olive's own worst pair is 11.7), normal-vision
      ΔE >= 16.9, contrast >= 3:1. Against the diffstat pair the olive sits
-     6.3 / 6.5 under simulation — the 6–8 band that is legal only with
+     6.3 under simulation — the 6–8 band that is legal only with
      secondary encoding, which these marks have: a different mark class, and
      the agent's name beside every chip. Identity never rides on color
      alone. */
@@ -3728,25 +3730,6 @@ CSS = r"""
   --serif: "Iowan Old Style", Charter, Georgia, "Times New Roman", serif;
   --sans: ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #16130f;
-    --ink: #ece2cc;
-    --muted: #a3946f;
-    --faint: #5f5540;
-    --line: #2d2718;
-    --reply-bg: #1f1a12;
-    --reply-ink: #c9bc9e;
-    --accent: #ffb300;
-    --stripe: #ffb300;
-    --diff-add: #1fa179;
-    --diff-del: #f85149;
-    --claude: #d84f97;
-    --codex: #1a94b4;
-    --copilot: #8a75f0;
-    --antigravity: #8b8806;
-  }
 }
 * { box-sizing: border-box; }
 html { background: var(--bg); }
@@ -4015,23 +3998,33 @@ summary > .elapsed + .diffstat { margin-left: 0; }
 .title::before { content: "“"; }
 .title::after { content: "”"; }
 /* INVIOLABLE: machine-generated prose renders only inside a .machine
-   container, in the phosphor-terminal style — monospace green on
-   near-black, in both color schemes — for maximal distinction from the
+   container, in a style all its own: a "slip", a box one tint step off
+   the page with a hairline frame, set in monospace and green ink, never
+   mistakable for the
    human's serif. The containers are .reply (agent replies) and .ballot
    (multiple-choice questions the agent posed and the option labels it
    wrote, including the ones the human picked). Machine styling and
    collapsing are separate rules: .reply also hides behind the closed
    disclosure, while .ballot is deliberately default-visible — collapsing
-   it would orphan the human's choice — but stays in phosphor. */
+   it would orphan the human's choice — but stays on its slip.
+   The slip is quiet on purpose: against the page it is 1.06:1, so no
+   machine container is a dark mass, and the human's ink on the page
+   (15.96:1) outdoes every ink here, so typed words are the darkest text.
+   On the slip the ink reads at 7.15:1; the bright ink, for links and the
+   human's pick, at 8.58:1; the dim ink, for ballot questions, unpicked
+   options and quotations, at 4.89:1. Code sits on a deeper tint of the
+   slip (9% of the ink mixed in), where the ink reads at 6.24:1. */
 .machine {
-  --m-bg: #060d08;
-  --m-ink: #56dd7f;
-  --m-bright: #8dffab;
-  --m-dim: #2f8a4f;
-  --m-line: #1c4b2d;
+  --m-bg: #f4e9cf;
+  --m-ink: #14572e;
+  --m-bright: #0f4a26;
+  --m-dim: #3f6e50;
+  --m-line: #8fb39a;
+  --m-code: #e0dcc1;
   font-family: var(--mono);
   background: var(--m-bg);
   color: var(--m-ink);
+  border: 1px solid var(--m-line);
 }
 .ballot {
   margin: 1rem 0 .6rem;
@@ -4048,7 +4041,9 @@ summary > .elapsed + .diffstat { margin-left: 0; }
   white-space: pre-wrap;
 }
 .ballot .option { color: var(--m-dim); }
-.ballot .option.picked { color: var(--m-bright); }
+/* The human's pick: its check mark and its weight tell it from the other
+   options; the two inks are too close (1.75:1) to carry that alone. */
+.ballot .option.picked { color: var(--m-bright); font-weight: 600; }
 .exchange > header + .ballot { margin-top: .3rem; }
 .reply {
   margin-top: .8rem;
@@ -4077,18 +4072,17 @@ summary > .elapsed + .diffstat { margin-left: 0; }
 }
 .reply code { font-size: .95em; }
 .reply :not(pre) > code {
-  padding: .1em .3em;
-  border: 1px solid var(--m-line);
+  padding: .05em .25em;
   border-radius: .25rem;
+  background: var(--m-code);
 }
 .reply pre.code {
   margin: .9rem 0;
   padding: .9rem 1rem;
   overflow-x: auto;
   white-space: pre;
-  border: 1px solid var(--m-line);
   border-radius: .3rem;
-  background: #0a170e;
+  background: var(--m-code);
 }
 .reply a { color: var(--m-bright); }
 .reply.empty { font-style: italic; color: var(--m-dim); }
@@ -4116,8 +4110,6 @@ summary > .elapsed + .diffstat { margin-left: 0; }
 @media print {
   :root { --bg: white; --ink: black; --faint: #777; --muted: #555; --line: #bbb; --reply-bg: white; --reply-ink: #333; }
   #progress { display: none; }
-  .machine { --m-bg: white; --m-ink: #14572e; --m-bright: #14572e; --m-dim: #4d7a5d; --m-line: #9dbfa8; background: white; border: 1px solid var(--m-line); }
-  .reply pre.code { background: white; }
   main { width: 100%; padding: 0; }
   .day { break-after: avoid; }
   .exchange { break-inside: avoid; }
@@ -4553,7 +4545,6 @@ def render(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%F0%9F%90%9D%3C/text%3E%3C/svg%3E">
 <meta name="description" content="{deck}">
 <meta property="og:title" content="{title}">
