@@ -145,7 +145,7 @@ def five_page(repo, exchanges, version="5.5.2", name=None):
   5.5.2 had none of, one per line, every "<" escaped), naming the repo
   `name`, or repo's own name."""
   bare = re.sub(
-    r' data-login="[^"]*"|\n<header><p class="speaker">[^<]*</p>\n<a class="anchor" href="#p\d+"><time [^>]*>[^<]*</time></a></header>',
+    r' data-login="[^"]*"|\n<header><p class="speaker">[^<]*</p>\n<a class="anchor" href="#p\d+" title="[^"]*"><time [^>]*>[^<]*</time></a></header>',
     "",
     ace.render(repo, {LOGIN: exchanges}),
   )
@@ -3952,7 +3952,8 @@ class RenderQuals(Fixture):
     page = ace.render(self.repo, {LOGIN: [exchange()]})
     article = page[page.index("<article ") :]
     self.assertIn(
-      '\n<a class="anchor" href="#p1"><time datetime="2026-03-01T10:00:00+00:00">10:00</time></a></header>',
+      '\n<a class="anchor" href="#p1" title="2026-03-01 Sunday 10:00:00 UTC">'
+      '<time datetime="2026-03-01T10:00:00+00:00">10:00</time></a></header>',
       article[: article.index("</header>") + len("</header>")],
     )
     summary = page[page.index("<summary") : page.index("</summary>")]
@@ -4009,7 +4010,7 @@ class RenderQuals(Fixture):
     )
     articles = re.findall(
       r'<article class="exchange claude" id="p(\d)" data-login="([a-z-]+)">'
-      r'\n<header><p class="speaker">([^<]+)</p>\n<a class="anchor" href="#p\1"><time [^>]*>\d\d:\d\d</time></a></header>'
+      r'\n<header><p class="speaker">([^<]+)</p>\n<a class="anchor" href="#p\1" title="[^"]*"><time [^>]*>\d\d:\d\d</time></a></header>'
       r'.*?<pre class="prompt">(\w)</pre>.*?<summary>(.*?)</summary>',
       page,
       re.DOTALL,
@@ -4057,9 +4058,12 @@ class RenderQuals(Fixture):
     self.assertEqual(
       re.findall(r'<article [^>]*>\n<header><p class="speaker">([^<]+)</p>(.*?)</header>\n<pre class="prompt">', page, re.DOTALL),
       [
-        ("dreev", '\n<a class="anchor" href="#p1"><time datetime="2026-03-01T10:00:00+00:00">10:00</time></a>'),
-        ("dreev", '\n<a class="anchor" href="#p2"><time datetime="2026-03-01T10:05:00+00:00">10:05</time></a>'),
-        ("logan", '\n<a class="anchor" href="#p3"><time datetime="2026-03-01T10:10:00+00:00">10:10</time></a>'),
+        ("dreev", '\n<a class="anchor" href="#p1" title="2026-03-01 Sunday 10:00:00 UTC">'
+                  '<time datetime="2026-03-01T10:00:00+00:00">10:00</time></a>'),
+        ("dreev", '\n<a class="anchor" href="#p2" title="2026-03-01 Sunday 10:05:00 UTC">'
+                  '<time datetime="2026-03-01T10:05:00+00:00">10:05</time></a>'),
+        ("logan", '\n<a class="anchor" href="#p3" title="2026-03-01 Sunday 10:10:00 UTC">'
+                  '<time datetime="2026-03-01T10:10:00+00:00">10:10</time></a>'),
       ],
     )
     self.assertEqual(
@@ -4269,7 +4273,8 @@ class RenderQuals(Fixture):
     page = ace.render(self.repo, {LOGIN: [exchange()]})
     self.assertIn(
       '<header><p class="speaker">dreev</p>'
-      '\n<a class="anchor" href="#p1"><time datetime="2026-03-01T10:00:00+00:00">10:00</time></a></header>'
+      '\n<a class="anchor" href="#p1" title="2026-03-01 Sunday 10:00:00 UTC">'
+      '<time datetime="2026-03-01T10:00:00+00:00">10:00</time></a></header>'
       '\n<pre class="prompt">p</pre>',
       page,
     )
@@ -4526,7 +4531,8 @@ class RenderQuals(Fixture):
         article[: article.index("<details>")],
         '<article class="exchange claude" id="p1" data-login="dreeves">'
         '\n<header><p class="speaker">dreev</p>'
-        '\n<a class="anchor" href="#p1"><time datetime="2026-03-01T10:00:00+00:00">10:00</time></a></header>'
+        '\n<a class="anchor" href="#p1" title="2026-03-01 Sunday 10:00:00 UTC">'
+        '<time datetime="2026-03-01T10:00:00+00:00">10:00</time></a></header>'
         '\n<div class="ballot machine">'
         '\n<div class="ballot-question">Q?</div>'
         '\n<div class="option picked">✓ A label</div>'
@@ -4619,7 +4625,8 @@ class RenderQuals(Fixture):
     # ids d2026-03-01 and d2026-03-02, headed "2026-03-01 Sunday" and
     # "2026-03-02 Monday", and a day mark for each; the headers'
     # times 23:30 and 05:00 on time elements carrying the UTC
-    # instants; the deck's range 2026-03-01 – 2026-03-02; the
+    # instants, each link's title its full UTC date and time; the
+    # deck's range 2026-03-01 – 2026-03-02; the
     # minimap's titles 23:30 and 05:00. Resultata (v6.0.0): one day,
     # 2026-03-02 Monday, and the times 08:30 and 14:00.
     with runner_zone("Asia/Tokyo"):
@@ -4635,12 +4642,46 @@ class RenderQuals(Fixture):
       [("d2026-03-01", "2026-03-01 Sunday"), ("d2026-03-02", "2026-03-02 Monday")],
     )
     self.assertEqual(
-      re.findall(r'<a class="anchor" href="#p\d+"><time datetime="([^"]+)">(\d\d:\d\d)</time>', page),
-      [("2026-03-01T23:30:00+00:00", "23:30"), ("2026-03-02T05:00:00+00:00", "05:00")],
+      re.findall(r'<a class="anchor" href="#p\d+" title="([^"]+)"><time datetime="([^"]+)">(\d\d:\d\d)</time>', page),
+      [
+        ("2026-03-01 Sunday 23:30:00 UTC", "2026-03-01T23:30:00+00:00", "23:30"),
+        ("2026-03-02 Monday 05:00:00 UTC", "2026-03-02T05:00:00+00:00", "05:00"),
+      ],
     )
     self.assertIn('<meta name="description" content="2 prompts · 2026-03-01 – 2026-03-02">', page)
     svg = page[page.index('<svg class="minimap"') : page.index("</svg>")]
     self.assertEqual(re.findall(r"<title>([^<]+)</title>", svg), ["23:30", "05:00"])
+
+  def test_time_link_title_gives_the_full_date_and_time(self):
+    # Replicata: a runner in Tokyo renders a prompt typed at 2026-03-01
+    # 23:30:07.25 UTC. Expectata: the prompt's time shows as 23:30, and
+    # its link's title gives the full date and time in the page's own
+    # forms, in UTC as the rest of the page is written: the day
+    # header's date and weekday, the time to the second, the zone,
+    # "2026-03-01 Sunday 23:30:07 UTC". The script rewrites the title
+    # in the viewer's zone along with the time. The Markdown page's
+    # time link, which no script rewrites, carries no title, as
+    # before. Resultata (2026.11.13-b): no title: the date was to be
+    # read off the day header, and the seconds nowhere.
+    rows = {LOGIN: [exchange(timestamp=utc("2026-03-01T23:30:07.250Z"))]}
+    with runner_zone("Asia/Tokyo"):
+      page = ace.render(self.repo, rows)
+      text = ace.render_markdown(self.repo, rows)
+    self.assertIn(
+      '<a class="anchor" href="#p1" title="2026-03-01 Sunday 23:30:07 UTC">'
+      '<time datetime="2026-03-01T23:30:07.250000+00:00">23:30</time></a>',
+      page,
+    )
+    self.assertIn(
+      '<summary><a class="anchor" href="#p1"><time datetime="2026-03-01T23:30:07.250000+00:00">23:30</time></a> ',
+      text,
+    )
+    self.assertNotIn("title=", text)
+    self.assertIn(
+      "\n    time.textContent = `${at.hour}:${at.minute}`;"
+      "\n    time.parentElement.title = `${date} ${at.weekday} ${at.hour}:${at.minute}:${at.second} ${at.timeZoneName}`;\n",
+      ace.JS,
+    )
 
   def test_day_headers_name_their_zone(self):
     # Replicata: a two-day page. Expectata: each day header reads its
@@ -4691,7 +4732,8 @@ class RenderQuals(Fixture):
     # marks the clock rebuilds. The clock formats each instant with
     # Intl in en-US (long weekdays, as WEEKDAYS; a 23-hour clock, as
     # %H:%M; the zone's short name for the day headers), rewrites
-    # every prompt time, removes the day headers under main and
+    # every prompt time and its link's title (the full date and time,
+    # to the second), removes the day headers under main and
     # rebuilds them (and the rail's day marks, the deck's range and the
     # minimap's titles) under the viewer's own days, and reads each
     # instant off its time element's datetime with a pattern (lifted
@@ -4706,11 +4748,12 @@ class RenderQuals(Fixture):
     )
     for fragment in (
       'weekday: "long", year: "numeric", month: "2-digit", day: "2-digit",',
-      'hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short",',
+      'hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23", timeZoneName: "short",',
       'for (const header of document.querySelectorAll("main > h2.day")) header.remove();',
       'for (const article of document.querySelectorAll("main > article.exchange")) {',
       'const time = article.querySelector("header time");',
       "time.textContent = `${at.hour}:${at.minute}`;",
+      "time.parentElement.title = `${date} ${at.weekday} ${at.hour}:${at.minute}:${at.second} ${at.timeZoneName}`;",
       'const title = document.querySelector(`.minimap a[href="#${article.id}"] title`);',
       '`<h2 class="day" id="d${date}"><time datetime="${date}">${date} ${at.weekday}</time>`',
       '+ ` <span class="zone">${at.timeZoneName}</span></h2>`',
@@ -4723,7 +4766,7 @@ class RenderQuals(Fixture):
     instant = re.compile(lifted.group(1))
     page = ace.render(self.repo, {LOGIN: [maximal_exchange(), exchange(timestamp=utc(T1), prompt="b")]})
     self.assertEqual(count_scripts(page), 1)
-    stamps = re.findall(r'<a class="anchor" href="#p\d+"><time datetime="([^"]+)">', page)
+    stamps = re.findall(r'<a class="anchor" href="#p\d+" title="[^"]*"><time datetime="([^"]+)">', page)
     self.assertEqual(stamps, ["2026-03-01T10:00:00.123456+00:00", "2026-03-01T10:05:00+00:00"])
     for stamp in stamps:
       self.assertTrue(instant.search(stamp), stamp)

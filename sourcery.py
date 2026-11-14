@@ -4130,7 +4130,8 @@ summary > .elapsed + .diffstat { margin-left: 0; }
 JS = r"""
 /* The clock. sourcery writes every time and date on this page in UTC, so
    the file reads the same whoever runs it; this block re-renders each in
-   the viewer's own zone: every prompt's time, the day headers (regrouping
+   the viewer's own zone: every prompt's time and the full date and time
+   in its link's title, the day headers (regrouping
    the prompts under the viewer's own calendar days, each header naming
    the zone as the browser names it), the rail's day marks, the deck's
    date range and the minimap's titles. With scripts off the page reads in
@@ -4139,7 +4140,7 @@ JS = r"""
 {
   const clock = new Intl.DateTimeFormat("en-US", {
     weekday: "long", year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23", timeZoneName: "short",
   });
   /* An instant as sourcery writes it (ISO 8601 in UTC, to the
      microsecond), as the parts of the viewer's clock and calendar. */
@@ -4158,6 +4159,7 @@ JS = r"""
     const at = local(time.dateTime);
     const date = `${at.year}-${at.month}-${at.day}`;
     time.textContent = `${at.hour}:${at.minute}`;
+    time.parentElement.title = `${date} ${at.weekday} ${at.hour}:${at.minute}:${at.second} ${at.timeZoneName}`;
     const title = document.querySelector(`.minimap a[href="#${article.id}"] title`);
     title.textContent = [time.textContent, ...title.textContent.split(" ").slice(1)].join(" ");
     if (date !== days.at(-1)?.[0]) {
@@ -4399,10 +4401,17 @@ def attachments_html(exchange: Exchange) -> str:
   return f'<div class="attachments">{attached}</div>' if attached else ""
 
 
-def time_html(number: int, exchange: Exchange, at: dt.datetime) -> str:
-  """The exchange's time, linking to its article."""
+def instant_text(at: dt.datetime) -> str:
+  """An instant in full, as a time link's title gives it: the day
+  header's date and weekday, the time to the second, and the zone."""
+  return f'{day_label(at)} {at.strftime("%H:%M:%S")} {ZONE}'
+
+
+def time_html(number: int, exchange: Exchange, at: dt.datetime, hover: str) -> str:
+  """The exchange's time, linking to its article; `hover` is the link's
+  title attribute, or "" for a link that carries none."""
   return (
-    f'<a class="anchor" href="#p{number}">'
+    f'<a class="anchor" href="#p{number}"{hover}>'
     f'<time datetime="{exchange.timestamp.isoformat()}">{at.strftime("%H:%M")}</time></a>'
   )
 
@@ -4499,10 +4508,11 @@ def render(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = 
     parts = "".join(
       f"\n{part}" for part in (ballots_html(exchange), prompt_html(exchange), attachments_html(exchange)) if part
     )
+    time = time_html(number, exchange, at, f' title="{instant_text(at)}"')
     chunks.append(
       f"{credit_tag(number, login, exchange)}"
       f'\n<header><p class="speaker">{html.escape(display_name(login))}</p>'
-      f"\n{time_html(number, exchange, at)}</header>{parts}\n"
+      f"\n{time}</header>{parts}\n"
       # The disclosure line: what it says of the agent, then the agent's
       # numbers, which end it.
       f"<details>\n<summary>{agent_html(exchange)}{title_html(exchange)}"
@@ -4642,9 +4652,10 @@ def render_markdown(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remot
       prompt_html(exchange),
       attachments_html(exchange),
       # The Markdown page's summary is as 2026.11.13-b wrote it: the
-      # time, the agent, the working time, the title. It shows no
-      # diffstat, the counts being text on the speaker line above.
-      f"<details>\n<summary>{time_html(number, exchange, at)} {agent_html(exchange)}"
+      # time, its link untitled, the agent, the working time, the
+      # title. It shows no diffstat, the counts being text on the
+      # speaker line above.
+      f"<details>\n<summary>{time_html(number, exchange, at, '')} {agent_html(exchange)}"
       f"{elapsed_html(exchange)}{title_html(exchange)}</summary>",
       quoted(exchange.reply or empty_reply_note(number == len(rows))),
       "</details>",
