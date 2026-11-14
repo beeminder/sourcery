@@ -4,8 +4,8 @@
 Reads the local transcript stores of five coding agents and produces a
 single self-contained HTML document, ordered by timestamp. The human's
 prompts are the only text visible by default, each under a label naming
-the human who typed it; everything machine-generated is collapsed behind a
-quiet disclosure line that names the agent, model, and time. Supported
+the human who typed it, and when; everything machine-generated is collapsed
+behind a quiet disclosure line that names the agent and model. Supported
 stores:
 
 - Claude Code:  ~/.claude/projects/**/*.jsonl
@@ -82,7 +82,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 # agent changing sourcery sets today's date with the letter after HEAD's
 # when HEAD's version is today's, else with -a, and leaves a version the
 # working tree already moved to today alone.
-VERSION = "2026.11.13-b"
+VERSION = "2026.11.14-a"
 UTC = dt.timezone.utc
 
 # The line every error message still in Latin opens with, written out in
@@ -3867,8 +3867,6 @@ h1 {
   #progress .daymark { display: none; }
 }
 ::selection { background: color-mix(in srgb, var(--accent) 25%, transparent); }
-summary a.anchor { color: inherit; text-decoration: none; }
-summary a.anchor:hover { text-decoration: underline; }
 .exchange:target {
   background: var(--reply-bg);
   border-radius: .45rem;
@@ -3907,7 +3905,7 @@ summary a.anchor:hover { text-decoration: underline; }
 /* The exchange's header: the speaker label — the human's display name
    set above their turn, the way a play script or an interview transcript
    names whoever speaks next — and across from it, on the label's
-   baseline, the diffstat. The label is in the human's own serif, its
+   baseline, the prompt's time. The label is in the human's own serif, its
    lowercase as small capitals and any capitals kept full size (the
    name is data, so its case must survive), in the agent name's ink;
    the meta line no longer repeats the name. */
@@ -3927,8 +3925,21 @@ summary a.anchor:hover { text-decoration: underline; }
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
-/* The prompt's diffstat closes the header row, never squeezed by a long
-   label. Numbers
+/* The prompt's time, the exchange's permalink, closes the header row,
+   never squeezed by a long label, set as the meta line is so it stays as
+   quiet beside the label as it was in that line. */
+.exchange > header a.anchor {
+  flex: none;
+  color: var(--faint);
+  font-family: var(--sans);
+  font-size: .68rem;
+  letter-spacing: .05em;
+  font-variant-numeric: tabular-nums;
+  text-decoration: none;
+}
+.exchange > header a.anchor:hover { text-decoration: underline; }
+/* The prompt's diffstat closes the meta line, with the agent's other
+   numbers, never squeezed by the items before it. Numbers
    wear the metadata ink; polarity lives in the blocks (and in the signs and
    the fixed added-first order). */
 .diffstat {
@@ -3936,11 +3947,6 @@ summary a.anchor:hover { text-decoration: underline; }
   display: inline-flex;
   align-items: center;
   gap: .5rem;
-  color: var(--faint);
-  font-family: var(--sans);
-  font-size: .68rem;
-  letter-spacing: .05em;
-  font-variant-numeric: tabular-nums;
 }
 .diffstat .blocks { display: inline-flex; gap: 2px; }
 .diffstat .blocks span { width: 7px; height: 7px; border-radius: 2px; }
@@ -3969,12 +3975,14 @@ pre.prompt {
   border-radius: .3rem;
 }
 details { margin: .55rem 0 0; }
+/* The meta line: the agent's line under the prompt, and the reply's
+   toggle. It spans the column and holds no link, so a click anywhere on
+   it does the one thing. */
 summary {
-  display: inline-flex;
+  display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: .6rem;
-  width: fit-content;
   list-style: none;
   cursor: pointer;
   user-select: none;
@@ -3993,6 +4001,10 @@ summary::before {
 }
 details[open] > summary::before { transform: rotate(90deg); }
 summary:hover { color: var(--muted); }
+/* The agent's numbers, the working time then the diffstat, sit at the
+   line's far end: the first of them takes the free space on its left. */
+summary > .elapsed, summary > .diffstat { margin-left: auto; }
+summary > .elapsed + .diffstat { margin-left: 0; }
 /* The agent's marks in the meta line: a small square chip wearing the
    provider color (the same hue as the edge stripe) and the agent's name a
    step louder than the rest of the line — promoted ink, never the mark
@@ -4080,6 +4092,27 @@ summary:hover { color: var(--muted); }
 }
 .reply a { color: var(--m-bright); }
 .reply.empty { font-style: italic; color: var(--m-dim); }
+/* On a screen with room beside the column (the column's 44rem and, each
+   side, an 8rem header, its 1.6rem gap and the rail's 46px day ticks,
+   with a 17px scrollbar to spare), the header
+   leaves the column and hangs to its left, the way a play script sets
+   the speaker's name beside the speech: the label on the prompt's first
+   line (it takes the prompt's line height), the time under it. A
+   narrower screen, and print, keep the header as the row above the
+   prompt. */
+@media screen and (min-width: 70rem) {
+  .exchange { position: relative; }
+  .exchange > header {
+    position: absolute;
+    right: calc(100% + 1.6rem);
+    width: 8rem;
+    margin: 0;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0;
+  }
+  .speaker { line-height: 1.62; text-align: right; }
+}
 @media print {
   :root { --bg: white; --ink: black; --faint: #777; --muted: #555; --line: #bbb; --reply-bg: white; --reply-ink: #333; }
   #progress { display: none; }
@@ -4121,7 +4154,7 @@ JS = r"""
   const days = []; // [date, header text], one per day header, in page order
   for (const header of document.querySelectorAll("main > h2.day")) header.remove();
   for (const article of document.querySelectorAll("main > article.exchange")) {
-    const time = article.querySelector("summary time");
+    const time = article.querySelector("header time");
     const at = local(time.dateTime);
     const date = `${at.year}-${at.month}-${at.day}`;
     time.textContent = `${at.hour}:${at.minute}`;
@@ -4226,8 +4259,8 @@ def diffstat(added: int, deleted: int) -> str:
     + '<span class="nil"></span>' * (5 - plus - minus)
   )
   return (
-    f'\n<div class="diffstat">{tally_text(added, deleted)}'
-    f' <span class="blocks" aria-hidden="true">{blocks}</span></div>'
+    f' <span class="diffstat">{tally_text(added, deleted)}'
+    f' <span class="blocks" aria-hidden="true">{blocks}</span></span>'
   )
 
 
@@ -4366,11 +4399,25 @@ def attachments_html(exchange: Exchange) -> str:
   return f'<div class="attachments">{attached}</div>' if attached else ""
 
 
-def summary_html(number: int, exchange: Exchange, at: dt.datetime) -> str:
-  """The exchange's disclosure line: its time, linking to its article,
-  then its agent, model, effort, working time, and session title."""
+def time_html(number: int, exchange: Exchange, at: dt.datetime) -> str:
+  """The exchange's time, linking to its article."""
+  return (
+    f'<a class="anchor" href="#p{number}">'
+    f'<time datetime="{exchange.timestamp.isoformat()}">{at.strftime("%H:%M")}</time></a>'
+  )
+
+
+def agent_html(exchange: Exchange) -> str:
+  """The disclosure line's account of the agent: its chip, name, model
+  and effort."""
   model = f' <span class="model">{html.escape(exchange.model)}</span>' if exchange.model else ""
   effort = f' <span class="effort">({html.escape(exchange.effort)})</span>' if exchange.effort else ""
+  return f'<span class="chip"></span> <span class="agent">{html.escape(exchange.provider)}</span>{model}{effort}'
+
+
+def elapsed_html(exchange: Exchange) -> str:
+  """The disclosure line's working time, the first of the agent's
+  numbers."""
   # The wall span renders only when it reads longer than the working
   # time: an equal-at-display-precision span repeats the number beside
   # it, and a shorter one (activity credited off records later than the
@@ -4383,21 +4430,19 @@ def summary_html(number: int, exchange: Exchange, at: dt.datetime) -> str:
     and elapsed_text(exchange.wall) != elapsed_text(exchange.elapsed)
     else ""
   )
-  thought = (
+  return (
     f' <span class="elapsed">thought for {elapsed_text(exchange.elapsed)}{wall}</span>'
     if exchange.elapsed >= 0.5
     else ""
   )
+
+
+def title_html(exchange: Exchange) -> str:
+  """The disclosure line's session title."""
   # The session's title tells apart sessions the chronology interleaves.
   # It is as often made up as typed, so it rides the meta line, never
   # beside the human's words.
-  session_title = f' <span class="title">{html.escape(exchange.title)}</span>' if exchange.title else ""
-  return (
-    f'<a class="anchor" href="#p{number}">'
-    f'<time datetime="{exchange.timestamp.isoformat()}">{at.strftime("%H:%M")}</time></a>'
-    f' <span class="chip"></span>'
-    f' <span class="agent">{html.escape(exchange.provider)}</span>{model}{effort}{thought}{session_title}'
-  )
+  return f' <span class="title">{html.escape(exchange.title)}</span>' if exchange.title else ""
 
 
 def empty_reply_note(last: bool) -> str:
@@ -4457,8 +4502,12 @@ def render(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remote: str = 
     chunks.append(
       f"{credit_tag(number, login, exchange)}"
       f'\n<header><p class="speaker">{html.escape(display_name(login))}</p>'
-      f"{diffstat(exchange.added, exchange.deleted)}</header>{parts}\n"
-      f"<details>\n<summary>{summary_html(number, exchange, at)}</summary>\n{reply}\n</details>\n"
+      f"\n{time_html(number, exchange, at)}</header>{parts}\n"
+      # The disclosure line: what it says of the agent, then the agent's
+      # numbers, which end it.
+      f"<details>\n<summary>{agent_html(exchange)}{title_html(exchange)}"
+      f"{elapsed_html(exchange)}{diffstat(exchange.added, exchange.deleted)}</summary>"
+      f"\n{reply}\n</details>\n"
       "</article>"
     )
 
@@ -4592,7 +4641,11 @@ def render_markdown(repo: Path, ledgers: Mapping[str, Sequence[Exchange]], remot
       ballots_html(exchange),
       prompt_html(exchange),
       attachments_html(exchange),
-      f"<details>\n<summary>{summary_html(number, exchange, at)}</summary>",
+      # The Markdown page's summary is as 2026.11.13-b wrote it: the
+      # time, the agent, the working time, the title. It shows no
+      # diffstat, the counts being text on the speaker line above.
+      f"<details>\n<summary>{time_html(number, exchange, at)} {agent_html(exchange)}"
+      f"{elapsed_html(exchange)}{title_html(exchange)}</summary>",
       quoted(exchange.reply or empty_reply_note(number == len(rows))),
       "</details>",
       "</article>",
@@ -4851,7 +4904,8 @@ def read_ledgers(
 
 # A "credit" records, on the page, whose ledger holds each row it shows:
 # each article carries the login in a data-login attribute, beside the row's
-# provider (the article's class) and time (its summary's time element), so a
+# provider (the article's class) and time (the article's first time element:
+# its header's on the page, its summary's on the Markdown page), so a
 # run can check the page against the ledgers without reading display names.
 # Typed text is escaped on the page, so none can forge a credit. The
 # Markdown page keeps each reply unescaped, but quoted, so no line of it

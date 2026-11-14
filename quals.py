@@ -145,8 +145,8 @@ def five_page(repo, exchanges, version="5.5.2", name=None):
   5.5.2 had none of, one per line, every "<" escaped), naming the repo
   `name`, or repo's own name."""
   bare = re.sub(
-    r' data-login="[^"]*"|\n<header><p class="speaker">[^<]*</p>((?:\n<div class="diffstat">.*?</div>)?)</header>',
-    r"\1",
+    r' data-login="[^"]*"|\n<header><p class="speaker">[^<]*</p>\n<a class="anchor" href="#p\d+"><time [^>]*>[^<]*</time></a></header>',
+    "",
     ace.render(repo, {LOGIN: exchanges}),
   )
   rows = ",\n".join(
@@ -3941,27 +3941,50 @@ class RenderQuals(Fixture):
     details_at = page.index("<details>")
     self.assertLess(prompt_at, details_at)
 
-  def test_meta_line_carries_time_provider_model(self):
+  def test_header_carries_the_time_and_the_meta_line_provider_and_model(self):
     # The time is the prompt's instant written in UTC (T0 is 10:00
     # UTC), whatever zone the runner is in; see RenderQuals' clock quals.
+    # It sits in the exchange's header, after the speaker label, as the
+    # exchange's permalink; the meta line holds no time. Resultata
+    # (2026.11.13-b): the time opened the meta line, a link inside the
+    # line that toggles the reply, so a click on it jumped to the exchange
+    # and a click beside it opened the reply.
     page = ace.render(self.repo, {LOGIN: [exchange()]})
+    article = page[page.index("<article ") :]
+    self.assertIn(
+      '\n<a class="anchor" href="#p1"><time datetime="2026-03-01T10:00:00+00:00">10:00</time></a></header>',
+      article[: article.index("</header>") + len("</header>")],
+    )
     summary = page[page.index("<summary") : page.index("</summary>")]
-    self.assertIn(">10:00</time>", summary)
+    self.assertNotIn("<time", summary)
     self.assertIn("Claude Code", summary)
     self.assertIn("claude-opus-4-8", summary)
     self.assertNotIn("(", summary)
 
   def test_meta_line_names_the_session_title(self):
     # Replicata: two exchanges, one of a session titled with markup and
-    # quotes in its name, one of a session never titled. Expectata: the
-    # titled one's meta line ends with the title, escaped, in a title
-    # span; the untitled one's holds no title span. Resultata (v6.2.1):
-    # no exchange carried a title.
+    # quotes in its name, showing an effort, a working time and a
+    # diffstat too, one of a session never titled. Expectata: the
+    # titled one's meta line names the title, escaped, in a title span
+    # right after the effort, with what the line says of the agent, and
+    # ahead of the agent's numbers, which end the line with a title or
+    # without; the untitled one's holds no title span. Resultata
+    # (v6.2.1): no exchange carried a title. Resultata (2026.11.13-b):
+    # the title ended the meta line, after the working time.
     page = ace.render(self.repo, {LOGIN: [
-      exchange(title='<b>fix</b> "it"'), exchange(timestamp=utc(T1), prompt="q"),
+      exchange(title='<b>fix</b> "it"', effort="xhigh", elapsed=327.0, added=3, deleted=1),
+      exchange(timestamp=utc(T1), prompt="q"),
     ]})
     first, second = re.findall(r"<summary>(.*?)</summary>", page, re.DOTALL)
-    self.assertTrue(first.endswith(' <span class="title">&lt;b&gt;fix&lt;/b&gt; &quot;it&quot;</span>'), first)
+    self.assertEqual(
+      first,
+      '<span class="chip"></span> <span class="agent">Claude Code</span> <span class="model">claude-opus-4-8</span>'
+      ' <span class="effort">(xhigh)</span> <span class="title">&lt;b&gt;fix&lt;/b&gt; &quot;it&quot;</span>'
+      ' <span class="elapsed">thought for 5m27s</span>'
+      ' <span class="diffstat">+3 −1 <span class="blocks" aria-hidden="true">'
+      '<span class="add"></span><span class="add"></span><span class="add"></span>'
+      '<span class="del"></span><span class="nil"></span></span></span>',
+    )
     self.assertNotIn('class="title"', second)
 
   def test_speaker_label_names_each_prompts_human_by_display_name(self):
@@ -3971,8 +3994,9 @@ class RenderQuals(Fixture):
     # interleave by time; each article records its login invisibly, in
     # a data-login attribute, and opens with a header holding its
     # human's display name (the table's, else the login itself) as a
-    # speaker label, the way a play script names whoever speaks next;
-    # the meta line names no human, its chip following the time.
+    # speaker label, the way a play script names whoever speaks next,
+    # and after the label the prompt's time; the meta line names no
+    # human and opens with its chip.
     # Resultata (v5.5.2): render took no humans, and no line named one.
     # Resultata (v6.0.0): the name in the meta line, after the time.
     page = ace.render(
@@ -3985,7 +4009,7 @@ class RenderQuals(Fixture):
     )
     articles = re.findall(
       r'<article class="exchange claude" id="p(\d)" data-login="([a-z-]+)">'
-      r'\n<header><p class="speaker">([^<]+)</p></header>'
+      r'\n<header><p class="speaker">([^<]+)</p>\n<a class="anchor" href="#p\1"><time [^>]*>\d\d:\d\d</time></a></header>'
       r'.*?<pre class="prompt">(\w)</pre>.*?<summary>(.*?)</summary>',
       page,
       re.DOTALL,
@@ -4000,7 +4024,7 @@ class RenderQuals(Fixture):
       ],
     )
     for *_, summary in articles:
-      self.assertIn('</time></a> <span class="chip"></span> <span class="agent">', summary)
+      self.assertTrue(summary.startswith('<span class="chip"></span> <span class="agent">'), summary)
     self.assertNotIn('class="human"', page)
 
   def test_single_human_page_names_its_human_too(self):
@@ -4016,10 +4040,13 @@ class RenderQuals(Fixture):
     # mister-person once; the second prompt touched code. Expectata:
     # every article opens with its label, the consecutive prompts by
     # one human included (no suppression: a reader landing mid-page
-    # always sees who is speaking), the diffstat in the header row
-    # after the label; and the page still credits every row (CREDIT
-    # reads each article's provider, login and time as before, the
-    # header holding no time element). Resultata (v6.0.0): no labels.
+    # always sees who is speaking), the prompt's time in the header row
+    # after the label, and the diffstat of the prompt that touched code
+    # closing its meta line; and the page still credits every row
+    # (CREDIT reads each article's provider, login and time as before,
+    # the header's time element being the article's first). Resultata
+    # (v6.0.0): no labels. Resultata (2026.11.13-b): the diffstat in the
+    # header row after the label, the time in the meta line.
     page = ace.render(
       self.repo,
       {
@@ -4029,9 +4056,22 @@ class RenderQuals(Fixture):
     )
     self.assertEqual(
       re.findall(r'<article [^>]*>\n<header><p class="speaker">([^<]+)</p>(.*?)</header>\n<pre class="prompt">', page, re.DOTALL),
-      [("dreev", ""), ("dreev", '\n<div class="diffstat">+3 −1 <span class="blocks" aria-hidden="true">'
-                       '<span class="add"></span><span class="add"></span><span class="add"></span>'
-                       '<span class="del"></span><span class="nil"></span></span></div>'), ("logan", "")],
+      [
+        ("dreev", '\n<a class="anchor" href="#p1"><time datetime="2026-03-01T10:00:00+00:00">10:00</time></a>'),
+        ("dreev", '\n<a class="anchor" href="#p2"><time datetime="2026-03-01T10:05:00+00:00">10:05</time></a>'),
+        ("logan", '\n<a class="anchor" href="#p3"><time datetime="2026-03-01T10:10:00+00:00">10:10</time></a>'),
+      ],
+    )
+    self.assertEqual(
+      re.findall(r"<summary>(.*?)</summary>", page, re.DOTALL),
+      [
+        '<span class="chip"></span> <span class="agent">Claude Code</span> <span class="model">claude-opus-4-8</span>',
+        '<span class="chip"></span> <span class="agent">Claude Code</span> <span class="model">claude-opus-4-8</span>'
+        ' <span class="diffstat">+3 −1 <span class="blocks" aria-hidden="true">'
+        '<span class="add"></span><span class="add"></span><span class="add"></span>'
+        '<span class="del"></span><span class="nil"></span></span></span>',
+        '<span class="chip"></span> <span class="agent">Claude Code</span> <span class="model">claude-opus-4-8</span>',
+      ],
     )
     self.assertEqual(page.count('<p class="speaker">'), page.count("<article "))
     self.assertEqual(
@@ -4098,7 +4138,7 @@ class RenderQuals(Fixture):
 
   def test_meta_line_wraps_between_items_and_the_chip_keeps_its_size(self):
     # Replicata: a page read at phone width (390px), where an exchange's
-    # meta line (time, chip, agent, model, effort, working time) is
+    # meta line (chip, agent, model, effort, working time, diffstat) is
     # wider than the column. Expectata: the chip stays an 8px square,
     # and the line wraps between its items, never inside one. Resultata
     # (v5.5.1): the items were squeezed into one row, the chip shrunk to
@@ -4119,7 +4159,7 @@ class RenderQuals(Fixture):
     # var(--muted), and not .agent's weight; its lowercase is set as
     # small capitals through font-variant-caps, so capitals in a name
     # keep their size (the name is data, and its case must survive);
-    # the exchange's header lays the label and the diffstat out as one
+    # the exchange's header lays the label and the time out as one
     # flex row on a baseline; no rule remains for the meta line's
     # .human, which is gone. Resultata (v6.0.0): no .speaker and no
     # header rule; .human wore the ink in the meta line.
@@ -4201,29 +4241,38 @@ class RenderQuals(Fixture):
     self.assertEqual(page.count('<span class="add"></span>'), 4)  # round(5·1234/1279)
     self.assertEqual(page.count('<span class="del"></span>'), 1)
     self.assertEqual(page.count('<span class="nil"></span>'), 0)
-    # The stat precedes the prompt, in the exchange's header row.
-    self.assertLess(page.index('class="diffstat"'), page.index('class="prompt"'))
+    # The stat sits in the exchange's meta line, with the agent's other
+    # numbers.
+    self.assertLess(page.index("<summary>"), page.index('class="diffstat"'))
+    self.assertLess(page.index('class="diffstat"'), page.index("</summary>"))
     # A prompt that touched no code gets no diffstat at all.
     page = ace.render(self.repo, {LOGIN: [exchange()]})
-    self.assertNotIn('<div class="diffstat">', page)
+    self.assertNotIn('class="diffstat"', page)
 
-  def test_diffstat_closes_the_header_row_and_nothing_floats(self):
+  def test_diffstat_closes_the_meta_line_and_nothing_floats(self):
     # Replicata: a prompt that touched code, and one that did not.
-    # Expectata: the diffstat sits inside the exchange's header, after
-    # the speaker label and before the prompt, and the stylesheet keeps
-    # it a flex item that never shrinks under a long label (flex:
-    # none); a prompt that touched no code has a header holding the
-    # label alone. Nothing on the page floats any more, so nothing
+    # Expectata: the diffstat closes the exchange's meta line, the
+    # agent's line under the prompt, and the stylesheet keeps it a flex
+    # item that never shrinks (flex: none); a prompt that touched no
+    # code has none, its header holding the label and the time as
+    # every header does. Nothing on the page floats any more, so nothing
     # clears (a ballot opening the exchange sits under the label with
     # its own small margin). Resultata (v6.0.0): the diffstat floated
     # right of the prompt's first lines, and three rules cleared it.
+    # Resultata (2026.11.13-b): the diffstat closed the header row,
+    # beside the human's name and apart from the agent's other numbers.
     page = ace.render(self.repo, {LOGIN: [exchange(added=3, deleted=1, prompt="hi")]})
     self.assertRegex(
       page,
-      r'<header><p class="speaker">dreev</p>\n<div class="diffstat">\+3 −1 [^\n]*</div></header>\n<pre class="prompt">hi</pre>',
+      r'<pre class="prompt">hi</pre>\n<details>\n<summary>[^\n]* <span class="diffstat">\+3 −1 [^\n]*</span></summary>',
     )
     page = ace.render(self.repo, {LOGIN: [exchange()]})
-    self.assertIn('<header><p class="speaker">dreev</p></header>\n<pre class="prompt">p</pre>', page)
+    self.assertIn(
+      '<header><p class="speaker">dreev</p>'
+      '\n<a class="anchor" href="#p1"><time datetime="2026-03-01T10:00:00+00:00">10:00</time></a></header>'
+      '\n<pre class="prompt">p</pre>',
+      page,
+    )
     rule = ace.CSS[ace.CSS.index("\n.diffstat {") :]
     rule = rule[: rule.index("}")]
     self.assertIn("\n  flex: none;\n", rule)
@@ -4231,6 +4280,98 @@ class RenderQuals(Fixture):
     self.assertNotIn("float", ace.CSS)
     self.assertNotIn("clear", ace.CSS)
     self.assertIn("\n.exchange > header + .ballot { margin-top: .3rem; }\n", ace.CSS)
+
+  def test_wide_screens_hang_the_header_in_the_left_margin(self):
+    # Replicata: the stylesheet. Expectata: on a screen at least 70rem
+    # wide (the 44rem column and, beside it, an 8rem header, its 1.6rem
+    # gap and the rail's 46px day ticks, with a 17px scrollbar to
+    # spare), each exchange's header, the speaker
+    # label with the time under it, leaves the column and hangs to its
+    # left, right-aligned, the label on the prompt's first line (it
+    # takes the prompt's line height, 1.62); the rule is for screens, so
+    # print, like a narrower screen, keeps the header as the row above
+    # the prompt. Resultata (2026.11.13-b): the label took a row of its
+    # own above every prompt at every width, 11.5% to 14% of the
+    # collapsed height of six real pages, beside empty margins.
+    self.assertEqual(ace.CSS.count("@media screen and (min-width: 70rem) {"), 1)
+    wide = ace.CSS[ace.CSS.index("\n@media screen and (min-width: 70rem) {") :]
+    wide = wide[: wide.index("\n}\n")]
+    tick = ace.CSS[ace.CSS.index("\n#progress .tick {") :]
+    self.assertIn("\n  width: 46px;\n", tick[: tick.index("}")])
+    for rule in (
+      "\n  .exchange { position: relative; }\n",
+      "\n  .exchange > header {\n    position: absolute;\n    right: calc(100% + 1.6rem);\n    width: 8rem;\n"
+      "    margin: 0;\n    flex-direction: column;\n    align-items: flex-end;\n    gap: 0;\n  }\n",
+      "\n  .speaker { line-height: 1.62; text-align: right; }",
+    ):
+      self.assertIn(rule, wide)
+    prompt = ace.CSS[ace.CSS.index("\npre.prompt {") :]
+    self.assertIn("\n  line-height: 1.62;\n", prompt[: prompt.index("}")])
+    self.assertIn("\n  --measure: 44rem;\n", ace.CSS)
+    printed = ace.CSS[ace.CSS.index("\n@media print {") :]
+    self.assertNotIn("header", printed[: printed.index("\n}\n")])
+
+  def test_header_time_wears_the_meta_lines_quiet_ink(self):
+    # Replicata: the stylesheet. Expectata: the time in the exchange's
+    # header is set as the meta line is, in its faint ink, sans face,
+    # size, tracking and tabular figures, so it stays as quiet beside
+    # the label as it was in the meta line; it never shrinks under a
+    # long label (flex: none), and it is underlined only under the
+    # pointer. Resultata (2026.11.13-b): no rule for a header's time,
+    # which would take the label's serif at the prompt's size.
+    rule = ace.CSS[ace.CSS.index("\n.exchange > header a.anchor {") :]
+    rule = rule[: rule.index("}")]
+    meta = ace.CSS[ace.CSS.index("\nsummary {") :]
+    meta = meta[: meta.index("}")]
+    for declaration in (
+      "\n  color: var(--faint);\n", "\n  font-family: var(--sans);\n", "\n  font-size: .68rem;\n",
+      "\n  letter-spacing: .05em;\n", "\n  font-variant-numeric: tabular-nums;\n",
+    ):
+      self.assertIn(declaration, rule)
+      self.assertIn(declaration, meta)
+    self.assertIn("\n  flex: none;\n", rule)
+    self.assertIn("\n  text-decoration: none;\n", rule)
+    self.assertIn("\n.exchange > header a.anchor:hover { text-decoration: underline; }\n", ace.CSS)
+    self.assertNotIn("summary a", ace.CSS)
+
+  def test_meta_line_spans_the_column_with_its_numbers_at_the_far_end(self):
+    # Replicata: the stylesheet. Expectata: the meta line is a flex row
+    # as wide as the column (display: flex, no width of its own), so the
+    # whole row under the prompt toggles the reply; the first of the
+    # agent's numbers, the working time, or the diffstat where no
+    # working time shows, takes the free space on its left, so the
+    # numbers sit at the row's far end. Resultata (2026.11.13-b): the
+    # line was only as wide as its text (inline-flex, fit-content), the
+    # working time followed the effort, and the diffstat sat in the
+    # header beside the human's name.
+    rule = ace.CSS[ace.CSS.index("\nsummary {") :]
+    rule = rule[: rule.index("}")]
+    self.assertIn("\n  display: flex;\n", rule)
+    self.assertNotIn("width", rule)
+    self.assertIn(
+      "\nsummary > .elapsed, summary > .diffstat { margin-left: auto; }"
+      "\nsummary > .elapsed + .diffstat { margin-left: 0; }\n",
+      ace.CSS,
+    )
+
+  def test_nothing_in_the_meta_line_is_a_link(self):
+    # Replicata: a page of an exchange showing every part a meta line
+    # can: effort, working and wall-clock time, a diffstat, a session
+    # title. Expectata: its meta line, the summary that toggles the
+    # reply, holds its parts in order (chip, agent, model, effort,
+    # title, working time, diffstat) and no link and no time, so a
+    # click anywhere on it does one thing. Resultata (2026.11.13-b):
+    # the line opened with the time, a link to the exchange.
+    page = ace.render(
+      self.repo, {LOGIN: [exchange(effort="xhigh", elapsed=327.0, wall=540.0, added=3, deleted=1, title="t")]}
+    )
+    (summary,) = re.findall(r"<summary>(.*?)</summary>", page, re.DOTALL)
+    self.assertEqual(
+      re.findall(r'<span class="(\w+)"', summary),
+      ["chip", "agent", "model", "effort", "title", "elapsed", "diffstat", "blocks", "add", "add", "add", "del", "nil"],
+    )
+    self.assertNotIn("<a", summary)
+    self.assertNotIn("<time", summary)
 
   def test_diffstat_tiny_and_onesided_ratios(self):
     page = ace.render(self.repo, {LOGIN: [exchange(added=1, deleted=1)]})
@@ -4384,7 +4525,8 @@ class RenderQuals(Fixture):
       self.assertEqual(
         article[: article.index("<details>")],
         '<article class="exchange claude" id="p1" data-login="dreeves">'
-        '\n<header><p class="speaker">dreev</p></header>'
+        '\n<header><p class="speaker">dreev</p>'
+        '\n<a class="anchor" href="#p1"><time datetime="2026-03-01T10:00:00+00:00">10:00</time></a></header>'
         '\n<div class="ballot machine">'
         '\n<div class="ballot-question">Q?</div>'
         '\n<div class="option picked">✓ A label</div>'
@@ -4475,7 +4617,7 @@ class RenderQuals(Fixture):
     # and 2026-03-02 05:00 UTC (both 2026-03-02 in Tokyo, at 08:30 and
     # 14:00). Expectata: the page reads in UTC: two day headers, with
     # ids d2026-03-01 and d2026-03-02, headed "2026-03-01 Sunday" and
-    # "2026-03-02 Monday", and a day mark for each; the meta lines'
+    # "2026-03-02 Monday", and a day mark for each; the headers'
     # times 23:30 and 05:00 on time elements carrying the UTC
     # instants; the deck's range 2026-03-01 – 2026-03-02; the
     # minimap's titles 23:30 and 05:00. Resultata (v6.0.0): one day,
@@ -4567,7 +4709,7 @@ class RenderQuals(Fixture):
       'hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZoneName: "short",',
       'for (const header of document.querySelectorAll("main > h2.day")) header.remove();',
       'for (const article of document.querySelectorAll("main > article.exchange")) {',
-      'const time = article.querySelector("summary time");',
+      'const time = article.querySelector("header time");',
       "time.textContent = `${at.hour}:${at.minute}`;",
       'const title = document.querySelector(`.minimap a[href="#${article.id}"] title`);',
       '`<h2 class="day" id="d${date}"><time datetime="${date}">${date} ${at.weekday}</time>`',
@@ -4656,15 +4798,36 @@ class MarkdownQuals(Fixture):
     )
     self.assertIn(page[: page.index("-->") + 3], ace.render(self.repo, rows))
 
-  def test_markdown_summary_is_the_pages(self):
+  def test_markdown_summary_is_the_time_then_the_pages_parts_with_the_title_last(self):
     # Replicata: an exchange showing every part a meta line can: effort,
-    # working and wall-clock time, a session title holding markup.
-    # Expectata: the Markdown page's summary is the page's, character
-    # for character, data escaped as the page escapes it.
-    rows = {LOGIN: [exchange(effort="xhigh", elapsed=327.0, wall=540.0, title='<b>fix</b> "it"')]}
-    summaries = lambda page: re.findall(r"<summary>.*?</summary>", page, re.DOTALL)
-    self.assertEqual(len(summaries(ace.render(self.repo, rows))), 1)
-    self.assertEqual(summaries(ace.render_markdown(self.repo, rows)), summaries(ace.render(self.repo, rows)))
+    # working and wall-clock time, a diffstat, a session title holding
+    # markup. Expectata: the Markdown page's summary is, byte for byte,
+    # what 2026.11.13-b wrote: the prompt's time, as the page's header
+    # writes it, then the parts of the page's meta line, each character
+    # for character, data escaped as the page escapes it, with the
+    # title last and no diffstat (the Markdown page says the counts
+    # once, as text, on its speaker line). The page's meta line holds
+    # those parts with the title after the effort, then the diffstat.
+    # Resultata (2026.11.13-b): the page's summary opened with the time
+    # too, ended with the title and held no diffstat, so the two
+    # summaries were one string.
+    rows = {LOGIN: [exchange(effort="xhigh", elapsed=327.0, wall=540.0, added=3, deleted=1, title='<b>fix</b> "it"')]}
+    summaries = lambda page: re.findall(r"<summary>(.*?)</summary>", page, re.DOTALL)
+    time = '<a class="anchor" href="#p1"><time datetime="2026-03-01T10:00:00+00:00">10:00</time></a>'
+    agent = (
+      '<span class="chip"></span> <span class="agent">Claude Code</span>'
+      ' <span class="model">claude-opus-4-8</span> <span class="effort">(xhigh)</span>'
+    )
+    title = ' <span class="title">&lt;b&gt;fix&lt;/b&gt; &quot;it&quot;</span>'
+    elapsed = ' <span class="elapsed">thought for 5m27s · 9m wall-clock time</span>'
+    stat = (
+      ' <span class="diffstat">+3 −1 <span class="blocks" aria-hidden="true">'
+      '<span class="add"></span><span class="add"></span><span class="add"></span>'
+      '<span class="del"></span><span class="nil"></span></span></span>'
+    )
+    self.assertEqual(summaries(ace.render(self.repo, rows)), [f"{agent}{title}{elapsed}{stat}"])
+    self.assertEqual(summaries(ace.render_markdown(self.repo, rows)), [f"{time} {agent}{elapsed}{title}"])
+    self.assertIn("\n**dreev** · +3 −1\n", ace.render_markdown(self.repo, rows))
 
   def test_markdown_credits_every_row_as_the_page_does(self):
     # Replicata: rows of two humans, interleaved in time. Expectata: the
@@ -5529,7 +5692,7 @@ class CliQuals(Fixture):
 
   def test_prompt_quoting_the_credit_markup_does_not_confuse_the_reader(self):
     # Replicata: a typed prompt is an article's opening tag, crediting
-    # another login, and a summary's time, as the page writes them.
+    # another login, and a time element, as the page writes them.
     # Expectata: the rerun succeeds, the page crediting one row, and the
     # ledger gives the prompt back byte-exact. Resultata with an
     # unescaped prompt: a second credit, naming a ledger that holds no
@@ -6101,7 +6264,9 @@ class CliQuals(Fixture):
     _, *rows = ledger_rows(self.ledger())
     self.assertEqual([(row["prompt"], row["title"]) for row in rows],
                      [("claude prompt", "5690-elf-reminders"), ("codex prompt", ""), ("copilot prompt", "")])
-    self.assertEqual(page.count('<span class="title">5690-elf-reminders</span></summary>'), 1)
+    self.assertEqual(
+      re.findall(r'<summary>[^\n]*<span class="title">([^<]*)</span>[^\n]*</summary>', page), ["5690-elf-reminders"]
+    )
 
   def test_header_line_a_union_merge_left_twice_refused_saying_which_to_keep(self):
     # Replicata: github.com/dreeves/blog is renamed newblog, and this
