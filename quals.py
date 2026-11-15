@@ -2756,6 +2756,16 @@ def cxgoalnote(objective, used, ts=T1):
             "</codex_internal_context>"}]}}
 
 
+def cxpage(snapshot, part=1, parts=1, ts=T0):
+  """A note Codex's VS Code extension sends the model in the user role
+  with a prompt: one part of its snapshot of the companion Page selected
+  beside the chat, a JSON object it cuts in parts of at most 3500 bytes,
+  in the form the extension (26.1111) writes."""
+  tag = f"external_codex_apps_selected_page_part_{part}_of_{parts}"
+  return {"type": "response_item", "timestamp": ts, "payload": {"type": "message", "role": "user", "content": [{
+    "type": "input_text", "text": f"<{tag}>Companion Page snapshot part {part} of {parts}:\n{snapshot}</{tag}>"}]}}
+
+
 def cxitem(item, ts=T0):
   """An item_completed event, the form a rewritten rollout records each
   event sourcery reads in."""
@@ -3439,6 +3449,45 @@ class CodexQuals(Fixture):
         with self.assertRaises(ace.UserError) as ctx:
           ace.codex_exchanges(path, self.repo)
         self.assertIn(f"{path}:4\n", str(ctx.exception))
+
+  def test_companion_page_snapshots_the_stores_show_pass(self):
+    # Replicata: with a prompt, Codex's VS Code extension sends the model
+    # a snapshot of the companion Page the human selected beside the
+    # chat, and in every store none is selected (Codex 0.169, from
+    # 2026-11-14): the snapshot of no Page, in one part. Expectata: the
+    # session yields what it yields without the note. Resultata
+    # (2026.11.14-b): refused, as a user-role message no prompt accounts
+    # for.
+    records = [
+      cxmeta(str(self.repo)),
+      cxpage('{"page_id":null,"document_view":null}'),
+      {"type": "response_item", "timestamp": T0, "payload": {
+        "type": "message", "role": "user", "content": [{"type": "input_text", "text": "begin"}]}},
+      cxuser("begin", ts=T0),
+      cxagent("done", ts=T1),
+    ]
+    got = ace.codex_exchanges(self.path(records), self.repo)[0]
+    self.assertEqual([(e.prompt, e.reply) for e in got], [("begin", "done")])
+
+  def test_companion_page_snapshots_no_store_shows_refused(self):
+    # Replicata: in a session read for the repo, the human selects a
+    # companion Page beside the chat, and the extension's snapshot of it,
+    # which holds the Page's editor view and so may hold words the human
+    # wrote in the Page, reaches the model whole or in parts. Expectata:
+    # refused, citing the file and line of the note: no store shows what
+    # such a snapshot holds.
+    cases = {
+      "a selected Page": cxpage('{"page_id":"p1","document_view":"words the human wrote"}'),
+      "the first of two parts": cxpage('{"page_id":"p1","document_view":"words', part=1, parts=2),
+      "the second of two parts": cxpage(' the human wrote"}', part=2, parts=2),
+    }
+    for name, note in cases.items():
+      with self.subTest(name):
+        records = [cxmeta(str(self.repo)), cxuser("begin", ts=T0), note, cxagent("done", ts=T1)]
+        path = self.path(records, f"{name}.jsonl")
+        with self.assertRaises(ace.UserError) as ctx:
+          ace.codex_exchanges(path, self.repo)
+        self.assertIn(f"{path}:3\n", str(ctx.exception))
 
   def test_compressed_rollout_reads_as_plain(self):
     # Replicata: Codex compresses older rollouts, each to a .jsonl.zst

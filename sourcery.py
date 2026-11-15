@@ -82,7 +82,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 # agent changing sourcery sets today's date with the letter after HEAD's
 # when HEAD's version is today's, else with -a, and leaves a version the
 # working tree already moved to today alone.
-VERSION = "2026.11.14-b"
+VERSION = "2026.11.15-a"
 UTC = dt.timezone.utc
 
 # The line every error message still in Latin opens with, written out in
@@ -1804,10 +1804,18 @@ CODEX_MESSAGE_PIECES = {
 }
 # The notes Codex injects in the user role, by how each begins. Every other
 # user-role message the model receives is the model's copy of a prompt the
-# session records (see codex_heard).
+# session records (see codex_heard). The last is written out whole: the
+# note in which Codex's VS Code extension sends the model, with a prompt,
+# a snapshot of the companion Page the human selected beside the chat
+# (Codex 0.169, from 2026-11-14), in the one form every store shows: no
+# Page selected, in one part. A snapshot of a selected Page holds its
+# editor view, which may be words the human wrote in the Page, and no
+# store shows one.
 CODEX_INJECTIONS = (
   "<environment_context>", "# AGENTS.md instructions", "<recommended_plugins>",
   "<external_codex_apps_open_page>", "<turn_aborted>",
+  "<external_codex_apps_selected_page_part_1_of_1>Companion Page snapshot part 1 of 1:\n"
+  '{"page_id":null,"document_view":null}</external_codex_apps_selected_page_part_1_of_1>',
 )
 # The note Codex injects in the user role each time it continues a thread
 # goal on its own (from Codex 0.164, 2026-11-10): the goal's objective,
