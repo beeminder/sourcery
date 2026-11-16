@@ -4621,8 +4621,8 @@ class RenderQuals(Fixture):
       {LOGIN: [exchange(prompt="typed words", reply="agent words", ballots=(ballot,))]},
     )
     self.assertIn('<div class="reply machine">', page)
-    self.assertIn('<div class="ballot machine">', page)
-    self.assertIn('<div class="ballot-question">Q?</div>', page)
+    self.assertIn('<details class="ballot machine">', page)
+    self.assertIn('<summary><span class="ballot-question">Q?</span></summary>', page)
     self.assertIn('<div class="option picked">✓ A label</div>', page)
     self.assertIn('<div class="option">· B label</div>', page)
     # The human's prompt must not sit inside any machine container.
@@ -4630,20 +4630,51 @@ class RenderQuals(Fixture):
     self.assertIn("typed words", pre)
     self.assertNotIn("machine", pre)
 
-  def test_ballot_stays_default_visible_outside_the_disclosure(self):
-    # Deliberate exception to machine-words-collapsed: the human's picks
-    # are legible only against the agent's question and labels, so the
-    # ballot renders before the closed <details>, still on its slip.
+  def test_ballot_is_a_closed_disclosure_of_its_own_showing_one_line(self):
+    # Replicata: an exchange answering a ballot with typed words.
+    # Expectata: no exception to machine-words-collapsed. The ballot is
+    # a disclosure of its own, closed, on its slip, before the prompt
+    # and the reply's disclosure: its toggle is the question and every
+    # option sits behind the toggle. The stylesheet cuts a closed
+    # ballot's question to its first line, with an ellipsis (which takes
+    # a toggle part that may shrink under its text's width), and shows
+    # it whole, line breaks kept, once open; the toggle is set in the
+    # slip's face, not the meta line's; and the page's expand-all opens
+    # every disclosure, ballots with the replies. Resultata
+    # (2026.11.15-a): the whole ballot was default-visible, an exception
+    # made when a ballot ran to about 150 characters. By 2026-11 its
+    # question alone ran to 875, and ballots were 55% of that month's
+    # default-visible prose on sourcery's own page (dreeves,
+    # 2026-11-16: "i expect to see that top box collapsed with a
+    # clickable triangle to expand as usual. we could show just the
+    # first line, with an ellipsis to make it obvious we're only seeing
+    # part of it").
     ballot = ace.Ballot("Q?", ("A label", "B label"), ("A label",))
     page = ace.render(self.repo, {LOGIN: [exchange(prompt="typed words", ballots=(ballot,))]})
+    self.assertNotIn(" open", page[page.index("<main>") : page.index("</main>")].replace('data-omnia="open"', ""))
     article = page[page.index("<article") : page.index("</article>")]
-    self.assertLess(article.index('<div class="ballot machine">'), article.index("<details>"))
+    places = [
+      article.index(mark)
+      for mark in (
+        '<details class="ballot machine">', "<summary>", "Q?", "</summary>", "✓ A label", "· B label", "</details>",
+        '<pre class="prompt">typed words</pre>', "<details>\n<summary>",
+      )
+    ]
+    self.assertEqual(places, sorted(places))
+    self.assertEqual(article.count("</details>"), 2)
+    rule = lambda selector: ace.CSS[ace.CSS.index(f"\n{selector} {{") :].split("}")[0]
+    for declaration in (" overflow: hidden; ", " white-space: nowrap; ", " text-overflow: ellipsis; "):
+      self.assertIn(declaration, rule(".ballot:not([open]) .ballot-question"))
+    for declaration in ("\n  flex: 1;\n", "\n  min-width: 0;\n", "\n  white-space: pre-wrap;\n"):
+      self.assertIn(declaration, rule(".ballot-question"))
+    self.assertIn(" font: inherit; ", rule(".ballot > summary"))
+    self.assertIn('for (const details of document.querySelectorAll("details")) details.open = open;', ace.JS)
 
   def test_ballot_is_the_headers_next_sibling(self):
     # Replicata: an exchange opening with a ballot, once beside typed
     # words and once as a click-only answer. Expectata: the article's
     # first child is the header and the ballot its next sibling, before
-    # any prompt and before <details>, so the stylesheet's
+    # any prompt and before the reply's <details>, so the stylesheet's
     # `.exchange > header + .ballot` rule (the small margin a ballot
     # keeps under the label) matches it. Resultata (ballots emitted
     # before the header): the ballot opens the article with its full
@@ -4659,11 +4690,11 @@ class RenderQuals(Fixture):
         '\n<header><p class="speaker">dreev</p>'
         '\n<a class="anchor" href="#p1" title="2026-03-01 Sunday 10:00:00 UTC">'
         '<time datetime="2026-03-01T10:00:00+00:00">10:00</time></a></header>'
-        '\n<div class="ballot machine">'
-        '\n<div class="ballot-question">Q?</div>'
+        '\n<details class="ballot machine">'
+        '\n<summary><span class="ballot-question">Q?</span></summary>'
         '\n<div class="option picked">✓ A label</div>'
         '\n<div class="option">· B label</div>'
-        f"\n</div>{tail}\n",
+        f"\n</details>{tail}\n",
       )
 
   def test_click_only_answer_renders_without_prompt_block(self):
@@ -5108,8 +5139,8 @@ class MarkdownQuals(Fixture):
     ballot = ace.Ballot("Q?", ("A label", "B label"), ("A label",))
     rows = {LOGIN: [exchange(ballots=(ballot,), images=("data:image/png;base64,AAAA",))]}
     ballot_html = (
-      '<div class="ballot machine">\n<div class="ballot-question">Q?</div>\n'
-      '<div class="option picked">✓ A label</div>\n<div class="option">· B label</div>\n</div>'
+      '<details class="ballot machine">\n<summary><span class="ballot-question">Q?</span></summary>\n'
+      '<div class="option picked">✓ A label</div>\n<div class="option">· B label</div>\n</details>'
     )
     attachments = '<div class="attachments"><img class="attachment" src="data:image/png;base64,AAAA" alt=""></div>'
     self.assertIn(

@@ -60,3 +60,7 @@ The printers in sourcery.py's and adopt.py's `run` print a UserError's message a
 ## Python is indented two spaces (2026.11.13-b)
 
 dreeves prefers 2-space indentation. Each block sits exactly two spaces deeper than the block holding it, and `test_python_sources_indent_blocks_two_spaces` refuses anything else in any `*.py` here. Lines continued inside brackets may align freely. The switch from four spaces changed only leading spaces: the old and new files compile to identical bytecode and constants, docstrings included, because Python ≥3.13 strips a docstring's common indentation.
+
+## Machine words are collapsed, with no exception (2026.11.16-a)
+
+dreeves, 2026-11-16: "the whole guiding principle of sourcery is to see everything the human typed and have all ai-generated text collapsed by default." Every machine container on the page is a closed disclosure: a reply sits behind the meta line, and a ballot is a disclosure of its own whose toggle shows the first line of its question, cut with an ellipsis (`test_ballot_is_a_closed_disclosure_of_its_own_showing_one_line`). The ballot was default-visible from 2026-07-17, an exception made so the human's pick could be read when a ballot ran to about 150 characters; by 2026-11 questions ran to 875 and ballots were over half of a month's default-visible prose. Never propose default-visible machine text past one line.

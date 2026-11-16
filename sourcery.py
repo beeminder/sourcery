@@ -82,7 +82,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 # agent changing sourcery sets today's date with the letter after HEAD's
 # when HEAD's version is today's, else with -a, and leaves a version the
 # working tree already moved to today alone.
-VERSION = "2026.11.15-a"
+VERSION = "2026.11.16-a"
 UTC = dt.timezone.utc
 
 # The line every error message still in Latin opens with, written out in
@@ -3697,9 +3697,11 @@ def markdown_html(text: str) -> str:
 # day markers, the prompt's time and the disclosure line (agent, model) are
 # set small and faint; machine-written words always sit on a slip of their own, in
 # monospace and green ink, and all of
-# them sit inside a closed <details> except the ballot: the human's picks
-# are legible only against the question and labels the agent wrote, so the
-# ballot stays default-visible — in green, never mistakable for typing.
+# them sit inside a closed <details>, with no exception. A ballot is a
+# disclosure of its own, above the words the human typed in answer:
+# closed, it shows the first line of the agent's question and no more —
+# in green, never mistakable for typing — and the options, the human's
+# picks among them, open with it.
 CSS = r"""
 /* Beeminder hive: honey paper, goldenrod
    accents throughout. The goldenrod is darkened for text contrast;
@@ -4011,10 +4013,10 @@ summary > .elapsed + .diffstat { margin-left: 0; }
    mistakable for the
    human's serif. The containers are .reply (agent replies) and .ballot
    (multiple-choice questions the agent posed and the option labels it
-   wrote, including the ones the human picked). Machine styling and
-   collapsing are separate rules: .reply also hides behind the closed
-   disclosure, while .ballot is deliberately default-visible — collapsing
-   it would orphan the human's choice — but stays on its slip.
+   wrote, including the ones the human picked). Both are closed
+   disclosures: .reply hides behind the meta line, and .ballot is a
+   disclosure of its own, a slip showing the first line of its question
+   until opened.
    The slip is quiet on purpose: against the page it is 1.06:1, so no
    machine container is a dark mass, and the human's ink on the page
    (15.96:1) outdoes every ink here, so typed words are the darkest text.
@@ -4042,12 +4044,21 @@ summary > .elapsed + .diffstat { margin-left: 0; }
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
+/* The ballot's toggle is its question, set as the slip is and not as the
+   meta line. The question is the toggle's one part beside the triangle
+   and may shrink under its text's width, so a closed ballot shows the
+   question's first line, cut with an ellipsis; open, the question reads
+   whole, line breaks kept, above the options. */
+.ballot > summary { font: inherit; letter-spacing: inherit; user-select: text; }
+.ballot[open] > summary { margin-bottom: .35rem; }
 .ballot-question {
+  flex: 1;
+  min-width: 0;
   color: var(--m-dim);
   font-size: .74rem;
-  margin-bottom: .35rem;
   white-space: pre-wrap;
 }
+.ballot:not([open]) .ballot-question { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .ballot .option { color: var(--m-dim); }
 /* The human's pick: its check mark and its weight tell it from the other
    options; the two inks are too close (1.75:1) to carry that alone. */
@@ -4371,16 +4382,19 @@ def credit_tag(number: int, login: str, exchange: Exchange) -> str:
 
 
 def ballots_html(exchange: Exchange) -> str:
-  """The exchange's ballots, one after another; "" when none."""
+  """The exchange's ballots, one after another; "" when none. Each is a
+  closed disclosure of its own: its toggle is the question, of which the
+  stylesheet shows a closed ballot's first line, and the options sit
+  behind the toggle."""
   return "\n".join(
-    '<div class="ballot machine">'
-    f'\n<div class="ballot-question">{html.escape(ballot.question, quote=False)}</div>'
+    '<details class="ballot machine">'
+    f'\n<summary><span class="ballot-question">{html.escape(ballot.question, quote=False)}</span></summary>'
     + "".join(
       f'\n<div class="option{" picked" if label in ballot.picked else ""}">'
       f'{"✓" if label in ballot.picked else "·"} {html.escape(label, quote=False)}</div>'
       for label in ballot.options
     )
-    + "\n</div>"
+    + "\n</details>"
     for ballot in exchange.ballots
   )
 
