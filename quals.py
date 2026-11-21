@@ -2418,6 +2418,7 @@ class ClaudeQuals(Fixture):
         "hook_additional_context", "file", "command_permissions", "thinking_drop", "compact_file_reference",
         "invoked_skills", "auto_mode_exit", "ultra_effort_exit", "task_status", "plan_mode",
         "plan_mode_exit", "hook_non_blocking_error", "plan_mode_reentry", "workflow_keyword_request",
+        "hook_system_message",
       ]
     ]
     got = ace.claude_exchanges(
@@ -2451,6 +2452,34 @@ class ClaudeQuals(Fixture):
       self.repo,
     )[0]
     self.assertEqual([(e.prompt, e.reply) for e in got], [("sweep the logs, ultracode", "swept")])
+
+  def test_hook_system_message_adds_nothing_to_the_exchange(self):
+    # Replicata: a prompt, then, as Claude Code 2.1.328 writes it after a
+    # Bash call, a hook_system_message attachment holding the tip a
+    # PostToolUse hook has the harness show; then the reply. Expectata:
+    # one exchange whose prompt is the typed text and whose reply is the
+    # reply; the tip adds nothing. Resultata (2026.11.16-a): refused, the
+    # attachment being of a type no store had shown.
+    cwd = str(self.repo)
+    tip = {
+      "type": "attachment",
+      "attachment": {
+        "type": "hook_system_message",
+        "content": "Tip: Run /ultrareview before you push to catch bugs with a cloud-based multi-agent "
+                   "review — 3 free reviews left.",
+        "hookName": "PostToolUse:Bash", "toolUseID": "toolu_01AbCdEfGhIjKlMnOpQrStUv",
+        "hookEvent": "PostToolUse",
+      },
+      "cwd": cwd, "sessionId": "cs1", "timestamp": T2,
+    }
+    got = ace.claude_exchanges(
+      self.path([
+        cu("commit the work", ts=T1, cwd=cwd, origin={"kind": "human"}), tip,
+        ca([{"type": "text", "text": "committed"}], ts=T3, cwd=cwd),
+      ]),
+      self.repo,
+    )[0]
+    self.assertEqual([(e.prompt, e.reply) for e in got], [("commit the work", "committed")])
 
   def test_user_content_of_unseen_forms_refused(self):
     # Replicata: a user record read for the repo holds a content piece of

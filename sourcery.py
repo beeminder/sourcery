@@ -619,6 +619,10 @@ CLAUDE_RECORDS = frozenset({
 # stays in the prompt, where it is read. A queued_command attachment, a
 # prompt typed mid-turn, is read; one of any other type is refused like a
 # record of an unseen type.
+# A hook_system_message attachment (seen from Claude Code 2.1.328) carries
+# a message a hook has the harness show, as {type, content, hookName,
+# toolUseID, hookEvent}; the one the stores show is Claude Code's own tip
+# after a Bash call. The human types none of it.
 CLAUDE_MUTE_ATTACHMENTS = frozenset({
   "total_tokens_reminder", "deferred_tools_record", "batching_reminder_sent", "deferred_tools_delta",
   "skill_listing", "prompt_snapshot", "remote_session_change", "auto_mode", "date", "session_context",
@@ -627,7 +631,7 @@ CLAUDE_MUTE_ATTACHMENTS = frozenset({
   "agent_listing_delta", "read_truncation_notice", "hook_additional_context", "file", "command_permissions",
   "thinking_drop", "compact_file_reference", "invoked_skills", "auto_mode_exit", "ultra_effort_exit",
   "task_status", "plan_mode", "plan_mode_exit", "hook_non_blocking_error", "plan_mode_reentry",
-  "workflow_keyword_request",
+  "workflow_keyword_request", "hook_system_message",
 })
 
 # Assistant block types the stores show that carry no words for the human:
