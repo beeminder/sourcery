@@ -2303,6 +2303,15 @@ class ClaudeQuals(Fixture):
     # tools a session used, the name its agent goes by, the pull
     # requests it opened, and the account and organization that own it.
     # None changes what a file yields.
+    #
+    # Replicata: a session file read for the repo also holds the three
+    # records Claude Code 2.1.327 began writing: a data-flow-records
+    # list of each kind of entry the stores show (a tool call, a model
+    # response, an event), the data-flow-incomplete mark, and the
+    # derived-from list of the sessions this one continues. Expectata:
+    # the file yields its exchange, these records holding ids, tool
+    # names, and fixed words alone. Resultata (2026.11.16-a): refused,
+    # each being a record of an unseen type.
     cwd = str(self.repo)
     quiet = [
       {"type": kind, "sessionId": "cs1"}
@@ -2315,7 +2324,21 @@ class ClaudeQuals(Fixture):
          {"type": "agent-name", "agentName": "elf-reminders", "sessionId": "cs1"},
          {"type": "pr-link", "sessionId": "cs1", "prNumber": "58", "prUrl": "https://github.com/o/r/pull/58",
           "prRepository": "o/r", "timestamp": T0},
-         {"type": "session-owner", "accountUuid": "acct1", "organizationUuid": "org1", "sessionId": "cs1"}]
+         {"type": "session-owner", "accountUuid": "acct1", "organizationUuid": "org1", "sessionId": "cs1"},
+         {"type": "data-flow-incomplete", "v": 1, "sessionId": "cs1"},
+         {"type": "data-flow-records", "v": 1, "sessionId": "cs1", "snapshot": True, "records": [
+           {"tool_name": "Bash", "tool_use_id": "toolu_01"},
+           {"response_id": "msg_02", "listed": ["msg_01"], "mark_sent_by": "u1"},
+           {"response_id": "msg_03", "mark_sent_by": "u1"},
+           {"event_id": "event_1", "source": {"type": "unknown", "id": None}},
+           {"event_id": "event_2", "tool_name": "Write"},
+           {"event_id": "event_3", "touched": {"kind": "memory", "id": "local_cs1", "action": "write"}},
+         ]},
+         {"type": "data-flow-records", "v": 1, "sessionId": "cs1", "records": []},
+         {"type": "derived-from", "v": 1, "sessionId": "cs1", "sessions": [
+           {"type": "claude_code_session", "id": "cs0", "via": "resume"},
+           {"type": "claude_code_session", "id": "cs0", "via": "compact"},
+         ]}]
     got = ace.claude_exchanges(
       self.path([*quiet, cu("go", cwd=cwd), ca([{"type": "text", "text": "done"}], cwd=cwd)]), self.repo
     )[0]

@@ -82,7 +82,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 # agent changing sourcery sets today's date with the letter after HEAD's
 # when HEAD's version is today's, else with -a, and leaves a version the
 # working tree already moved to today alone.
-VERSION = "2026.11.16-a"
+VERSION = "2026.11.20-a"
 UTC = dt.timezone.utc
 
 # The line every error message still in Latin opens with, written out in
@@ -590,7 +590,15 @@ CLAUDE_CANNED = re.compile(r"\[Request interrupted by user[^\]]*\]")
 # {type, permissionMode, sessionId}; the name its agent goes by, a copy of
 # its custom-title or ai-title; the pull requests it opened; and the
 # account and organization that own it, as {type, accountUuid,
-# organizationUuid, sessionId}, from Claude Code 2.1.318 on). The
+# organizationUuid, sessionId}, from Claude Code 2.1.318 on; and, from
+# 2.1.327 on, what Claude Code calls the session's data flow:
+# data-flow-records lists tool calls as {tool_name, tool_use_id}, model
+# responses as {response_id, listed, mark_sent_by}, and events as
+# {event_id} with a tool_name, a source, or the memory touched, every
+# value an id, a tool name, or a fixed word; data-flow-incomplete, {type,
+# v, sessionId}, marks that list as having lost entries; and derived-from
+# lists the sessions this one continues, each {type, id, via}, via saying
+# how: resume or compact). The
 # session's custom-title is read, in the one shape the stores show (see
 # claude_record_known). Typed prompts once hid in attachment records
 # nobody had classified, so a record of any other type, or of none, in a
@@ -601,7 +609,7 @@ CLAUDE_RECORDS = frozenset({
   "api-request", "api-request-blob", "api-request-shape", "atis-latch", "file-history-snapshot",
   "file-history-delta", "bridge-session", "mode", "frame-link", "artifact-autoreact-ledger",
   "artifact-comment-monitor", "cost-state", "tools-used", "permission-mode", "agent-name", "pr-link",
-  "session-owner",
+  "session-owner", "data-flow-records", "data-flow-incomplete", "derived-from",
 })
 
 # Attachment types the stores show that carry no typing: reminders, tool and
