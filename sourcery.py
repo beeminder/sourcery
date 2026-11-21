@@ -82,7 +82,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 # agent changing sourcery sets today's date with the letter after HEAD's
 # when HEAD's version is today's, else with -a, and leaves a version the
 # working tree already moved to today alone.
-VERSION = "2026.11.20-a"
+VERSION = "2026.11.20-b"
 UTC = dt.timezone.utc
 
 # The line every error message still in Latin opens with, written out in
