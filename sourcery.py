@@ -91,7 +91,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 # agent changing sourcery sets today's date with the letter after HEAD's
 # when HEAD's version is today's, else with -a, and leaves a version the
 # working tree already moved to today alone.
-VERSION = "2026.11.27-b"
+VERSION = "2026.11.28-a"
 UTC = dt.timezone.utc
 
 # The line every error message still in Latin opens with, written out in
@@ -649,6 +649,13 @@ CLAUDE_RECORDS = frozenset({
 # a message a hook has the harness show, as {type, content, hookName,
 # toolUseID, hookEvent}; the one the stores show is Claude Code's own tip
 # after a Bash call. The human types none of it.
+# A critical_system_reminder attachment (seen from Claude Code 2.1.332)
+# carries a note the harness writes for the model, as {type, content}: the
+# 2.1.332 binary builds one in 32 places and lists the type's source as
+# the harness. The one the stores show, in a subagent's transcript, holds
+# only the fixed tag <artifact-content-authored-by-others/>, marking that
+# the conversation carries content of an artifact that people other than
+# the user wrote. The human types none of it.
 CLAUDE_MUTE_ATTACHMENTS = frozenset({
   "total_tokens_reminder", "deferred_tools_record", "batching_reminder_sent", "deferred_tools_delta",
   "skill_listing", "prompt_snapshot", "remote_session_change", "auto_mode", "date", "session_context",
@@ -657,7 +664,7 @@ CLAUDE_MUTE_ATTACHMENTS = frozenset({
   "agent_listing_delta", "read_truncation_notice", "hook_additional_context", "file", "command_permissions",
   "thinking_drop", "compact_file_reference", "invoked_skills", "auto_mode_exit", "ultra_effort_exit",
   "task_status", "plan_mode", "plan_mode_exit", "hook_non_blocking_error", "plan_mode_reentry",
-  "workflow_keyword_request", "hook_system_message",
+  "workflow_keyword_request", "hook_system_message", "critical_system_reminder",
 })
 
 # Assistant block types the stores show that carry no words for the human:

@@ -2419,7 +2419,7 @@ class ClaudeQuals(Fixture):
         "hook_additional_context", "file", "command_permissions", "thinking_drop", "compact_file_reference",
         "invoked_skills", "auto_mode_exit", "ultra_effort_exit", "task_status", "plan_mode",
         "plan_mode_exit", "hook_non_blocking_error", "plan_mode_reentry", "workflow_keyword_request",
-        "hook_system_message",
+        "hook_system_message", "critical_system_reminder",
       ]
     ]
     got = ace.claude_exchanges(
@@ -2481,6 +2481,52 @@ class ClaudeQuals(Fixture):
       self.repo,
     )[0]
     self.assertEqual([(e.prompt, e.reply) for e in got], [("commit the work", "committed")])
+
+  # A critical_system_reminder attachment as Claude Code 2.1.332 writes
+  # it: a note the harness writes for the model. This one, the only one
+  # the stores show, holds the marker that the conversation carries
+  # content of an artifact that people other than the user wrote.
+  def carried_marker(self, **extra):
+    marker = "<artifact-content-authored-by-others/>"
+    return {
+      "type": "attachment", "attachment": {"type": "critical_system_reminder", "content": marker},
+      "rendered": [{"content": f"<system-reminder>\n{marker}\n</system-reminder>"}], "renderedRole": "system",
+      "cwd": str(self.repo), "sessionId": "cs1", "timestamp": T2, "version": "2.1.332", **extra,
+    }
+
+  def test_critical_system_reminder_in_a_subagents_transcript_not_refused(self):
+    # Replicata: a subagent's transcript as Claude Code 2.1.332 writes
+    # it, every record marked isSidechain and naming the repo as its cwd:
+    # the coordinating agent's prompt, a critical_system_reminder
+    # attachment holding the marker, and the subagent's reply. Expectata:
+    # the file yields nothing, as a subagent's transcript does, and is
+    # not refused. Resultata (2026.11.27-b): refused, citing the
+    # attachment's line, its type being one no store had shown.
+    cwd = str(self.repo)
+    aside = {"isSidechain": True, "agentId": "a61ff1c821325f4cb"}
+    path = self.path([
+      cu("Survey the repo.", ts=T1, cwd=cwd, **aside),
+      self.carried_marker(**aside),
+      {**ca([{"type": "text", "text": "Surveyed."}], ts=T3, cwd=cwd), **aside},
+    ])
+    self.assertEqual(ace.claude_exchanges(path, self.repo), ([], set()))
+
+  def test_critical_system_reminder_adds_nothing_to_the_exchange(self):
+    # Replicata: a prompt, then a critical_system_reminder attachment in
+    # the session's own file, where the 2.1.332 binary writes them too
+    # (the stores show none there yet); then the reply. Expectata: one
+    # exchange whose prompt is the typed text and whose reply is the
+    # reply; the reminder adds nothing. Resultata (2026.11.27-b):
+    # refused, the attachment being of a type no store had shown.
+    cwd = str(self.repo)
+    got = ace.claude_exchanges(
+      self.path([
+        cu("read the page", ts=T1, cwd=cwd, origin={"kind": "human"}), self.carried_marker(),
+        ca([{"type": "text", "text": "read"}], ts=T3, cwd=cwd),
+      ]),
+      self.repo,
+    )[0]
+    self.assertEqual([(e.prompt, e.reply) for e in got], [("read the page", "read")])
 
   def test_user_content_of_unseen_forms_refused(self):
     # Replicata: a user record read for the repo holds a content piece of
