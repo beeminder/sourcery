@@ -2345,6 +2345,52 @@ class ClaudeQuals(Fixture):
     )[0]
     self.assertEqual([(e.prompt, e.reply) for e in got], [("go", "done")])
 
+  def test_record_types_foreseen_in_the_binary_pass(self):
+    # Replicata: a session file read for the repo holds one record of
+    # each type no store has shown there that the Claude Code 2.1.332
+    # binary can write and whose every field its code shows to hold ids,
+    # timestamps, paths, flags, fixed words, an agent type's name or
+    # color, or, in host-row, a tool call a model's script made.
+    # Expectata: the file yields its exchange and nothing more, and no
+    # type is both foreseen and among those the stores show. Resultata
+    # (2026.11.28-a): refused at the first of them, each being a record
+    # of an unseen type.
+    cwd = str(self.repo)
+    foreseen = [
+      "agent-color", "agent-setting", "api-request-resumed", "continued-in", "dev-mods", "ended-by-model",
+      "fork-context-ref", "history-suppression", "host-row", "hybrid-organization", "isolation-latch",
+      "observer-ref", "relocated", "repl-mode", "resume-head-vouch",
+    ]
+    quiet = [{"type": kind, "sessionId": "cs1"} for kind in foreseen]
+    got = ace.claude_exchanges(
+      self.path([*quiet, cu("go", cwd=cwd), ca([{"type": "text", "text": "done"}], cwd=cwd)]), self.repo
+    )[0]
+    self.assertEqual([(e.prompt, e.reply) for e in got], [("go", "done")])
+    self.assertEqual(ace.CLAUDE_FORESEEN_RECORDS, frozenset(foreseen))
+    self.assertEqual(ace.CLAUDE_FORESEEN_RECORDS & ace.CLAUDE_RECORDS, frozenset())
+
+  def test_record_types_that_may_hold_a_persons_words_stay_refused(self):
+    # Replicata: a session file read for the repo holds a record of a
+    # type the 2.1.332 binary names that is deliberately not foreseen.
+    # content-replacement holds the first 2,000 characters of a large
+    # tool result, which can be a rejection with its typed reason;
+    # progress, which older builds wrote, typed slash-command arguments
+    # and a typed refusal; worktree-state the name typed with
+    # --worktree. The rest 2.1.332 only copies or has no code to build,
+    # so what they hold is unknown. Expectata: each refused, citing the
+    # file and that record's line, until a store shows one and it is
+    # surveyed. Resultata: as expected (2026.11.28-b); this guards the
+    # list of foreseen types against being widened to make a refusal go
+    # away.
+    cwd = str(self.repo)
+    for kind in ["content-replacement", "progress", "worktree-state", "attribution-snapshot",
+                 "data-flow-handover", "memory-mode", "summary", "tag"]:
+      with self.subTest(kind):
+        self.refused_at(
+          [{"type": kind, "sessionId": "cs1"}, cu("go", cwd=cwd), ca([{"type": "text", "text": "done"}], cwd=cwd)],
+          1, kind,
+        )
+
   def test_session_title_is_its_last_custom_title(self):
     # Replicata: a session named by a custom-title record before its
     # first prompt, stamped anew mid-session, then renamed, as /rename
@@ -2427,6 +2473,78 @@ class ClaudeQuals(Fixture):
       self.repo,
     )[0]
     self.assertEqual([(e.prompt, e.reply) for e in got], [("go", "done")])
+
+  def test_attachment_types_foreseen_in_the_binary_pass(self):
+    # Replicata: a session file read for the repo holds one attachment of
+    # each type no store has shown that the Claude Code 2.1.332 binary
+    # can write and whose every field its code shows to hold the
+    # harness's own text, numbers, ids, names and paths, the content of
+    # files and pages, the output of tools and hooks, or a model's
+    # words: nothing a person typed. Expectata: the file yields its
+    # exchange and nothing more, and no type is both foreseen and among
+    # those the stores show. Resultata (2026.11.28-a): refused at the
+    # first of them, each being of a type no store had shown.
+    cwd = str(self.repo)
+    foreseen = [
+      "advisor_stripped", "advisor_tool", "agent_ask_notice", "agent_mention", "already_read_file",
+      "artifact_opening_prefetch", "async_hook_response", "async_hook_response_batch",
+      "bash_output_audience_note", "batching_reminder", "budget_usd", "claude_app_notice",
+      "coordinator_context", "cowork_memory_context", "diagnostics", "directory", "dynamic_skill",
+      "edited_image_file", "elapsed_time_reminder", "first_week", "fork_briefing", "hook_deferred_tool",
+      "hook_permission_decision", "inlined_image_paths", "linked_plugin_tools_note", "max_turns_reached",
+      "mcp_dropped_tools_delta", "mcp_resource", "memory_update", "nested_memory", "opened_file_in_ide",
+      "output_style", "output_style_instructions", "pdf_reference", "plan_file_reference", "proactivity",
+      "progress_reminder_sent", "project_doc_reads", "prompt_render_point", "repl_mcp_needs_auth",
+      "repl_mcp_servers", "sandbox_instructions", "secondary_reminder", "secondary_reminder_sent",
+      "selected_lines_in_diff", "selected_lines_in_ide", "session_cron_carry", "skill_mention",
+      "task_reminder", "team_context", "teammate_shutdown_batch", "thinking_stripped", "thread_state",
+      "token_usage", "tool_hosts_correction", "tool_offer_record", "tool_results_cut",
+      "tool_search_usage_reminder", "ultrathink_effort", "whole_texts_withdrawn", "widget_context_hint",
+      "withheld_memory", "workflow_size_guideline_change",
+    ]
+    quiet = [
+      {"type": "attachment", "attachment": {"type": kind}, "cwd": cwd, "sessionId": "cs1", "timestamp": T0}
+      for kind in foreseen
+    ]
+    got = ace.claude_exchanges(
+      self.path([*quiet, cu("go", ts=T1, cwd=cwd), ca([{"type": "text", "text": "done"}], ts=T2, cwd=cwd)]),
+      self.repo,
+    )[0]
+    self.assertEqual([(e.prompt, e.reply) for e in got], [("go", "done")])
+    self.assertEqual(ace.CLAUDE_FORESEEN_ATTACHMENTS, frozenset(foreseen))
+    self.assertEqual(ace.CLAUDE_FORESEEN_ATTACHMENTS & ace.CLAUDE_MUTE_ATTACHMENTS, frozenset())
+
+  def test_attachment_types_that_may_hold_a_persons_words_stay_refused(self):
+    # Replicata: an attachment, its cwd in the repo, of a type the
+    # 2.1.332 binary names that is deliberately not foreseen. Some can
+    # hold a person's words: poll_events the messages people send a
+    # session, which no prompt record holds; goal_status the condition
+    # typed after /goal, which hook_success and
+    # hook_error_during_execution repeat as the prompt of the goal's
+    # hook; language the free text of the /config field; peer_mention,
+    # at_mention_reference and unknown_command_fallback pieces of the
+    # prompt. prompt_as_file says a typed prompt was saved to a file
+    # outside the transcript. plugin_note and the two tool-host notes
+    # carry text from outside Claude Code. For the rest the trace
+    # through the binary did not close, or 2.1.332 has no code that
+    # builds one. Expectata: each refused, citing the file and line,
+    # until a store shows one and it is surveyed. Resultata: as expected
+    # (2026.11.28-b); this guards the list of foreseen types against
+    # being widened to make a refusal go away.
+    for kind in [
+      "poll_events", "goal_status", "language", "peer_mention", "at_mention_reference",
+      "unknown_command_fallback", "hook_success", "hook_error_during_execution", "prompt_as_file",
+      "plugin_note", "tool_hosts_notice", "tool_host_result_lines", "hook_blocking_error", "hook_cancelled",
+      "hook_stopped_continuation", "projects_thread_ask", "context_sections", "account_memory_recall",
+      "attention_budget", "context_efficiency", "goals", "message_pdf_reads", "output_limit_note",
+      "output_token_usage", "prefix_delta", "teammate_mailbox",
+    ]:
+      with self.subTest(kind):
+        self.refused_at(
+          [{"type": "attachment", "attachment": {"type": kind}, "cwd": str(self.repo), "sessionId": "cs1",
+            "timestamp": T0}],
+          1, kind,
+        )
 
   def test_workflow_keyword_reminder_leaves_the_keyword_in_the_prompt(self):
     # Replicata: a prompt holding the keyword "ultracode", followed in the

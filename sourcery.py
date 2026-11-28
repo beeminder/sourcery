@@ -91,7 +91,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 # agent changing sourcery sets today's date with the letter after HEAD's
 # when HEAD's version is today's, else with -a, and leaves a version the
 # working tree already moved to today alone.
-VERSION = "2026.11.28-a"
+VERSION = "2026.11.28-b"
 UTC = dt.timezone.utc
 
 # The line every error message still in Latin opens with, written out in
@@ -638,6 +638,26 @@ CLAUDE_RECORDS = frozenset({
   "session-owner", "data-flow-records", "data-flow-incomplete", "derived-from",
 })
 
+# Record types the stores have not shown in session files read for a repo
+# (fork-context-ref, once, heads a subagent's file) that the Claude Code
+# 2.1.332 binary can write, admitted ahead of the stores (2026.11.28-b)
+# because its code
+# shows every field to hold ids, timestamps, paths, flags, fixed words,
+# or an agent type's name or color; host-row also holds a tool call that
+# a model's script made, or the harness's stand-in for its result. The
+# binary keeps a table of every record type it reads; the rest of that
+# table stays refused: content-replacement (a copy of a large tool
+# result's start, which may be a rejection with its typed reason),
+# progress (typed slash-command arguments and refusals, in older builds),
+# worktree-state (the name typed with --worktree), and the types 2.1.332
+# only copies or never builds (attribution-snapshot, data-flow-handover,
+# memory-mode, summary, tag), whose contents its code cannot show.
+CLAUDE_FORESEEN_RECORDS = frozenset({
+  "agent-color", "agent-setting", "api-request-resumed", "continued-in", "dev-mods", "ended-by-model",
+  "fork-context-ref", "history-suppression", "host-row", "hybrid-organization", "isolation-latch",
+  "observer-ref", "relocated", "repl-mode", "resume-head-vouch",
+})
+
 # Attachment types the stores show that carry no typing: reminders, tool and
 # skill listings, prompt and context snapshots, mode switches, and file
 # notices. One reminder, workflow_keyword_request (from Claude Code 2.1.314
@@ -665,6 +685,41 @@ CLAUDE_MUTE_ATTACHMENTS = frozenset({
   "thinking_drop", "compact_file_reference", "invoked_skills", "auto_mode_exit", "ultra_effort_exit",
   "task_status", "plan_mode", "plan_mode_exit", "hook_non_blocking_error", "plan_mode_reentry",
   "workflow_keyword_request", "hook_system_message", "critical_system_reminder",
+})
+
+# Attachment types no store has shown that the Claude Code 2.1.332 binary
+# can write, admitted ahead of the stores (2026.11.28-b) because its code
+# shows every field to hold the harness's own text, numbers, ids, names
+# and paths, the content of files, pages and memories, the output of
+# tools, hooks and MCP servers, or a model's words (its tool calls, its
+# tasks, the prompts it scheduled). The binary keeps a table of every
+# attachment type and who writes it; the rest of that table stays refused
+# because some field may hold a person's words: poll_events (messages
+# people send the session, which no prompt record holds), goal_status (the
+# condition typed after /goal, which hook_success and
+# hook_error_during_execution repeat as the goal hook's prompt), language
+# (the /config field's free text), peer_mention, at_mention_reference and
+# unknown_command_fallback (pieces of the prompt), prompt_as_file (a typed
+# prompt saved to a file outside the transcript), and plugin_note,
+# tool_hosts_notice and tool_host_result_lines (text from outside Claude
+# Code); or because the trace did not close (hook_blocking_error,
+# hook_cancelled, hook_stopped_continuation, projects_thread_ask,
+# context_sections), or because 2.1.332 has no code that builds one.
+CLAUDE_FORESEEN_ATTACHMENTS = frozenset({
+  "advisor_stripped", "advisor_tool", "agent_ask_notice", "agent_mention", "already_read_file",
+  "artifact_opening_prefetch", "async_hook_response", "async_hook_response_batch", "bash_output_audience_note",
+  "batching_reminder", "budget_usd", "claude_app_notice", "coordinator_context", "cowork_memory_context",
+  "diagnostics", "directory", "dynamic_skill", "edited_image_file", "elapsed_time_reminder", "first_week",
+  "fork_briefing", "hook_deferred_tool", "hook_permission_decision", "inlined_image_paths",
+  "linked_plugin_tools_note", "max_turns_reached", "mcp_dropped_tools_delta", "mcp_resource", "memory_update",
+  "nested_memory", "opened_file_in_ide", "output_style", "output_style_instructions", "pdf_reference",
+  "plan_file_reference", "proactivity", "progress_reminder_sent", "project_doc_reads", "prompt_render_point",
+  "repl_mcp_needs_auth", "repl_mcp_servers", "sandbox_instructions", "secondary_reminder",
+  "secondary_reminder_sent", "selected_lines_in_diff", "selected_lines_in_ide", "session_cron_carry",
+  "skill_mention", "task_reminder", "team_context", "teammate_shutdown_batch", "thinking_stripped",
+  "thread_state", "token_usage", "tool_hosts_correction", "tool_offer_record", "tool_results_cut",
+  "tool_search_usage_reminder", "ultrathink_effort", "whole_texts_withdrawn", "widget_context_hint",
+  "withheld_memory", "workflow_size_guideline_change",
 })
 
 # Assistant block types the stores show that carry no words for the human:
@@ -1213,16 +1268,18 @@ def claude_tool_seconds(record: Mapping[str, Any]) -> float:
 def claude_record_known(record: Mapping[str, Any]) -> bool:
   """Whether a record is of a type the stores show: an attachment of a
   type they show, a custom-title in the shape they show, or another
-  record of a type in CLAUDE_RECORDS."""
+  record of a type in CLAUDE_RECORDS; or one of a type the binary was
+  shown to write without a person's words (CLAUDE_FORESEEN_ATTACHMENTS,
+  CLAUDE_FORESEEN_RECORDS)."""
   match record:
     case {"type": "attachment", "attachment": {"type": str() as kind}}:
-      return kind == "queued_command" or kind in CLAUDE_MUTE_ATTACHMENTS
+      return kind == "queued_command" or kind in CLAUDE_MUTE_ATTACHMENTS | CLAUDE_FORESEEN_ATTACHMENTS
     case {"type": "attachment"}:
       return False
     case {"type": "custom-title", "customTitle": str(), "sessionId": str()}:
       return True
     case {"type": str() as kind}:
-      return kind in CLAUDE_RECORDS
+      return kind in CLAUDE_RECORDS | CLAUDE_FORESEEN_RECORDS
     case _:
       return False
 
