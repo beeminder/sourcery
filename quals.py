@@ -2655,13 +2655,43 @@ class ClaudeQuals(Fixture):
     names = ["Bash", "Read", "Edit", "Write", "Workflow", "TodoWrite", "WebFetch", "ToolSearch", "WebSearch",
              "AskUserQuestion", "TaskOutput", "Artifact", "TaskStop", "Skill", "Agent", "Monitor",
              "SendUserFile", "SendMessage", "ExitPlanMode", "ScheduleWakeup", "ListAgents", "EnterPlanMode",
-             "PushNotification", "mcp__claude_ai_Claude_Docs__read"]
+             "PushNotification", "ArtifactData", "mcp__claude_ai_Claude_Docs__read"]
     records = []
     for n, name in enumerate(names):
       records.append(self.called(name, f"t{n}"))
       records.append(cu([{"type": "tool_result", "tool_use_id": f"t{n}", "content": "out"}], cwd=str(self.repo),
                         toolUseResult={"stdout": "out"}))
     self.assertEqual(ace.claude_exchanges(self.path([cu("go", cwd=str(self.repo)), *records]), self.repo)[0][0].prompt, "go")
+
+  def test_artifact_database_reads_the_stores_show_pass(self):
+    # Replicata: the agent lists a collection of a published artifact's
+    # shared database (Claude Code 2.1.332, the ArtifactData tool, action
+    # "list") and the collection holds no document: the result names the
+    # read and its collection, and lists no rows. Expectata: plumbing,
+    # the prompt before the call and the reply after it read as they are.
+    # Resultata (2026.11.20-b): refused as the result of a tool no store
+    # had shown.
+    cwd = str(self.repo)
+    call = ca([{"type": "tool_use", "id": "t1", "name": "ArtifactData",
+                "input": {"action": "list", "collection": "entries", "url": "https://claude.ai/artifact/a1"}}],
+              cwd=cwd, mid="m-t1")
+    result = cu([{"type": "tool_result", "tool_use_id": "t1", "content": "The collection holds no documents."}],
+                ts=T1, cwd=cwd, toolUseResult={"db_read": {"op": "list", "collection": "entries", "docs": []}})
+    got = ace.claude_exchanges(self.path([
+      cu("is the board empty?", cwd=cwd), call, result,
+      ca([{"type": "text", "text": "It is empty."}], ts=T2, cwd=cwd, mid="m2"),
+    ]), self.repo)[0]
+    self.assertEqual([(e.prompt, e.reply) for e in got], [("is the board empty?", "It is empty.")])
+
+  def test_reason_typed_for_rejecting_an_artifact_database_call_is_read(self):
+    # Replicata: the agent calls ArtifactData, the human rejects the call
+    # and types why. Expectata: the typed reason is a prompt, as a reason
+    # typed for rejecting any tool's call is: the one way this tool's
+    # results carry words the human typed to the agent. Resultata
+    # (2026.11.20-b): refused as the result of a tool no store had shown.
+    typed = self.rejection('The user provided the following reason for the rejection: "wrong board"')
+    got = ace.claude_exchanges(self.path([self.called("ArtifactData"), typed]), self.repo)[0]
+    self.assertEqual([e.prompt for e in got], ["wrong board"])
 
   def test_last_prompt_echo_without_a_prompt_refused(self):
     # Replicata: a session file read for the repo holds a last-prompt

@@ -82,7 +82,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 # agent changing sourcery sets today's date with the letter after HEAD's
 # when HEAD's version is today's, else with -a, and leaves a version the
 # working tree already moved to today alone.
-VERSION = "2026.11.20-b"
+VERSION = "2026.11.27-a"
 UTC = dt.timezone.utc
 
 # The line every error message still in Latin opens with, written out in
@@ -645,10 +645,17 @@ CLAUDE_MUTE_BLOCKS = frozenset({"thinking", "tool_use", "fallback"})
 # result (the server's output). SendUserMessage and Brief, the tool the
 # reply is read from, are known by name. A result of any other tool is
 # refused: a new tool might ask the human for words.
+#
+# ArtifactData (Claude Code 2.1.332) reads and writes the shared database of
+# a published artifact's page. Its rows were stored through the page by
+# whoever can open it, or written by the agent: data the page keeps, which
+# the tool never asks the human for, so they are plumbing as a file's
+# contents are. The stores show one read, of a collection holding no row.
 CLAUDE_TOOLS = frozenset({
   "Bash", "Read", "Edit", "Write", "Workflow", "TodoWrite", "WebFetch", "ToolSearch", "WebSearch",
   "AskUserQuestion", "TaskOutput", "Artifact", "TaskStop", "Skill", "Agent", "Monitor", "SendUserFile",
   "SendMessage", "ExitPlanMode", "ScheduleWakeup", "ListAgents", "EnterPlanMode", "PushNotification",
+  "ArtifactData",
   "SendUserMessage", "Brief",
 })
 
