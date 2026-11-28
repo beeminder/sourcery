@@ -223,13 +223,12 @@ Environment variables (separated by {os.pathsep!r}) for nonstandard transcript l
   AI_CHAT_ANTIGRAVITY_ROOTS
   AI_CHAT_CODEBUFF_ROOTS
 """ + (
-    # TODO: Says that, so reruns are fast, sourcery keeps what it read from
+    # Says that, so reruns are fast, sourcery keeps what it read from
     # each transcript in ~/.cache/sourcery, a file for each page; that
     # deleting a file there costs one slow run and nothing else; and that
     # the variable below names another folder to keep them in.
-    "\nUt cursus iterati celeres sint, sourcery quae ex quoque transcripto legit in ~/.cache/sourcery\n"
-    "servat, fasciculum pro quaque pagina; fasciculus ibi deletus unum cursum lentum constat, nihil aliud.\n"
-    "Variabilis ad aliud directorium eis dandum:\n"
+    "\nSourcery keeps cache files in ~/.cache/sourcery which, if you delete them, just means Sourcery runs slower until it regenerates them.\n"
+    "You can change the cache location with:\n"
     "  AI_CHAT_CACHE_ROOT\n"
   )
 
