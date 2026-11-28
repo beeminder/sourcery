@@ -9140,6 +9140,348 @@ class CliQuals(Fixture):
       "under_dir": ["expanduser", "resolve", "sys"],
     })
 
+  def test_transcript_that_grows_right_after_it_is_read_is_read_anew_next_run(self):
+    # Replicata: a run reads a transcript, and before that run has ended
+    # the session's agent appends a prompt to it. A rerun follows.
+    # Expectata: the first page lacks the prompt; the rerun reads the
+    # transcript anew and the prompt is on the page. A reading's stamp is
+    # taken before its file is read, so whatever lands in the file from
+    # then on shows in the stamp the next run takes. Resultata: as
+    # expected (2026.11.27-b); this guards the order, since a stamp taken
+    # after the read would vouch for a reading the file had outgrown.
+    self.caching()
+    self.ours()
+    reader = ace.claude_exchanges
+
+    def then_grows(target, *args, **kwargs):
+      result = reader(target, *args, **kwargs)
+      with target.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(cu("typed just after", ts=T2, cwd=str(self.repo))) + "\n")
+      return result
+
+    ace.claude_exchanges = then_grows
+    try:
+      self.run_page()
+    finally:
+      ace.claude_exchanges = reader
+    self.assertNotIn("typed just after", self.out.read_text(encoding="utf-8"))
+    self.assertEqual(self.both()[3], ["s.jsonl"])
+    self.assertIn("typed just after", self.out.read_text(encoding="utf-8"))
+
+  def test_transcript_caught_mid_append_is_read_anew_once_its_line_is_whole(self):
+    # Replicata: a run catches a transcript while Claude Code is appending
+    # a prompt to it: the last line is cut short, with no newline. Then
+    # the line is finished, and a rerun follows. Expectata: the first run
+    # reads the whole lines and none of the cut one; the rerun reads the
+    # transcript anew and the prompt is on the page, as with no cache.
+    # Resultata: as expected (2026.11.27-b).
+    self.caching()
+    path = self.ours()
+    whole = path.read_text(encoding="utf-8")
+    line = json.dumps(cu("caught mid-append", ts=T2, cwd=str(self.repo))) + "\n"
+    path.write_text(whole + line[: len(line) // 2], encoding="utf-8")
+    self.run_page()
+    self.assertNotIn("caught mid-append", self.out.read_text(encoding="utf-8"))
+    path.write_text(whole + line, encoding="utf-8")
+    code, _, _, anew = self.both()
+    self.assertEqual((code, anew), (0, ["s.jsonl"]))
+    self.assertIn("caught mid-append", self.out.read_text(encoding="utf-8"))
+
+  def test_readings_reused_stay_saved_and_those_of_vanished_transcripts_go(self):
+    # Replicata: three runs with nothing changed between them; then a
+    # transcript is deleted and another moved, and a fourth run follows.
+    # Expectata: the second and third runs read nothing anew, a reading
+    # reused being saved again; after the fourth the cache holds readings
+    # of the transcripts that run listed and of no other, so a cache
+    # never outgrows the stores. Resultata: as expected (2026.11.27-b).
+    self.caching()
+    kept = self.ours()
+    moved = self.ours("m.jsonl", "a moved prompt", "cs2")
+    gone = self.rollout()
+    self.run_page()
+    self.assertEqual((self.run_page(), self.run_page()), ([], []))
+    self.assertEqual(sorted(self.saved()["readings"]), sorted(map(str, (kept, moved, gone))))
+    gone.unlink()
+    (self.claude_root / "r").mkdir()
+    there = moved.rename(self.claude_root / "r" / "m.jsonl")
+    self.assertEqual(self.run_page(), ["m.jsonl"])
+    self.assertEqual(sorted(self.saved()["readings"]), sorted(map(str, (kept, there))))
+
+  def test_compressed_rollout_and_store_listed_twice_are_read_once_each(self):
+    # Replicata: the repo's Codex rollout compressed to .jsonl.zst, and
+    # the Claude Code store listed beside a symlink to it, so that each
+    # of its transcripts is reached by two paths; a run, then a rerun.
+    # Expectata: the first run reads each path once; the rerun reads
+    # none, and prints and writes what a run with no cache does: a
+    # reading goes by the path its transcript was reached by. Resultata:
+    # as expected (2026.11.27-b).
+    self.caching()
+    self.ours()
+    plain = self.rollout()
+    plain.with_name(plain.name + ".zst").write_bytes(zstd.compress(plain.read_bytes()))
+    plain.unlink()
+    alias = self.tmp / "claude-alias"
+    alias.symlink_to(self.claude_root)
+    self.env["AI_CHAT_CLAUDE_ROOTS"] = os.pathsep.join([str(self.claude_root), str(alias)])
+    self.assertEqual(self.run_page(), ["rollout-1.jsonl.zst", "s.jsonl", "s.jsonl"])
+    code, out, err, anew = self.both()
+    self.assertEqual((code, err, anew), (0, "", []))
+    self.assertIn("Prompts: 2", out)
+
+  def test_rollout_typed_where_the_repo_comes_to_be_is_noticed(self):
+    # Replicata: a Codex rollout of a session in a directory outside the
+    # repo, which added a file there; a run; then that directory is
+    # replaced by a symlink into the repo. The rollout never changes.
+    # Expectata: the rerun reads it anew, a path question it asked having
+    # another answer now, and its prompt joins the page with the added
+    # file's lines tallied, as with no cache. Resultata: as expected
+    # (2026.11.27-b); this holds the Codex reader's path questions to
+    # what the Claude Code reader's are held to above.
+    self.caching()
+    self.ours()
+    write_jsonl(self.codex_root / "sessions" / "2026" / "rollout-1.jsonl", [
+      cxmeta(str(self.elsewhere)), cxturn("gpt-5", str(self.elsewhere)), cxuser("codex prompt", ts=T1),
+      cxpatch({str(self.elsewhere / "d.js"): {"type": "add", "content": "x\ny\n"}}, ts=T2),
+      cxagent("codex reply", ts=T3),
+    ])
+    self.assertEqual(self.run_page(), ["rollout-1.jsonl", "s.jsonl"])
+    self.assertNotIn("codex prompt", self.out.read_text(encoding="utf-8"))
+    self.assertEqual(self.both()[3], [])
+    self.elsewhere.rmdir()
+    self.elsewhere.symlink_to(self.repo)
+    code, _, _, anew = self.both()
+    self.assertEqual((code, anew), (0, ["rollout-1.jsonl"]))
+    [row] = [row for row in ledger_rows(self.pub / f"sourcery.{LOGIN}.jsonl")[1:] if row["prompt"] == "codex prompt"]
+    self.assertEqual((row["added"], row["deleted"]), (2, 0))
+
+  def test_record_of_an_unseen_type_is_refused_once_its_directory_is_the_repos(self):
+    # Replicata: a Claude Code transcript, and in a second store a Codex
+    # rollout, each of another project and each holding a record of a
+    # type no store has shown, in a directory outside the repo; a run;
+    # then that directory is replaced by a symlink into the repo.
+    # Expectata: the first run passes over both, as a record outside the
+    # repo is no concern of its page; the rerun refuses, citing the
+    # record, exactly as a run with no cache does, for the record may now
+    # hold words typed for the repo. Resultata: as expected
+    # (2026.11.27-b); a reading that did not keep the question asked
+    # about such a record would let it by for good.
+    for agent in ("Claude Code", "Codex"):
+      with self.subTest(agent):
+        self.caching() if agent == "Claude Code" else None
+        self.ours()
+        there = str(self.elsewhere)
+        if agent == "Claude Code":
+          odd = write_jsonl(self.claude_root / "q" / "t.jsonl", [{"type": "never-seen", "cwd": there, "sessionId": "cs9"}])
+        else:
+          (self.claude_root / "q" / "t.jsonl").unlink()
+          self.elsewhere.unlink()
+          self.elsewhere.mkdir()
+          odd = write_jsonl(self.codex_root / "sessions" / "2026" / "rollout-1.jsonl",
+                            [cxmeta(there), {"type": "never-seen", "timestamp": T1, "payload": {}}])
+        self.run_page()
+        self.assertEqual(self.both()[3], [])
+        self.elsewhere.rmdir()
+        self.elsewhere.symlink_to(self.repo)
+        code, out, err, anew = self.both()
+        self.assertEqual((code, out, anew), (2, "", [odd.name]))
+        self.assertIn(f"{odd}:", err)
+
+  def test_run_refused_after_the_stores_are_read_saves_no_reading(self):
+    # Replicata: a store holding nothing of the repo's, and no ledger: a
+    # run reads every transcript and then refuses, there being no prompt
+    # to show. Then, after a good run, the repo's transcript, page and
+    # ledger are all removed, and a run refuses the same way. Expectata:
+    # the first refusal leaves no cache folder, and the later one leaves
+    # the cache byte-identical: readings are saved with the page, by a
+    # run that writes one, and by no other. Resultata: as expected
+    # (2026.11.27-b).
+    self.caching()
+    self.theirs_elsewhere()
+    code, out, _ = self.run_cli([str(self.repo), str(self.out)])
+    self.assertEqual((code, out), (2, ""))
+    self.assertFalse(self.cache_root.exists())
+    ours = self.ours()
+    self.run_page()
+    cache = self.cache_file().read_bytes()
+    for path in (ours, self.out, self.pub / f"sourcery.{LOGIN}.jsonl"):
+      path.unlink()
+    code, out, _ = self.run_cli([str(self.repo), str(self.out)])
+    self.assertEqual((code, out), (2, ""))
+    self.assertEqual(self.cache_file().read_bytes(), cache)
+
+  def test_reading_is_settled_by_the_later_of_its_files_two_times(self):
+    # Replicata: a transcript whose content was last changed an hour ago
+    # by its modification time, and whose change time is this instant, as
+    # a file's is that was just copied into place with its times kept.
+    # Runs with the clock a second short of SETTLE_NS past the change
+    # time, then exactly SETTLE_NS past it; and a run with the clock an
+    # hour slow, so that every file seems changed in the future.
+    # Expectata: no reading is saved in the first run or the last, and
+    # one is in the second: a file is settled by whichever of its two
+    # times is later, and never while the clock has yet to reach it.
+    # Resultata: as expected (2026.11.27-b).
+    self.caching()
+    path = self.ours()
+    status = path.stat()
+    os.utime(path, ns=(status.st_atime_ns, status.st_mtime_ns - 3600 * 10**9))
+    changed = path.stat().st_ctime_ns
+    self.assertGreater(changed, path.stat().st_mtime_ns)
+    for now, kept in ((changed + ace.SETTLE_NS - 10**9, 0), (changed + ace.SETTLE_NS, 1), (changed - 3600 * 10**9, 0)):
+      with self.subTest(now=now - changed):
+        ace.clock = lambda: now
+        self.run_page()
+        self.assertEqual(len(self.saved()["readings"]), kept)
+
+  def test_reading_and_audit_slot_are_the_same_in_every_process(self):
+    # Replicata: one transcript holding six sessions of the repo's, read
+    # in three Python processes, each with another hash seed, as every
+    # run of sourcery has. Expectata: the three readings are equal, and
+    # so are the transcript's audit slots: a saved reading is compared
+    # with one read anew by a later process, and a reading that came out
+    # in another order there would be refused as disagreeing with its
+    # transcript; a slot that moved from run to run would leave some
+    # readings unaudited for good. Resultata: as expected (2026.11.27-b);
+    # this guards the sorting of the sessions a reader reports, which it
+    # holds in a set, and the digest a slot is taken from.
+    path = write_jsonl(self.claude_root / "p" / "s.jsonl", [
+      record for n in range(6)
+      for record in (cu(f"prompt {n}", ts=T0, cwd=str(self.repo), session=f"session-{n}"),
+                     ca([{"type": "text", "text": f"reply {n}"}], cwd=str(self.repo), session=f"session-{n}", mid=f"m{n}"))
+    ])
+    program = (
+      "import json, sys; from pathlib import Path; import sourcery as ace\n"
+      "path, repo = Path(sys.argv[1]), Path(sys.argv[2])\n"
+      "nothing = lambda *call: None\n"
+      "reading = ace.read_anew(path, lambda file, report, queried: ace.claude_exchanges(path, repo, file, report, queried), nothing, nothing)\n"
+      "print(json.dumps([reading, ace.audit_slot(path)]))\n"
+    )
+    said = set()
+    for seed in ("1", "2", "3"):
+      done = subprocess.run(
+        [sys.executable, "-c", program, str(path), str(self.repo)], cwd=Path(ace.__file__).parent,
+        env={**os.environ, "PYTHONHASHSEED": seed}, capture_output=True, text=True,
+      )
+      self.assertEqual(done.returncode, 0, done.stderr)
+      said.add(done.stdout)
+    self.assertEqual(len(said), 1)
+    reading, slot = json.loads(said.pop())
+    self.assertEqual([session for session, _ in reading["seen"]], [f"session-{n}" for n in range(6)])
+    self.assertEqual(len(reading["exchanges"]), 6)
+    self.assertEqual(slot, ace.audit_slot(path))
+
+  # The Codex reader asks after a session's directory at five points, and
+  # at most of them it has usually asked already. Each qual below is a
+  # rollout in which one of the five is the only point to ask after the
+  # directory that changes, so that a reading which failed to keep that
+  # point's question would be reused when it no longer holds.
+
+  def collected(self):
+    """Read the stores twice, with the readings the last call saved and
+    with none; fail unless both give the same exchanges, holdings and
+    reports of sessions. Returns those reports, sorted."""
+    roots = ace.discover_roots(self.env)
+    plain_seen, cached_seen, kept = [], [], {}
+    plain = ace.collect(self.repo, roots, lambda *call: plain_seen.append(call))
+    cached = ace.collect(
+      self.repo, roots, lambda *call: cached_seen.append(call),
+      ace.Cache(self.tmp / "cache.json", self.kept, 1), lambda path, reading: kept.__setitem__(str(path), reading),
+    )
+    self.assertEqual((cached, sorted(cached_seen)), (plain, sorted(plain_seen)))
+    self.kept = json.loads(json.dumps(kept))
+    return sorted(plain_seen)
+
+  def test_rollouts_with_no_prompt_are_reported_once_their_directory_is_the_repos(self):
+    # Replicata: two Codex rollouts holding no prompt: one of a session
+    # begun in a directory outside the repo, one of a session begun in a
+    # second such directory whose one turn was in the first. The stores
+    # are read, twice; then the first directory is replaced by a symlink
+    # into the repo and they are read again. Expectata: at first neither
+    # session is reported as the repo's, and the second read reuses both
+    # readings; then both sessions are reported, with a cache as without
+    # one. Those reports are what the session canary goes by (see
+    # check_sessions). Resultata: as expected (2026.11.27-b); only the
+    # session_meta record asks after the first rollout's directory, and
+    # only the turn_context record after the second's turn.
+    self.caching()
+    other = self.tmp / "other"
+    other.mkdir()
+    one = write_jsonl(self.codex_root / "sessions" / "2026" / "rollout-1.jsonl", [cxmeta(str(self.elsewhere), sid="cx1")])
+    two = write_jsonl(self.codex_root / "sessions" / "2026" / "rollout-2.jsonl",
+                      [cxmeta(str(other), sid="cx2"), cxturn("gpt-5", str(self.elsewhere))])
+    self.kept = {}
+    self.assertEqual(self.collected(), [])
+    self.anew.clear()
+    self.assertEqual((self.collected(), self.anew), ([], ["rollout-1.jsonl", "rollout-2.jsonl"]))
+    self.elsewhere.rmdir()
+    self.elsewhere.symlink_to(self.repo)
+    self.assertEqual(self.collected(), [("Codex", "cx1", one, False), ("Codex", "cx2", two, False)])
+
+  def moving_rollout(self, *records):
+    """A rollout of a session begun in the repo whose turn was in the
+    directory elsewhere, then `records`; a run; a rerun, which must read
+    nothing anew; and elsewhere replaced by a symlink into the repo.
+    Returns the rollout's path."""
+    self.caching()
+    path = write_jsonl(self.codex_root / "sessions" / "2026" / "rollout-1.jsonl",
+                       [cxmeta(str(self.repo)), cxturn("gpt-5", str(self.elsewhere)), *records])
+    self.ours()
+    self.run_page()
+    self.assertEqual(self.both()[3], [])
+    self.elsewhere.rmdir()
+    self.elsewhere.symlink_to(self.repo)
+    return path
+
+  def test_rollouts_record_of_an_unseen_type_is_refused_once_its_turn_is_in_the_repo(self):
+    # Replicata: a rollout of a session begun in the repo, with a turn in
+    # a directory outside it and, in that turn, a record of a type no
+    # store has shown; a run; then that directory is replaced by a
+    # symlink into the repo. Expectata: the first run passes over the
+    # record; the rerun refuses, citing it, as a run with no cache does.
+    # Resultata: as expected (2026.11.27-b); the record of the unseen
+    # type is the only one to ask after the turn's directory, the session
+    # being the repo's already when the turn begins.
+    path = self.moving_rollout({"type": "never-seen", "timestamp": T1, "payload": {}})
+    code, out, err, anew = self.both()
+    self.assertEqual((code, out, anew), (2, "", ["rollout-1.jsonl"]))
+    self.assertIn(f"{path}:3\n", err)
+
+  def test_rollouts_prompt_joins_the_page_once_its_turn_is_in_the_repo(self):
+    # Replicata: a rollout of a session begun in the repo, with a turn in
+    # a directory outside it and a prompt typed in that turn; a run; then
+    # that directory is replaced by a symlink into the repo. Expectata:
+    # the first page lacks the prompt; the rerun reads the rollout anew
+    # and the prompt is on the page, as with no cache. Resultata: as
+    # expected (2026.11.27-b); the prompt is the only record to ask after
+    # the turn's directory.
+    self.moving_rollout(cxuser("codex prompt", ts=T1), cxagent("codex reply", ts=T2))
+    self.assertNotIn("codex prompt", self.out.read_text(encoding="utf-8"))
+    code, _, _, anew = self.both()
+    self.assertEqual((code, anew), (0, ["rollout-1.jsonl"]))
+    self.assertIn("codex prompt", self.out.read_text(encoding="utf-8"))
+
+  def test_rollouts_patch_is_tallied_once_its_file_lies_in_the_repo(self):
+    # Replicata: a rollout of a session in the repo that adds a file in a
+    # directory outside it; a run; then that directory is replaced by a
+    # symlink into the repo. Expectata: the first run tallies nothing for
+    # the prompt; the rerun reads the rollout anew and tallies the added
+    # file's lines, as with no cache. Resultata: as expected
+    # (2026.11.27-b); the patch is the only record to ask after that
+    # file's path.
+    self.caching()
+    write_jsonl(self.codex_root / "sessions" / "2026" / "rollout-1.jsonl", [
+      cxmeta(str(self.repo)), cxuser("codex prompt", ts=T1),
+      cxpatch({str(self.elsewhere / "d.js"): {"type": "add", "content": "x\ny\n"}}, ts=T2),
+      cxagent("codex reply", ts=T3),
+    ])
+    self.run_page()
+    rows = lambda: [(row["added"], row["deleted"]) for row in ledger_rows(self.pub / f"sourcery.{LOGIN}.jsonl")[1:]]
+    self.assertEqual(rows(), [(0, 0)])
+    self.assertEqual(self.both()[3], [])
+    self.elsewhere.rmdir()
+    self.elsewhere.symlink_to(self.repo)
+    self.assertEqual(self.both()[3], ["rollout-1.jsonl"])
+    self.assertEqual(rows(), [(2, 0)])
+
   def history(self, rng, root, audit_cycle):
     """One random history of a small store under root, as the fuzz qual
     below describes. Returns how many times it compared the two reads."""
