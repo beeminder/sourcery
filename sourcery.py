@@ -36,6 +36,14 @@ Nonstandard store locations can be supplied with path-separated environment
 variables: AI_CHAT_CLAUDE_ROOTS, AI_CHAT_CODEX_ROOTS, AI_CHAT_VSCODE_USER_ROOTS,
 AI_CHAT_ANTIGRAVITY_ROOTS, AI_CHAT_CODEBUFF_ROOTS.
 
+Reading every Claude Code and Codex transcript on the machine is most of a
+run's work, so each page keeps a cache of what every one of them gave the
+last run, and a run reads anew only the transcripts that are new or changed
+(see "reading"). The cache is a file a page in ~/.cache/sourcery, or in the
+folder AI_CHAT_CACHE_ROOT names: never beside the page, because it holds the
+paths of every project with transcripts on the machine. Deleting it costs
+one slow run and nothing else, and a change to this script discards it.
+
 Jargon: an "exchange" is one human prompt plus everything the agent said
 back before the next human prompt; "weaving" merges every store's exchanges
 into one deduplicated chronology; a "wrapper" is machine-generated text an
@@ -69,6 +77,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 import webbrowser
 # New in Python 3.14, which the script therefore needs: Codex compresses
@@ -82,7 +91,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 # agent changing sourcery sets today's date with the letter after HEAD's
 # when HEAD's version is today's, else with -a, and leaves a version the
 # working tree already moved to today alone.
-VERSION = "2026.11.27-a"
+VERSION = "2026.11.27-b"
 UTC = dt.timezone.utc
 
 # The line every error message still in Latin opens with, written out in
@@ -213,7 +222,16 @@ Environment variables (separated by {os.pathsep!r}) for nonstandard transcript l
   AI_CHAT_VSCODE_USER_ROOTS
   AI_CHAT_ANTIGRAVITY_ROOTS
   AI_CHAT_CODEBUFF_ROOTS
-"""
+""" + (
+    # TODO: Says that, so reruns are fast, sourcery keeps what it read from
+    # each transcript in ~/.cache/sourcery, a file for each page; that
+    # deleting a file there costs one slow run and nothing else; and that
+    # the variable below names another folder to keep them in.
+    "\nUt cursus iterati celeres sint, sourcery quae ex quoque transcripto legit in ~/.cache/sourcery\n"
+    "servat, fasciculum pro quaque pagina; fasciculus ibi deletus unum cursum lentum constat, nihil aliud.\n"
+    "Variabilis ad aliud directorium eis dandum:\n"
+    "  AI_CHAT_CACHE_ROOT\n"
+  )
 
 
 def parse_args(argv: Sequence[str]) -> Options:
@@ -447,6 +465,11 @@ def unpacked_lines(fh: Iterable[str], path: Path) -> Iterator[str]:
     raise UserError(f"{LATIN_PREFIX}\n" f"Transcriptum compressum resolvi non potest: {path}\n{exc}") from exc
 
 
+def unopened(path: Path, exc: OSError) -> UserError:
+  # TODO: Says this file cannot be opened.
+  return UserError(f"{LATIN_PREFIX}\n" f"Fasciculus aperiri non potest: {path}\n{exc}")
+
+
 def read_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
   try:
     # A .jsonl.zst file is a rollout Codex compressed.
@@ -460,8 +483,7 @@ def read_jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
       "Da terminali licentiam legendi hunc fasciculum et iterum curre."
     ) from exc
   except OSError as exc:
-    # TODO: Says this file cannot be opened.
-    raise UserError(f"{LATIN_PREFIX}\n" f"Fasciculus aperiri non potest: {path}\n{exc}") from exc
+    raise unopened(path, exc) from exc
   with fh:
     for line_number, line in enumerate(unpacked_lines(fh, path), start=1):
       if line == "\n":
@@ -500,9 +522,12 @@ def decode_file_uri(value: str) -> str | None:
   return path
 
 
-def under_dir(value: Any, root: Path, source: Path) -> bool:
+def under_dir(
+  value: Any, root: Path, source: Path, queried: Callable[[str, bool], None] = lambda value, answer: None
+) -> bool:
   """Whether the path a record of the transcript at source names lies
-  under root."""
+  under root. Each path looked up on disk is a "path question" (see
+  "reading"): `queried` hears it, with the answer."""
   if not isinstance(value, str) or value == "":
     return False
   path = Path(value).expanduser()
@@ -523,7 +548,9 @@ def under_dir(value: Any, root: Path, source: Path) -> bool:
       f"Via {value} sub /home iacet. Directoria transcripti prius ad exemplar incepti in hac machina "
       "rescribe, deinde iterum curre."
     )
-  return path.resolve().is_relative_to(root)
+  answer = path.resolve().is_relative_to(root)
+  queried(value, answer)
+  return answer
 
 
 # Jargon: to "tally" is to count the lines a recorded edit added and deleted;
@@ -1135,14 +1162,17 @@ def claude_images(content: Any, path: Path, line_number: int) -> tuple[str, ...]
   return tuple(uris)
 
 
-def claude_tally(record: Mapping[str, Any], repo: Path, path: Path, line_number: int) -> tuple[int, int]:
+def claude_tally(
+  record: Mapping[str, Any], repo: Path, path: Path, line_number: int,
+  queried: Callable[[str, bool], None] = lambda value, answer: None,
+) -> tuple[int, int]:
   """Tally the repo lines this record's tool result changed: edits and
   overwrites carry structuredPatch hunks, file creations carry the whole
   new content. Files outside the repo don't count, and neither do denied
   edits (their toolUseResult is the denial string, and nothing was
   written)."""
   result = record.get("toolUseResult")
-  if not isinstance(result, dict) or not under_dir(result.get("filePath"), repo, path):
+  if not isinstance(result, dict) or not under_dir(result.get("filePath"), repo, path, queried):
     return (0, 0)
   hunks = result.get("structuredPatch") or []
   lines = [line for hunk in hunks for line in hunk.get("lines") or []]
@@ -1196,6 +1226,7 @@ def claude_exchanges(
   repo: Path,
   session_file: Callable[[str, Path, int, Any], None] = lambda session, path, line_number, timestamp: None,
   session_seen: Callable[[str, bool], None] = lambda session, held: None,
+  queried: Callable[[str, bool], None] = lambda value, answer: None,
 ) -> tuple[list[Exchange], set[Holding]]:
   threads: dict[str, list[Message]] = {}
   holdings: set[Holding] = set()
@@ -1273,7 +1304,7 @@ def claude_exchanges(
     role = record.get("type")
     if not claude_record_known(record):
       unseen.append(line_number)
-      unseen_inside = unseen_inside or under_dir(record.get("cwd"), repo, path)
+      unseen_inside = unseen_inside or under_dir(record.get("cwd"), repo, path, queried)
     # A message typed while the agent was mid-turn is recorded not as a
     # user record but as a queued_command attachment; other attachment
     # kinds (todo reminders, file-edit notices, ...) are machine chatter.
@@ -1355,7 +1386,7 @@ def claude_exchanges(
         f"Recordum sine cwd, cuius pagina incerta est: {path}:{line_number}\n"
         "Forma transcripti Claude mutata videtur; claude_exchanges renovandum est."
       )
-    inside = under_dir(record.get("cwd"), repo, path)
+    inside = under_dir(record.get("cwd"), repo, path, queried)
     first_line, first_inside, first_kind = first_delivery.setdefault(delivery, (line_number, inside, kind))
     if not inside:
       continue
@@ -1408,7 +1439,7 @@ def claude_exchanges(
         max(gap, 0.0), claude_tool_seconds(record)
       )
       added, deleted = tallies.get(session, (0, 0))
-      grew = claude_tally(record, repo, path, line_number)
+      grew = claude_tally(record, repo, path, line_number, queried)
       tallies[session] = (added + grew[0], deleted + grew[1])
     is_command = False
     if role == "user":
@@ -1921,7 +1952,8 @@ def codex_payload(record: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def codex_exchanges(
-  path: Path, repo: Path, session_seen: Callable[[str, bool], None] = lambda session, held: None
+  path: Path, repo: Path, session_seen: Callable[[str, bool], None] = lambda session, held: None,
+  queried: Callable[[str, bool], None] = lambda value, answer: None,
 ) -> tuple[list[Exchange], set[Holding]]:
   session = path.stem
   holdings: set[Holding] = set()
@@ -1955,7 +1987,7 @@ def codex_exchanges(
       if previous is not None and working:
         pending += max((stamp - previous).total_seconds(), 0.0)
       previous = stamp
-    if not codex_known(record_type, payload) and under_dir(cwd, repo, path):
+    if not codex_known(record_type, payload) and under_dir(cwd, repo, path, queried):
       # TODO: Says this Codex record, at the file and line named, is of
       # a type, kind, or form no store had shown, and may hold the
       # human's words: the transcript format seems to have changed, so
@@ -1982,10 +2014,10 @@ def codex_exchanges(
           )
         session = str(payload.get("id") or session)
         cwd = payload.get("cwd") or cwd
-        attributed = attributed or under_dir(cwd, repo, path)
+        attributed = attributed or under_dir(cwd, repo, path, queried)
       case "turn_context":
         cwd = payload.get("cwd") or cwd
-        attributed = attributed or under_dir(cwd, repo, path)
+        attributed = attributed or under_dir(cwd, repo, path, queried)
         model = payload.get("model") if isinstance(payload.get("model"), str) else model
         effort = payload.get("effort") if isinstance(payload.get("effort"), str) else effort
       case "response_item" if payload.get("type") == "function_call" and payload.get("name") == CODEX_ASK_TOOL:
@@ -2007,14 +2039,14 @@ def codex_exchanges(
         # successful application is tallied.
         if kind == "patch_apply_end" and payload.get("success"):
           for changed, change in (payload.get("changes") or {}).items():
-            if under_dir(changed, repo, path):
+            if under_dir(changed, repo, path, queried):
               grew = codex_tally(change, path, line_number)
               tally = (tally[0] + grew[0], tally[1] + grew[1])
         if kind not in {"user_message", "agent_message"}:
           continue
         if kind == "user_message" and isinstance(payload.get("message"), str):
           prompted.append(payload["message"])
-        if not under_dir(cwd, repo, path):
+        if not under_dir(cwd, repo, path, queried):
           continue
         text = payload.get("message")
         if not isinstance(text, str):
@@ -3468,13 +3500,185 @@ def unread_file(path: Path, agent: str, forms: str) -> UserError:
   )
 
 
+# ------------------------------------------------------------------- readings
+
+# Jargon. A "reading" is everything one Claude Code or Codex transcript
+# gives a run, in JSON-ready form: the exchanges and holdings its reader
+# returned, the sessions the reader registered (collect's session_file) and
+# reported (session_seen), and every "path question" the reader put to
+# under_dir, each with the answer it got. Nothing else goes into one: a
+# reader reaches the world outside its transcript only through under_dir
+# (test_readers_reach_the_outside_only_through_under_dir holds both readers
+# to that). A file's "stamp" is its size and the times of its last change,
+# taken before the file is read. A page's "cache" is its readings, saved
+# from run to run in a file of its own (see cache_path).
+#
+# A saved reading is reused only while its file's stamp is what it was and
+# every path question still gets the answer it got. Any other transcript is
+# read anew, by the reader that read it before there was a cache, and one
+# that is refused leaves no reading: so a run reads with a cache what it
+# reads without one, and refuses what it refuses. Two rules guard that claim
+# against what it takes for granted:
+# - A file is "settled" once SETTLE_NS have passed since its last change. A
+#   reading is saved only of a settled file, so that where a filesystem's
+#   clock ticks coarsely, a change made in the tick the file was read in
+#   cannot hide behind an unchanged stamp (git's rule for the same hazard).
+# - Each run "audits" the saved readings in one of AUDIT_CYCLE "slots": it
+#   reads their transcripts anew although their readings could be reused,
+#   and refuses if a reading disagrees with its transcript. Every reading
+#   is thus audited once in AUDIT_CYCLE runs, and one that depends on
+#   something nobody listed shows itself instead of misinforming a page for
+#   good.
+SETTLE_NS = 2_000_000_000
+AUDIT_CYCLE = 100
+# The variable naming the folder caches are kept in, when it is not
+# ~/.cache/sourcery.
+CACHE_ROOT = "AI_CHAT_CACHE_ROOT"
+
+
+@dataclasses.dataclass(frozen=True)
+class Cache:
+  """A page's cache as one run finds it: its file, the readings it holds
+  by transcript path, and the audit slot this run checks."""
+
+  path: Path
+  readings: Mapping[str, Any]
+  turn: int
+
+
+NO_CACHE = Cache(Path(), {}, 0)
+
+
+def clock() -> int:
+  """Now, in nanoseconds since the epoch: the one clock sourcery reads,
+  and the seam quals replace."""
+  return time.time_ns()
+
+
+def stamp_of(path: Path) -> list[int]:
+  """path's stamp (see "reading"): its size, then the time its content
+  last changed and the time anything about it last did, which no ordinary
+  tool can set back. A file that is gone, as a rollout Codex compressed
+  mid-run is, is refused as one that cannot be opened."""
+  try:
+    status = path.stat()
+  except OSError as exc:
+    raise unopened(path, exc) from exc
+  return [status.st_size, status.st_mtime_ns, status.st_ctime_ns]
+
+
+def audit_slot(path: Path) -> int:
+  """The slot the reading of the transcript at path is audited in (see
+  "reading"): the same from run to run."""
+  return int.from_bytes(hashlib.sha256(str(path).encode("utf-8")).digest()[:8], "big") % AUDIT_CYCLE
+
+
+def read_anew(
+  path: Path,
+  read: Callable[
+    [Callable[[str, Path, int, Any], None], Callable[[str, bool], None], Callable[[str, bool], None]],
+    tuple[list[Exchange], set[Holding]],
+  ],
+  session_file: Callable[[str, Path, int, Any], None],
+  session_seen: Callable[[str, bool], None],
+) -> dict[str, Any]:
+  """The reading of the transcript at path, its stamp aside, as `read`
+  reads it now. `read` is given what a reader reports through: collect's
+  session_file and session_seen, which hear each call as it comes, as with
+  no cache, and the collector of path questions."""
+  queried: dict[str, bool] = {}
+  registered: dict[str, tuple[int, Any]] = {}
+  seen: list[tuple[str, bool]] = []
+
+  def file(session: str, where: Path, line_number: int, timestamp: Any) -> None:
+    # Only a session's first registration from a file can be refused (see
+    # collect's session_file), so it is all a reading keeps.
+    registered.setdefault(session, (line_number, timestamp))
+    session_file(session, where, line_number, timestamp)
+
+  def report(session: str, held: bool) -> None:
+    seen.append((session, held))
+    session_seen(session, held)
+
+  exchanges, holdings = read(file, report, queried.__setitem__)
+  # Through JSON and back, so that a reading read anew equals itself as a
+  # cache file gives it back. A reader reports its sessions from a set, in
+  # no fixed order, so they are kept sorted.
+  reading = json.loads(json.dumps({
+    "queried": queried,
+    "registered": [[session, *first] for session, first in registered.items()],
+    "seen": sorted(seen),
+    "exchanges": [freeze(exchange) for exchange in exchanges],
+    "holdings": sorted([provider, at.isoformat()] for provider, at in holdings),
+  }))
+  assert held(path, reading) == (exchanges, holdings), path
+  return reading
+
+
+def held(path: Path, reading: Mapping[str, Any]) -> tuple[list[Exchange], set[Holding]]:
+  """The exchanges and holdings a reading of the transcript at path
+  holds."""
+  return (
+    [thaw(frozen, path) for frozen in reading["exchanges"]],
+    {(provider, parse_time(at)) for provider, at in reading["holdings"]},
+  )
+
+
+def cache_path(env: Mapping[str, str], output: Path) -> Path:
+  """The file output's cache is kept in: one a page, named for a digest of
+  the page's path, in a folder of the runner's own outside every repo. A
+  cache holds the paths of every project with transcripts on the machine,
+  so nothing may be able to commit or publish it along with a page."""
+  roots = env_paths(env, CACHE_ROOT, (Path.home() / ".cache" / "sourcery",))
+  if len(roots) != 1:
+    # TODO: Says this environment variable names more than one folder,
+    # and to give it exactly one.
+    raise UserError(f"{LATIN_PREFIX}\n" f"Variabilis {CACHE_ROOT} plus quam unum directorium nominat. Unum da.")
+  return roots[0] / f"{hashlib.sha256(str(output.resolve()).encode('utf-8')).hexdigest()}.json"
+
+
+def cache_key(repo: Path) -> str:
+  """What a cache's readings were made by and for: this script, byte for
+  byte, the Python running it, and the repo. Readings saved under any
+  other key are not read."""
+  return f"{hashlib.sha256(Path(__file__).read_bytes()).hexdigest()} {sys.version} {repo}"
+
+
+def read_cache(path: Path, key: str) -> tuple[Mapping[str, Any], int]:
+  """The readings the cache file at path holds and the number of runs that
+  have saved into it: none and 0 when there is no file yet, or when it was
+  saved under another key."""
+  try:
+    text = path.read_text(encoding="utf-8")
+  except FileNotFoundError:
+    return {}, 0
+  try:
+    saved = json.loads(text)
+    sound = isinstance(saved["key"], str) and isinstance(saved["runs"], int) and isinstance(saved["readings"], dict)
+  except (ValueError, KeyError, TypeError):
+    sound = False
+  if not sound:
+    # TODO: Says this page's cache of transcript readings (the file named)
+    # is not in the form sourcery writes: to delete it and rerun, which
+    # reads every transcript anew. Nothing written.
+    raise UserError(
+      f"{LATIN_PREFIX}\n"
+      f"Thesaurus lectionum formam non habet quam sourcery scribit: {path}\n"
+      "Dele eum, deinde iterum curre: omnia transcripta denuo legentur.\nNihil scriptum est."
+    )
+  return (saved["readings"], saved["runs"]) if saved["key"] == key else ({}, 0)
+
+
 def collect(
-  repo: Path, roots: Roots, seen: Callable[[str, str, Path, bool], None] = lambda provider, session, path, held: None
+  repo: Path, roots: Roots, seen: Callable[[str, str, Path, bool], None] = lambda provider, session, path, held: None,
+  cache: Cache = NO_CACHE, keep: Callable[[Path, dict[str, Any]], None] = lambda path, reading: None,
 ) -> tuple[list[Exchange], set[Holding]]:
   """Every exchange the stores hold for the repo, unwoven, with the
   holdings: every prompt record they still hold, kept or dropped. `seen`
   hears of every session the stores hold for the repo, with its agent and
-  file and whether it holds any holding."""
+  file and whether it holds any holding. `cache` holds the readings that
+  may be reused, and `keep` hears every reading worth saving (see
+  "reading")."""
   exchanges: list[Exchange] = []
   holdings: set[Holding] = set()
 
@@ -3515,6 +3719,49 @@ def collect(
         "si alter alterius exemplar est, exemplar dele, noli coniungere. Deinde iterum curre."
       )
 
+  def consult(
+    path: Path,
+    read: Callable[..., tuple[list[Exchange], set[Holding]]],
+    session_file: Callable[[str, Path, int, Any], None],
+    session_seen: Callable[[str, bool], None],
+  ) -> None:
+    """Gather what the transcript at path holds, from its reading: the
+    saved one while it may be reused and this run does not audit it, else
+    one read anew (see "reading")."""
+    looked = clock()
+    stamp = stamp_of(path)
+    saved = cache.readings.get(str(path))
+    reusable = (
+      saved is not None
+      and saved["stamp"] == stamp
+      and all(under_dir(value, repo, path) == answer for value, answer in saved["queried"].items())
+    )
+    if reusable and audit_slot(path) != cache.turn:
+      reading = saved
+      for session, line_number, timestamp in reading["registered"]:
+        session_file(session, path, line_number, timestamp)
+      for session, was_held in reading["seen"]:
+        session_seen(session, was_held)
+    else:
+      reading = {"stamp": stamp, **read_anew(path, read, session_file, session_seen)}
+      if reusable and stamp_of(path) == stamp and reading != saved:
+        # TODO: Says a saved reading of this transcript disagrees with
+        # what the transcript reads as now, though the file's size and
+        # times are what they were when the reading was saved: the cache
+        # (its file named) has a flaw, and pages made from it may be
+        # wrong; to delete the cache file and rerun, which reads every
+        # transcript anew, and to report this.
+        raise UserError(
+          f"{LATIN_PREFIX}\n"
+          f"Lectio servata a transcripto suo dissentit, quamquam fasciculus mutatus non videtur: {path}\n"
+          f"Thesaurus lectionum vitium habet: {cache.path}\n"
+          "Dele thesaurum, deinde iterum curre: omnia transcripta denuo legentur. Paginae ex eo factae "
+          "falsae esse possunt; rem refer."
+        )
+    if looked - max(stamp[1:]) >= SETTLE_NS:
+      keep(path, reading)
+    gather(held(path, reading))
+
   # Claude Code keeps its transcripts as .jsonl files among other files
   # of every kind (workflow artifacts, memory notes); one named past
   # ".jsonl" (compressed, say) is a transcript sourcery would not read,
@@ -3525,9 +3772,12 @@ def collect(
         if ".jsonl." in path.name and not wakatime_state(path):
           raise unread_file(path, "Claude Code", ".jsonl")
         if path.suffix == ".jsonl":
-          gather(claude_exchanges(
-            path, repo, session_file, lambda session, held: seen("Claude Code", session, path, held)
-          ))
+          consult(
+            path,
+            lambda file, report, queried: claude_exchanges(path, repo, file, report, queried),
+            session_file,
+            lambda session, held: seen("Claude Code", session, path, held),
+          )
   for root in roots.codex:
     if require_dir(root):
       for directory in codex_session_dirs(root):
@@ -3535,7 +3785,12 @@ def collect(
           for path in sorted(p for p in directory.rglob("*") if p.is_file() and p.name not in STORE_LITTER):
             if not path.name.endswith((".jsonl", ".jsonl.zst")):
               raise unread_file(path, "Codex", ".jsonl, .jsonl.zst")
-            gather(codex_exchanges(path, repo, lambda session, held: seen("Codex", session, path, held)))
+            consult(
+              path,
+              lambda file, report, queried: codex_exchanges(path, repo, report, queried),
+              lambda session, where, line_number, timestamp: None,
+              lambda session, held: seen("Codex", session, path, held),
+            )
   for root in roots.vscode:
     storage_root = root / "workspaceStorage"
     if not require_dir(root) or not storage_root.is_dir():
@@ -5232,7 +5487,17 @@ def run(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None)
     def seen(provider: str, session: str, path: Path, held: bool) -> None:
       sessions[(provider, session)] = (path, sessions.get((provider, session), (path, False))[1] or held)
 
-    fresh, holdings = collect(repo, roots, seen)
+    # The page's cache of readings: read before the stores are, and saved
+    # after the page is written, so a run that writes no page saves no
+    # reading.
+    cache_file = cache_path(environment, options.output)
+    key = cache_key(repo)
+    saved, runs = read_cache(cache_file, key)
+    readings: dict[str, Any] = {}
+    fresh, holdings = collect(
+      repo, roots, seen, Cache(cache_file, saved, runs % AUDIT_CYCLE),
+      lambda path, reading: readings.__setitem__(str(path), reading),
+    )
     credits = page_credits(options.output)
     ledgers, citations = read_ledgers(options.output, repo, remote)
     check_ledgers(options.output, login, ledgers, credits, holdings)
@@ -5289,6 +5554,8 @@ def run(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None)
     ledger = ledger_path(options.output, login)
     write_output(ledger, ledger_text(project, mine))
     write_output(options.output, page)
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    write_output(cache_file, json.dumps({"key": key, "runs": runs + 1, "readings": readings}))
     output = options.output.resolve()
     # TODO: Reports success with each path written (the runner's
     # ledger, then the page), the number of exported prompts, and how

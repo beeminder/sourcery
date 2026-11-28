@@ -16,6 +16,7 @@ import io
 import itertools
 import json
 import os
+import random
 import re
 import shutil
 import stat
@@ -5236,6 +5237,23 @@ class MarkdownQuals(Fixture):
 
 # ------------------------------------------------------------------------ CLI
 
+# How many random histories of a store the fuzz qual of the cache reads each
+# way (test_any_history_of_store_changes_reads_the_same_with_a_cache_as_without):
+# enough to take a few seconds. Raise it to run the qual long.
+FUZZ_HISTORIES = 40
+# What a reader reaches outside its transcript must be something a reading
+# keeps and a run re-asks (see sourcery.py, "reading"). These names are how
+# the script touches the filesystem, the clock, the environment, or another
+# process: modules it reaches them through, and methods that look at disk
+# or at the time.
+OUTSIDE_MODULES = frozenset({"os", "sys", "time", "subprocess", "tempfile", "webbrowser", "ctypes", "zstd"})
+OUTSIDE_METHODS = frozenset({
+  "resolve", "expanduser", "exists", "is_file", "is_dir", "is_symlink", "stat", "lstat", "samefile",
+  "read_text", "read_bytes", "write_text", "write_bytes", "iterdir", "glob", "rglob", "open", "unlink",
+  "mkdir", "home", "cwd", "absolute", "readlink", "now", "today", "utcnow",
+})
+
+
 class CliQuals(Fixture):
   def setUp(self):
     super().setUp()
@@ -5246,13 +5264,24 @@ class CliQuals(Fixture):
     self.codebuff_root = self.tmp / "codebuff"
     for root in (self.claude_root, self.codex_root, self.vscode_root, self.antigravity_root, self.codebuff_root):
       root.mkdir()
+    # The folder each page's cache of readings is kept in (see sourcery.py,
+    # "reading"): the first run that writes a page makes it.
+    self.cache_root = self.tmp / "cache"
     self.env = {
       "AI_CHAT_CLAUDE_ROOTS": str(self.claude_root),
       "AI_CHAT_CODEX_ROOTS": str(self.codex_root),
       "AI_CHAT_VSCODE_USER_ROOTS": str(self.vscode_root),
       "AI_CHAT_ANTIGRAVITY_ROOTS": str(self.antigravity_root),
       "AI_CHAT_CODEBUFF_ROOTS": str(self.codebuff_root),
+      "AI_CHAT_CACHE_ROOT": str(self.cache_root),
     }
+    # Every transcript a qual writes was changed this instant, and
+    # sourcery saves no reading of a file that fresh. By this clock, an
+    # hour fast, each is settled, so every rerun a qual makes reuses the
+    # readings the run before it saved: the reruns throughout this class
+    # hold the cache to what they held sourcery to without one.
+    self.clock = ace.clock
+    ace.clock = lambda: time.time_ns() + 3600 * 10**9
     # Fixtures are sealed with the test key; the real finder would look
     # for the application's key in the installed binary.
     self.finder = ace.antigravity_key
@@ -5264,6 +5293,7 @@ class CliQuals(Fixture):
   def tearDown(self):
     ace.antigravity_key = self.finder
     ace.gh_user = self.gh_user
+    ace.clock = self.clock
 
   def run_cli(self, argv):
     out, err = io.StringIO(), io.StringIO()
@@ -8518,6 +8548,732 @@ class CliQuals(Fixture):
       with self.subTest(name):
         _, page = self.generate(self.tmp / name)
         self.assertTrue(page.startswith("<!doctype html>\n"), page[:40])
+
+
+  # ----------------------------------------------------------- the cache
+  #
+  # The cache of readings: what each Claude Code and Codex transcript gave
+  # the last run, reused while nothing it depends on has changed (see
+  # sourcery.py, "reading").
+
+  def caching(self):
+    """What every cache qual starts from: a page in a folder of its own,
+    a directory outside the repo, and a watch on the two readers a
+    reading is made by, which lists in self.anew the name of every
+    transcript read anew. A qual that says which transcripts a run reads
+    anew must not have one audited by chance, as one reading in a hundred
+    is in a run, so the cycle here is longer than any qual could run
+    through; the quals about audits set their own."""
+    self.pub = self.tmp / "pub"
+    self.pub.mkdir()
+    self.out = self.pub / "out.html"
+    self.elsewhere = self.tmp / "elsewhere"
+    self.elsewhere.mkdir()
+    self.anew = []
+    for name in ("claude_exchanges", "codex_exchanges"):
+      self.addCleanup(setattr, ace, name, getattr(ace, name))
+      setattr(ace, name, self.watched(getattr(ace, name)))
+    self.addCleanup(setattr, ace, "AUDIT_CYCLE", ace.AUDIT_CYCLE)
+    ace.AUDIT_CYCLE = 2**62
+
+  def watched(self, reader):
+    def read(path, *args, **kwargs):
+      self.anew.append(path.name)
+      return reader(path, *args, **kwargs)
+    return read
+
+  def ours(self, name="s.jsonl", prompt="our prompt", session="cs1"):
+    """A Claude Code transcript of the repo's: one prompt and its reply."""
+    return write_jsonl(self.claude_root / "p" / name, [
+      cu(prompt, ts=T0, cwd=str(self.repo), session=session),
+      ca([{"type": "text", "text": "our reply"}], cwd=str(self.repo), session=session),
+    ])
+
+  def theirs_elsewhere(self, cwd=None):
+    """A Claude Code transcript of another project's: one prompt and its
+    reply, typed in the directory elsewhere."""
+    cwd = str(self.elsewhere if cwd is None else cwd)
+    return write_jsonl(self.claude_root / "q" / "t.jsonl", [
+      cu("their prompt", ts=T2, cwd=cwd, session="cs9"),
+      ca([{"type": "text", "text": "their reply"}], ts=T3, cwd=cwd, session="cs9"),
+    ])
+
+  def rollout(self):
+    return write_jsonl(self.codex_root / "sessions" / "2026" / "rollout-1.jsonl", [
+      cxmeta(str(self.repo)), cxuser("codex prompt", ts=T1), cxagent("codex reply", ts=T2),
+    ])
+
+  def run_page(self):
+    """Run for the page, expecting success. Returns the names of the
+    transcripts read anew."""
+    self.anew.clear()
+    code, _, err = self.run_cli([str(self.repo), str(self.out)])
+    self.assertEqual(code, 0, err)
+    return sorted(self.anew)
+
+  def cache_file(self):
+    [path] = self.cache_root.iterdir()
+    return path
+
+  def saved(self):
+    return json.loads(self.cache_file().read_text(encoding="utf-8"))
+
+  def both(self):
+    """Run once more with the cache, and once, from the same page and
+    ledger, with none; fail unless the two print and write the same.
+    Returns the cached run's exit code, stdout and stderr, and the names
+    of the transcripts it read anew."""
+    twin = self.tmp / "twin"
+    shutil.copytree(self.pub, twin)
+    self.anew.clear()
+    cached = self.run_cli([str(self.repo), str(self.out)])
+    anew = sorted(self.anew)
+    env, self.env = self.env, {**self.env, "AI_CHAT_CACHE_ROOT": str(self.tmp / "no-cache")}
+    try:
+      code, out, err = self.run_cli([str(self.repo), str(twin / self.out.name)])
+    finally:
+      self.env = env
+    self.assertEqual(cached, (code, out.replace(str(twin), str(self.pub)), err))
+    self.assertEqual(
+      {path.name: path.read_bytes() for path in self.pub.iterdir()},
+      {path.name: path.read_bytes() for path in twin.iterdir()},
+    )
+    shutil.rmtree(twin)
+    shutil.rmtree(self.tmp / "no-cache", ignore_errors=True)
+    return (*cached, anew)
+
+  def test_rerun_reads_no_transcript_anew_and_writes_the_same(self):
+    # Replicata: a store holding the repo's Claude Code transcript and
+    # Codex rollout and another project's transcript; a run, then a rerun
+    # with nothing changed. Expectata: the first run reads all three and
+    # saves a reading of each, and of nothing else: the Copilot session
+    # beside them is read by every run, as the stores of the other three
+    # agents are, which give a run no work worth saving. The rerun reads
+    # none of the three, and prints and writes exactly what a run with no
+    # cache does. Resultata (2026.11.27-a): every transcript on the
+    # machine read anew by every run, 9 GB of them, for a page of the 1%
+    # that were the repo's.
+    self.caching()
+    self.populate()
+    paths = [self.ours(), self.theirs_elsewhere(), self.rollout()]
+    self.assertEqual(self.run_page(), ["rollout-1.jsonl", "s.jsonl", "t.jsonl"])
+    self.assertEqual(sorted(self.saved()["readings"]), sorted(map(str, paths)))
+    code, out, err, anew = self.both()
+    self.assertEqual((code, err, anew), (0, "", []))
+    self.assertIn("Prompts: 3", out)
+    page = self.out.read_text(encoding="utf-8")
+    for text in ("our prompt", "our reply", "codex prompt", "codex reply", "copilot prompt"):
+      self.assertIn(text, page)
+    self.assertNotIn("their prompt", page)
+
+  def test_new_transcript_is_read_on_a_rerun(self):
+    # Replicata: a run; then a session of the repo's that no run has seen
+    # appears in the store. Expectata: the rerun reads that transcript,
+    # and it alone, and its prompt is on the page: the cache never says
+    # which transcripts exist. Resultata: new with the cache.
+    self.caching()
+    self.ours()
+    self.theirs_elsewhere()
+    self.run_page()
+    self.ours("new.jsonl", "a later prompt", "cs2")
+    code, _, _, anew = self.both()
+    self.assertEqual((code, anew), (0, ["new.jsonl"]))
+    self.assertIn("a later prompt", self.out.read_text(encoding="utf-8"))
+
+  def test_grown_transcript_is_read_anew_from_its_top(self):
+    # Replicata: a run; then the human types another prompt in the same
+    # session, which Claude Code appends to its transcript. Expectata: the
+    # rerun reads that transcript anew, whole, and the page gains the
+    # prompt. Resultata: new with the cache.
+    self.caching()
+    path = self.ours()
+    self.theirs_elsewhere()
+    self.run_page()
+    with path.open("a", encoding="utf-8") as fh:
+      fh.write(json.dumps(cu("and another thing", ts=T2, cwd=str(self.repo))) + "\n")
+    code, _, _, anew = self.both()
+    self.assertEqual((code, anew), (0, ["s.jsonl"]))
+    self.assertIn("and another thing", self.out.read_text(encoding="utf-8"))
+
+  def test_transcript_rewritten_to_the_same_size_is_read_anew(self):
+    # Replicata: a run; then a transcript is rewritten in place to other
+    # words of the very same length; then, in a second store, the
+    # rewritten file is also given back the modification time it had.
+    # Expectata: read anew both times, since a rewrite moves the file's
+    # change time, which no ordinary tool can set back: the page shows the
+    # new words. Resultata: new with the cache.
+    self.caching()
+    for restore in (False, True):
+      with self.subTest(restore=restore):
+        path = self.ours(prompt="our prompt")
+        self.run_page()
+        before = path.stat()
+        path.write_text(path.read_text(encoding="utf-8").replace("our prompt", "OUR PROMPT"), encoding="utf-8")
+        if restore:
+          os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+          self.assertEqual((path.stat().st_size, path.stat().st_mtime_ns), (before.st_size, before.st_mtime_ns))
+        code, _, _, anew = self.both()
+        self.assertEqual((code, anew), (0, ["s.jsonl"]))
+        self.assertIn("OUR PROMPT", self.out.read_text(encoding="utf-8"))
+        path.unlink()
+        self.out.unlink()
+        (self.pub / f"sourcery.{LOGIN}.jsonl").unlink()
+
+  def test_deleted_and_moved_transcripts_read_as_without_a_cache(self):
+    # Replicata: a run; then the repo's rollout is deleted from the store
+    # and its Claude Code transcript moved to another project folder.
+    # Expectata: as with no cache, the rollout's rows are kept from the
+    # ledger and the moved transcript is read at its new path, anew.
+    # Resultata: new with the cache.
+    self.caching()
+    path = self.ours()
+    rollout = self.rollout()
+    self.run_page()
+    rollout.unlink()
+    (self.claude_root / "r").mkdir()
+    path.rename(self.claude_root / "r" / "moved.jsonl")
+    code, out, _, anew = self.both()
+    self.assertEqual((code, anew), (0, ["moved.jsonl"]))
+    self.assertIn("Prompts: 2", out)
+
+  def test_directory_that_comes_to_lead_into_the_repo_is_noticed(self):
+    # Replicata: another project's transcript, its records typed in a
+    # directory outside the repo; a run; then that directory is replaced
+    # by a symlink into the repo, and later made a plain directory again.
+    # The transcript itself never changes. Expectata: each rerun reads it
+    # anew, because the answer to a path question it asked has changed,
+    # and prints and writes what a run with no cache does: the prompt
+    # joins the page once the directory leads into the repo. Resultata:
+    # new with the cache; a reading reused on its stamp alone would have
+    # kept the prompt off the page for good.
+    self.caching()
+    self.ours()
+    self.theirs_elsewhere()
+    self.assertEqual(self.run_page(), ["s.jsonl", "t.jsonl"])
+    self.assertEqual(self.both()[3], [])
+    self.elsewhere.rmdir()
+    self.elsewhere.symlink_to(self.repo)
+    self.assertEqual(self.both()[3], ["t.jsonl"])
+    self.assertIn("their prompt", self.out.read_text(encoding="utf-8"))
+    self.elsewhere.unlink()
+    self.elsewhere.mkdir()
+    code, out, _, anew = self.both()
+    self.assertEqual((code, anew), (0, ["t.jsonl"]))
+
+  def test_edited_file_that_comes_to_lie_in_the_repo_changes_the_tally(self):
+    # Replicata: the repo's session edits a file in a directory outside
+    # the repo; a run; then that directory is replaced by a symlink into
+    # the repo. Expectata: the rerun reads the transcript anew, since the
+    # edited file's path is a path question too, and counts the edit's
+    # lines, as with no cache. Resultata: new with the cache.
+    self.caching()
+    cwd = str(self.repo)
+    edit = {"filePath": str(self.elsewhere / "f.py"), "structuredPatch": [{"lines": ["-old", "+new", "+more"]}]}
+    write_jsonl(self.claude_root / "p" / "s.jsonl", [
+      cu("edit it", ts=T0, cwd=cwd),
+      ct("Edit", "t1", T0, cwd),
+      cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}], ts=T1, cwd=cwd, toolUseResult=edit),
+      ca([{"type": "text", "text": "Edited."}], ts=T2, cwd=cwd, mid="m2"),
+    ])
+    self.run_page()
+    [row] = ledger_rows(self.pub / f"sourcery.{LOGIN}.jsonl")[1:]
+    self.assertEqual((row["added"], row["deleted"]), (0, 0))
+    self.elsewhere.rmdir()
+    self.elsewhere.symlink_to(self.repo)
+    self.assertEqual(self.both()[3], ["s.jsonl"])
+    [row] = ledger_rows(self.pub / f"sourcery.{LOGIN}.jsonl")[1:]
+    self.assertEqual((row["added"], row["deleted"]), (2, 1))
+
+  def test_cache_saved_under_another_key_is_not_read(self):
+    # Replicata: a run; then the cache file is rewritten as one saved by
+    # another script, Python, or repo would be: its key differs, and a
+    # reading in it holds a prompt no transcript holds. Expectata: the
+    # rerun reads every transcript anew and the planted prompt is nowhere:
+    # readings are reused only by the very script that made them, for the
+    # repo they were made for. Resultata: new with the cache.
+    self.caching()
+    self.ours()
+    self.rollout()
+    self.run_page()
+    saved = self.saved()
+    self.assertIn(hashlib.sha256(Path(ace.__file__).read_bytes()).hexdigest(), saved["key"])
+    self.assertIn(sys.version, saved["key"])
+    self.assertIn(str(self.repo), saved["key"])
+    planted = json.dumps(saved).replace("our prompt", "a planted prompt")
+    self.assertNotEqual(planted, json.dumps(saved))
+    self.cache_file().write_text(json.dumps({**json.loads(planted), "key": saved["key"] + " other"}), encoding="utf-8")
+    code, _, _, anew = self.both()
+    self.assertEqual((code, anew), (0, ["rollout-1.jsonl", "s.jsonl"]))
+    self.assertNotIn("a planted prompt", self.out.read_text(encoding="utf-8"))
+    self.assertEqual(self.saved()["key"], saved["key"])
+
+  def test_refused_transcript_leaves_no_reading_and_is_refused_again(self):
+    # Replicata: a transcript of the repo's holds a record of a type no
+    # store has shown; a run, and a rerun. Then, after a good run of a
+    # sound store, the same record appears. Expectata: refused each time,
+    # citing the record; the first refusals leave no cache file, and the
+    # later one leaves the cache byte-identical: a refused transcript has
+    # no reading to reuse, so no rerun can pass over it. Resultata: new
+    # with the cache.
+    self.caching()
+    odd = [cu("our prompt", cwd=str(self.repo)), {"type": "never-seen", "cwd": str(self.repo)}]
+    path = write_jsonl(self.claude_root / "p" / "s.jsonl", odd)
+    for _ in range(2):
+      code, out, err = self.run_cli([str(self.repo), str(self.out)])
+      self.assertEqual((code, out), (2, ""))
+      self.assertIn(f"{path}:2\n", err)
+      self.assertFalse(self.cache_root.exists())
+    self.ours()
+    self.run_page()
+    cache = self.cache_file().read_bytes()
+    write_jsonl(path, odd)
+    for _ in range(2):
+      code, out, err, _ = self.both()
+      self.assertEqual((code, out), (2, ""))
+      self.assertIn(f"{path}:2\n", err)
+      self.assertEqual(self.cache_file().read_bytes(), cache)
+
+  def test_transcript_gone_before_it_is_reached_is_refused_as_unopenable(self):
+    # Replicata: a transcript is in the store when a run lists it and
+    # gone before the run reaches it, as a rollout is that Codex
+    # compresses mid-run. Expectata: exit 2 naming the file, nothing
+    # written: the refusal a transcript that cannot be opened always got.
+    # Resultata: new with the cache, which takes a file's stamp before it
+    # reads the file.
+    self.caching()
+    self.ours("a.jsonl")
+    doomed = self.ours("b.jsonl", "another prompt", "cs2")
+    reader = ace.claude_exchanges
+
+    def vanishing(path, *args, **kwargs):
+      doomed.unlink(missing_ok=True)
+      return reader(path, *args, **kwargs)
+
+    ace.claude_exchanges = vanishing
+    try:
+      code, out, err = self.run_cli([str(self.repo), str(self.out)])
+    finally:
+      ace.claude_exchanges = reader
+    self.assertEqual((code, out), (2, ""))
+    self.assertIn(f": {doomed}\n", err)
+    self.assertFalse(self.out.exists())
+
+  def test_split_session_is_refused_from_a_saved_reading(self):
+    # Replicata: a run over a session's transcript; then the session
+    # continues in a second file (see split_session), the first file
+    # unchanged, so its reading is reused. Expectata: the refusal a run
+    # with no cache gives, naming both files, each at the session's first
+    # record there with that record's timestamp: a reading keeps the
+    # registrations its transcript made. Resultata: new with the cache.
+    self.caching()
+    first, second = self.split_session()
+    continued = second.read_bytes()
+    second.unlink()
+    self.run_page()
+    second.write_bytes(continued)
+    code, out, err, anew = self.both()
+    self.assertEqual((code, out, anew), (2, "", ["cs1.jsonl"]))
+    self.assertIn(f"  {first}:1 ({T0})\n", err)
+    self.assertIn(f"  {second}:1 (2026-03-01T10:29:00.000Z)\n", err)
+
+  def test_cache_is_one_file_a_page_outside_the_pages_folder(self):
+    # Replicata: runs for two pages of one repo, in two folders, with no
+    # cache folder yet. Expectata: each page's folder holds its page and
+    # ledger and nothing else; the cache folder, made by the first run,
+    # holds one file a page, named for a digest of the page's path, and
+    # only the runner can read it. The cache holds the paths of every
+    # project with transcripts on the machine, so it must never sit
+    # where a page is committed or published from. Resultata: new with
+    # the cache.
+    self.caching()
+    self.ours()
+    self.theirs_elsewhere()
+    other = self.tmp / "pub2" / "page.html"
+    other.parent.mkdir()
+    self.assertFalse(self.cache_root.exists())
+    self.run_page()
+    self.assertEqual(self.run_cli([str(self.repo), str(other)])[0], 0)
+    self.assertEqual(sorted(path.name for path in self.pub.iterdir()), ["out.html", f"sourcery.{LOGIN}.jsonl"])
+    self.assertEqual(sorted(path.name for path in other.parent.iterdir()), ["page.html", f"sourcery.{LOGIN}.jsonl"])
+    names = sorted(hashlib.sha256(str(page).encode("utf-8")).hexdigest() + ".json" for page in (self.out, other))
+    self.assertEqual(sorted(path.name for path in self.cache_root.iterdir()), names)
+    for path in self.cache_root.iterdir():
+      self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+    self.assertIn(str(self.elsewhere), self.cache_file_of(self.out).read_text(encoding="utf-8"))
+
+  def cache_file_of(self, page):
+    return self.cache_root / (hashlib.sha256(str(page).encode("utf-8")).hexdigest() + ".json")
+
+  def test_stamp_is_a_files_size_and_both_its_times(self):
+    # Replicata: a transcript's stamp, taken twice with nothing between,
+    # then after an append. Expectata: its size in bytes, the time its
+    # content last changed, and the time anything about it last did, in
+    # that order; the same twice, another after the append. Where both
+    # times stand still the size alone tells a grown file, which is why
+    # it is part of a stamp. Resultata: new with the cache.
+    self.caching()
+    path = self.ours()
+    status = path.stat()
+    self.assertEqual(ace.stamp_of(path), [status.st_size, status.st_mtime_ns, status.st_ctime_ns])
+    self.assertEqual(ace.stamp_of(path), ace.stamp_of(path))
+    with path.open("a", encoding="utf-8") as fh:
+      fh.write("\n")
+    self.assertEqual(ace.stamp_of(path)[0], status.st_size + 1)
+
+  def test_reading_of_a_transcript_changed_moments_ago_is_not_saved(self):
+    # Replicata: a run while the clock says the transcripts were written
+    # this instant, as every transcript a qual writes was; then a rerun.
+    # The same with the clock SETTLE_NS on, less a second and then
+    # exactly. Expectata: before the settling time is up no reading is
+    # saved, and the rerun reads everything anew; from the moment it is
+    # up every reading is saved and the rerun reads nothing. On a
+    # filesystem whose clock ticks coarsely, a change made in the tick a
+    # file was read in leaves its stamp as it was; a reading of a file
+    # that fresh is therefore never kept (git's rule for the same
+    # hazard). Resultata: new with the cache.
+    self.caching()
+    self.ours()
+    self.rollout()
+    newest = max(max(p.stat().st_mtime_ns, p.stat().st_ctime_ns) for p in (self.ours(), self.rollout()))
+    for ahead, kept in ((ace.SETTLE_NS - 10**9, False), (ace.SETTLE_NS, True)):
+      with self.subTest(ahead=ahead):
+        ace.clock = lambda: newest + ahead
+        self.run_page()
+        self.assertEqual(len(self.saved()["readings"]), 2 if kept else 0)
+        self.assertEqual(self.run_page(), [] if kept else ["rollout-1.jsonl", "s.jsonl"])
+
+  def test_saved_reading_that_disagrees_with_its_transcript_is_refused(self):
+    # Replicata: a run; then a saved reading is altered so that it no
+    # longer says what its transcript does, the transcript untouched, as
+    # a reading would be that depended on something nobody listed. Every
+    # saved reading is audited on every run here. Expectata: exit 2,
+    # naming the transcript and the cache file, nothing written: a
+    # disagreement means earlier pages may be wrong, and is never
+    # papered over. Resultata: new with the cache.
+    self.caching()
+    path = self.ours()
+    self.rollout()
+    self.run_page()
+    page, ledger = self.out.read_bytes(), (self.pub / f"sourcery.{LOGIN}.jsonl").read_bytes()
+    altered = self.cache_file().read_text(encoding="utf-8").replace("our prompt", "another prompt")
+    self.cache_file().write_text(altered, encoding="utf-8")
+    ace.AUDIT_CYCLE = 1
+    code, out, err = self.run_cli([str(self.repo), str(self.out)])
+    self.assertEqual((code, out), (2, ""))
+    self.assertIn(f": {path}\n", err)
+    self.assertIn(f": {self.cache_file()}\n", err)
+    self.assertEqual((self.out.read_bytes(), (self.pub / f"sourcery.{LOGIN}.jsonl").read_bytes()), (page, ledger))
+    self.assertEqual(self.cache_file().read_text(encoding="utf-8"), altered)
+
+  def test_every_saved_reading_is_audited_once_in_each_cycle(self):
+    # Replicata: a store of ten transcripts and a cycle of four runs; a
+    # first run, then eight reruns with nothing changed. Then one saved
+    # reading is altered (see the qual above) and four more reruns
+    # follow. Expectata: each transcript is read anew in exactly one run
+    # of each cycle of four, the run of its slot, and none is refused;
+    # the altered reading passes until the run that audits its slot,
+    # which refuses, as does every run after it, the cache being left as
+    # it was: an unsound reading lasts less than one cycle, and once
+    # found it stops every run until the human deletes the cache.
+    # Resultata: new with the cache.
+    self.caching()
+    ace.AUDIT_CYCLE = 4
+    paths = [self.ours(f"s{n}.jsonl", f"prompt {n}", f"cs{n}") for n in range(10)]
+    self.assertEqual(self.run_page(), sorted(path.name for path in paths))
+    for cycle in range(2):
+      audited = [name for _ in range(4) for name in self.run_page()]
+      self.assertEqual(sorted(audited), sorted(path.name for path in paths))
+    for path in paths:
+      self.assertIn(ace.audit_slot(path), range(4))
+    self.cache_file().write_text(
+      self.cache_file().read_text(encoding="utf-8").replace("prompt 3", "prompt X"), encoding="utf-8"
+    )
+    passed = (ace.audit_slot(paths[3]) - self.saved()["runs"]) % 4
+    codes = [self.run_cli([str(self.repo), str(self.out)])[0] for _ in range(4)]
+    self.assertEqual(codes, [0] * passed + [2] * (4 - passed))
+
+  def test_audit_of_a_transcript_that_grows_while_read_is_no_disagreement(self):
+    # Replicata: a run; then, in a run that audits the saved reading, the
+    # session's agent appends a prompt to the transcript after sourcery
+    # took its stamp and before it read the file. Expectata: no refusal:
+    # the reading read anew differs from the saved one because the file
+    # changed, which its stamp, taken again, shows; the new prompt is on
+    # the page. Resultata: new with the cache.
+    self.caching()
+    path = self.ours()
+    self.run_page()
+    ace.AUDIT_CYCLE = 1
+    reader = ace.claude_exchanges
+
+    def growing(target, *args, **kwargs):
+      with target.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(cu("typed meanwhile", ts=T2, cwd=str(self.repo))) + "\n")
+      return reader(target, *args, **kwargs)
+
+    ace.claude_exchanges = growing
+    try:
+      code, _, err = self.run_cli([str(self.repo), str(self.out)])
+    finally:
+      ace.claude_exchanges = reader
+    self.assertEqual((code, err), (0, ""))
+    self.assertIn("typed meanwhile", self.out.read_text(encoding="utf-8"))
+
+  def test_cache_file_in_no_form_sourcery_writes_is_refused(self):
+    # Replicata: a run; then the page's cache file holds something
+    # sourcery never writes: no JSON, a JSON list, an object lacking its
+    # readings, one whose run count is no number. Expectata: exit 2
+    # naming the cache file, nothing written; the human deletes the file
+    # and the next run reads every transcript anew. Resultata: new with
+    # the cache.
+    self.caching()
+    self.ours()
+    self.run_page()
+    sound = self.saved()
+    page = self.out.read_bytes()
+    for garbled in ("not json", "[]", json.dumps({"key": sound["key"], "runs": 1}),
+                    json.dumps({**sound, "runs": "many"}), json.dumps({**sound, "readings": []})):
+      with self.subTest(garbled[:20]):
+        self.cache_file().write_text(garbled, encoding="utf-8")
+        code, out, err = self.run_cli([str(self.repo), str(self.out)])
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn(f"{self.cache_file()}\n", err)
+        self.assertEqual(self.out.read_bytes(), page)
+        self.assertEqual(self.cache_file().read_text(encoding="utf-8"), garbled)
+    self.cache_file().unlink()
+    self.assertEqual(self.run_page(), ["s.jsonl"])
+
+  def test_cache_folder_variable_must_name_one_folder(self):
+    # Replicata: AI_CHAT_CACHE_ROOT set to nothing, and to two folders.
+    # Expectata: exit 2 naming the variable each time, nothing written:
+    # a page has one cache. Resultata: new with the cache.
+    self.caching()
+    self.ours()
+    for value in ("", os.pathsep.join([str(self.tmp / "a"), str(self.tmp / "b")])):
+      with self.subTest(value=value):
+        self.env["AI_CHAT_CACHE_ROOT"] = value
+        code, out, err = self.run_cli([str(self.repo), str(self.out)])
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("AI_CHAT_CACHE_ROOT", err)
+        self.assertFalse(self.out.exists())
+
+  def test_help_names_the_cache_folder_and_its_variable(self):
+    code, out, _ = self.run_cli(["--help"])
+    self.assertEqual(code, 0)
+    self.assertIn("~/.cache/sourcery", out)
+    self.assertIn("\n  AI_CHAT_CACHE_ROOT\n", out)
+
+  def test_exchange_with_every_field_set_survives_its_reading(self):
+    # Replicata: a session whose one exchange has every field an exchange
+    # can: a pasted image, an answered multiple-choice question, a
+    # session title, an effort, a diffstat, working time. A run, and a
+    # rerun. Expectata: the rerun reads nothing anew and writes the page
+    # and ledger a run with no cache writes: a reading holds an exchange
+    # whole. Resultata: new with the cache.
+    self.caching()
+    cwd = str(self.repo)
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAA"}}
+    question = {"question": "Which way?", "header": "h",
+                "options": [{"label": "Left", "description": "d"}, {"label": "Right", "description": "d"}]}
+    ask = ct("AskUserQuestion", "q1", "2026-03-01T10:00:30.000Z", cwd)
+    answer = cu([{"type": "tool_result", "tool_use_id": "q1", "content": "Your questions have been answered..."}],
+                ts="2026-03-01T10:02:00.000Z", cwd=cwd,
+                toolUseResult={"questions": [question], "answers": {"Which way?": "Left"}})
+    edit = {"filePath": str(self.repo / "f.py"), "structuredPatch": [{"lines": ["-old", "+new", "+more"]}]}
+    write_jsonl(self.claude_root / "p" / "s.jsonl", [
+      cu([{"type": "text", "text": "look at this"}, image], ts=T0, cwd=cwd),
+      ca([{"type": "text", "text": "Looking."}], ts="2026-03-01T10:00:30.000Z", cwd=cwd, mid="m0", effort="high"),
+      ask, answer,
+      ct("Edit", "t1", "2026-03-01T10:02:00.000Z", cwd),
+      cu([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}], ts="2026-03-01T10:03:00.000Z", cwd=cwd,
+         toolUseResult=edit),
+      ca([{"type": "text", "text": "Done."}], ts="2026-03-01T10:04:00.000Z", cwd=cwd, mid="m9", effort="high"),
+      {"type": "custom-title", "customTitle": "A named session", "sessionId": "cs1"},
+    ])
+    self.run_page()
+    rows = ledger_rows(self.pub / f"sourcery.{LOGIN}.jsonl")[1:]
+    self.assertTrue(any(row["images"] for row in rows))
+    self.assertTrue(any(row["ballots"] for row in rows))
+    self.assertTrue(any(row["added"] for row in rows))
+    self.assertTrue(all(row["title"] == "A named session" for row in rows))
+    self.assertTrue(any(row["effort"] == "high" and row["elapsed"] > 0 for row in rows))
+    code, _, err, anew = self.both()
+    self.assertEqual((code, err, anew), (0, "", []))
+
+  def test_readers_reach_the_outside_only_through_under_dir(self):
+    # Replicata: everything the Claude Code and Codex readers can reach,
+    # followed name by name through the script: functions, classes, and
+    # constants. Expectata: none of it touches the filesystem, the clock,
+    # the environment or another process, save read_jsonl and
+    # unpacked_lines, which read the transcript itself, and under_dir,
+    # whose every look at the disk a reading keeps as a path question and
+    # a run asks again. So a reading depends on its transcript's bytes,
+    # the script, and those answers, and on nothing else. Resultata: new
+    # with the cache; a reader that came to consult anything more would
+    # have its readings reused after that thing changed, in silence, and
+    # this qual is where that shows first.
+    tree = ast.parse(Path(ace.__file__).read_text(encoding="utf-8"))
+    defined = {}
+    for node in tree.body:
+      match node:
+        case ast.FunctionDef() | ast.ClassDef():
+          defined[node.name] = node
+        case ast.Assign(targets=[ast.Name(id=name)]) | ast.AnnAssign(target=ast.Name(id=name)):
+          defined[name] = node
+    self.assertLessEqual({"claude_exchanges", "codex_exchanges", "under_dir", "read_jsonl"}, set(defined))
+    reached, queue = set(), ["claude_exchanges", "codex_exchanges"]
+    touches = {}
+    while queue:
+      name = queue.pop()
+      if name in reached:
+        continue
+      reached.add(name)
+      names = {node.id for node in ast.walk(defined[name]) if isinstance(node, ast.Name)}
+      methods = {node.attr for node in ast.walk(defined[name]) if isinstance(node, ast.Attribute)}
+      touched = sorted((names & (OUTSIDE_MODULES | {"open"})) | (methods & OUTSIDE_METHODS))
+      if touched:
+        touches[name] = touched
+      queue.extend(names & set(defined))
+    self.assertGreater(len(reached), 40)
+    self.assertEqual(touches, {
+      "read_jsonl": ["open", "zstd"],
+      "unpacked_lines": ["zstd"],
+      "under_dir": ["expanduser", "resolve", "sys"],
+    })
+
+  def history(self, rng, root, audit_cycle):
+    """One random history of a small store under root, as the fuzz qual
+    below describes. Returns how many times it compared the two reads."""
+    repo, elsewhere, link = root / "repo", root / "elsewhere", root / "link"
+    for directory in (repo, repo / "sub", elsewhere, link, root / "claude", root / "codex" / "sessions"):
+      directory.mkdir(parents=True)
+    roots = ace.discover_roots({
+      "AI_CHAT_CLAUDE_ROOTS": str(root / "claude"), "AI_CHAT_CODEX_ROOTS": str(root / "codex"),
+      "AI_CHAT_VSCODE_USER_ROOTS": str(root / "none"), "AI_CHAT_ANTIGRAVITY_ROOTS": str(root / "none"),
+      "AI_CHAT_CODEBUFF_ROOTS": str(root / "none"),
+    })
+    places = [repo, repo, repo / "sub", elsewhere, link]
+    count = itertools.count()
+
+    def stamp():
+      n = next(count)
+      return f"2026-03-01T{10 + n // 3600:02d}:{n // 60 % 60:02d}:{n % 60:02d}.000Z"
+
+    def segment(session):
+      cwd = str(rng.choice(places))
+      n = next(count)
+      match rng.randrange(8):
+        case 0 | 1 | 2:
+          return [cu(f"prompt {n}", ts=stamp(), cwd=cwd, session=session),
+                  ca([{"type": "text", "text": f"reply {n}"}], ts=stamp(), cwd=cwd, session=session, mid=f"m{n}")]
+        case 3:
+          edit = {"filePath": str(rng.choice(places) / "f.py"), "structuredPatch": [{"lines": ["-a", "+b", "+c"]}]}
+          return [ct("Edit", f"t{n}", stamp(), cwd, session),
+                  cu([{"type": "tool_result", "tool_use_id": f"t{n}", "content": "ok"}], ts=stamp(), cwd=cwd,
+                     session=session, toolUseResult=edit)]
+        case 4:
+          return [cq(f"queued {n}", stamp(), cwd, session=session)]
+        case 5:
+          return [cu(f"aside {n}", ts=stamp(), cwd=cwd, session=session, isSidechain=True)]
+        case 6:
+          return [{"type": "custom-title", "customTitle": f"title {n}", "sessionId": session}]
+        case _:
+          return [{"type": rng.choice(["never-seen", "system"]), "cwd": cwd, "sessionId": session}]
+
+    def rollout_records():
+      n = next(count)
+      cwd = str(rng.choice(places))
+      records = [cxmeta(cwd, sid=f"cx{n}"), cxuser(f"codex prompt {n}", ts=stamp()), cxagent(f"codex reply {n}", ts=stamp())]
+      return records + ([cxuser(f"codex prompt {n}b", ts=stamp())] if rng.random() < 0.3 else [])
+
+    def outcome(read):
+      seen = []
+      try:
+        exchanges, holdings = read(lambda *call: seen.append(call))
+      except ace.UserError as refusal:
+        return ("refused", str(refusal))
+      return ("read", exchanges, sorted(holdings), sorted(seen))
+
+    cache = root / "cache.json"
+    saved, turn, compared = {}, 0, 0
+    for _ in range(rng.randrange(6, 14)):
+      files = sorted((root / "claude").rglob("*.jsonl"))
+      rollouts = sorted((root / "codex").rglob("*.jsonl"))
+      match rng.randrange(12):
+        case 0 | 1 | 2:
+          session = f"cs{rng.randrange(12)}"
+          path = root / "claude" / rng.choice("pq") / f"{rng.choice('abc')}.jsonl"
+          write_jsonl(path, [record for _ in range(rng.randrange(1, 4)) for record in segment(session)])
+        case 3 | 4 if files:
+          path = rng.choice(files)
+          session = json.loads(path.read_text(encoding="utf-8").splitlines()[0]).get("sessionId", "cs0")
+          with path.open("a", encoding="utf-8") as fh:
+            fh.write("".join(json.dumps(record) + "\n" for record in segment(session)))
+        case 5 if files:
+          path = rng.choice(files)
+          text = path.read_text(encoding="utf-8")
+          path.write_text(text.replace("prompt", "PROMPT") if "prompt" in text else text.replace("PROMPT", "prompt"),
+                          encoding="utf-8")
+        case 6 if files:
+          rng.choice(files).unlink()
+        case 7 if files:
+          path = rng.choice(files)
+          target = root / "claude" / rng.choice("pq") / f"{rng.choice('abc')}.jsonl"
+          target.parent.mkdir(exist_ok=True)
+          os.replace(path, target)
+        case 8 | 9:
+          write_jsonl(root / "codex" / "sessions" / f"rollout-{rng.randrange(3)}.jsonl", rollout_records())
+        case 10:
+          if link.is_symlink():
+            link.unlink()
+            link.mkdir()
+          else:
+            link.rmdir()
+            link.symlink_to(repo)
+        case _:
+          pass
+      plain = outcome(lambda seen: ace.collect(repo, roots, seen))
+      kept = {}
+      cached = outcome(lambda seen: ace.collect(
+        repo, roots, seen, ace.Cache(cache, saved, turn % audit_cycle),
+        lambda path, reading: kept.__setitem__(str(path), reading),
+      ))
+      self.assertEqual(cached, plain)
+      compared += 1
+      if cached[0] == "read":
+        # As run() does: a run that wrote its page saves its readings,
+        # and they pass through the cache file on their way to the next.
+        saved, turn = json.loads(json.dumps(kept)), turn + 1
+    return compared
+
+  def test_any_history_of_store_changes_reads_the_same_with_a_cache_as_without(self):
+    # Replicata: forty random histories of a small store (FUZZ_HISTORIES;
+    # the same qual has been run over many thousands), each a dozen or so
+    # steps drawn from everything that happens to a store: a
+    # transcript appears, grows, is rewritten to the same size, vanishes,
+    # moves between project folders; a Codex rollout is written; a
+    # directory sessions were typed in turns into a symlink into the repo
+    # and back; nothing happens. The transcripts hold prompts typed in
+    # the repo, under it, outside it and through the symlink, edits
+    # tallied or not by where the edited file lies, queued prompts,
+    # subagent traffic, session titles, records of unseen types (refused
+    # when their file is the repo's), and sessions split across files
+    # (refused). After every step the stores are read twice: with the
+    # readings the steps before it saved, and with none. Half the
+    # histories audit one slot in a hundred, as a run does; half audit
+    # every saved reading at every step. Expectata: the two reads agree
+    # at every step of every history, in the exchanges, the holdings, the
+    # sessions reported, and the very words of any refusal; no audit ever
+    # finds a saved reading in disagreement with its transcript.
+    # Resultata: new with the cache.
+    self.caching()
+    rng = random.Random(20261127)
+    compared = 0
+    for audit_cycle in (100, 1):
+      ace.AUDIT_CYCLE = audit_cycle
+      for number in range(FUZZ_HISTORIES // 2):
+        with self.subTest(audit_cycle=audit_cycle, history=number):
+          compared += self.history(rng, self.tmp / f"history-{audit_cycle}-{number}", audit_cycle)
+    self.assertGreater(compared, 7 * FUZZ_HISTORIES)
 
 
 class IdentityQuals(unittest.TestCase):
